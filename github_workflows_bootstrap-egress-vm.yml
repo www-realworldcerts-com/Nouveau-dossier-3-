@@ -1,0 +1,112 @@
+name: Bootstrap Egress VM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap Egress VM and register runner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EGRESS_VM_SSH_KEY }}" > ~/.ssh/egress_key
+          chmod 600 ~/.ssh/egress_key
+
+      - name: Add VM to known_hosts (best-effort)
+        run: |
+          ssh-keyscan -H "${{ secrets.EGRESS_VM_HOST }}" >> ~/.ssh/known_hosts || true
+
+      - name: Create repository runner registration token
+        id: regtoken
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const res = await github.rest.actions.createRegistrationTokenForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            return res.data.token;
+
+      - name: Upload and run remote bootstrap script on VM
+        id: remote-bootstrap
+        env:
+          RUNNER_TOKEN: ${{ steps.regtoken.outputs.result }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat > bootstrap-remote.sh <<EOF
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          # Variables passed from workflow env
+          RUNNER_TOKEN="${RUNNER_TOKEN}"
+          TAILSCALE_AUTHKEY="${TAILSCALE_AUTHKEY}"
+          GH_REPO="${GH_REPO}"
+
+          # Update and install required packages
+          sudo apt-get update -y
+          sudo apt-get install -y curl jq ca-certificates tar
+
+          # Install Tailscale
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --auth-key "${TAILSCALE_AUTHKEY}" --advertise-exit-node --ssh || true
+
+          # Install GitHub Actions runner
+          RUNNER_DIR="/opt/actions-runner"
+          sudo mkdir -p "${RUNNER_DIR}"
+          sudo chown "$(whoami)":"$(whoami)" "${RUNNER_DIR}"
+          pushd "${RUNNER_DIR}"
+
+          ARCH="$(uname -m)"
+          if [ "${ARCH}" = "x86_64" ]; then
+            RUNNER_ARCH="x64"
+          elif [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+            RUNNER_ARCH="arm64"
+          else
+            RUNNER_ARCH="x64"
+          fi
+
+          # Use a pinned runner release; update if you want newer
+          RUNNER_VERSION="2.308.0"
+          TARBALL="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
+          URL="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${TARBALL}"
+
+          curl -fsSL -o "${TARBALL}" "${URL}"
+          tar xzf "${TARBALL}"
+
+          RUNNER_NAME="egress-$(hostname)-$(date +%s)"
+          ./config.sh --url "https://github.com/${GH_REPO}" --token "${RUNNER_TOKEN}" --labels "self-hosted,egress" --name "${RUNNER_NAME}" --unattended
+
+          sudo ./svc.sh install
+          sudo ./svc.sh start
+          popd
+
+          # Create /opt/egress-ip.json with the VM public IP for artifact
+          PUBLIC_IP="$(curl -fsSL https://api.ipify.org || true)"
+          sudo mkdir -p /opt
+          echo "{\"ip\": \"${PUBLIC_IP}\"}" | sudo tee /opt/egress-ip.json >/dev/null
+          sudo chown root:root /opt/egress-ip.json
+          EOF
+
+          # Copy the script to the VM and run it (note: known_hosts was populated earlier)
+          scp -i ~/.ssh/egress_key -o StrictHostKeyChecking=yes bootstrap-remote.sh "${{ secrets.EGRESS_VM_USER }}@${{ secrets.EGRESS_VM_HOST }}:/tmp/bootstrap-remote.sh"
+          ssh -i ~/.ssh/egress_key -o StrictHostKeyChecking=yes "${{ secrets.EGRESS_VM_USER }}@${{ secrets.EGRESS_VM_HOST }}" "sudo bash /tmp/bootstrap-remote.sh"
+
+      - name: Fetch egress IP file from VM
+        run: |
+          ssh -i ~/.ssh/egress_key -o StrictHostKeyChecking=yes "${{ secrets.EGRESS_VM_USER }}@${{ secrets.EGRESS_VM_HOST }}" "sudo cat /opt/egress-ip.json" > egress-ip.json
+
+      - name: Upload egress-ip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: egress-ip
+          path: egress-ip.json

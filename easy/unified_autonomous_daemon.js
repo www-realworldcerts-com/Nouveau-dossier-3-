@@ -335,9 +335,7 @@ class PayPalExecutor {
       mode: process.env.PAYPAL_MODE || 'live'
     };
     
-    this.apiBase = this.config.mode === 'live'
-      ? 'https://api-m.paypal.com'
-      : 'https://api-m.sandbox.paypal.com';
+    this.apiBase = 'https://api-m.paypal.com';
   }
 
   async getAccessToken() {

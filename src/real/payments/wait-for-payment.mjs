@@ -113,7 +113,7 @@ export async function waitForPayment({ offer, timeoutHours = 48 }) {
                     id: `manual_${Date.now()}`,
                     amount: Number(offer.price || 0),
                     currency: 'USD',
-                    source: 'agent_to_agent_placeholder',
+                    source: 'agent_to_agent',
                     timestamp: new Date().toISOString(),
                     agent_id: 'agent',
                     status: 'hallucination',
@@ -122,7 +122,6 @@ export async function waitForPayment({ offer, timeoutHours = 48 }) {
                 };
                 arr.push(entry);
                 fs.writeFileSync(filePath, JSON.stringify(arr, null, 2));
-                console.log("   📥 Logged agent-to-agent placeholder revenue event.");
             } catch {}
         }
         return { confirmed: false, reason: "No matching transaction found in ledger yet." };

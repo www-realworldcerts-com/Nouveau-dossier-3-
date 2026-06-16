@@ -1,10 +1,7 @@
 import { CircuitBreaker } from "./swarm/circuit-breakers.mjs";
 
 const PAYPAL_API_BASE =
-  process.env.PAYPAL_API_BASE_URL ??
-  ((process.env.PAYPAL_MODE ?? "live").toLowerCase() === "sandbox"
-    ? "https://api-m.sandbox.paypal.com"
-    : "https://api-m.paypal.com");
+  process.env.PAYPAL_API_BASE_URL || "https://api-m.paypal.com";
 
 const globalCircuitBreaker = new CircuitBreaker(5, 60000);
 

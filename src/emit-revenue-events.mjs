@@ -2945,7 +2945,7 @@ async function main() {
       args.recipient ??
       args.email ??
       args["recipient-email"] ??
-      (recipientType === "paypal" ? "non_owner@example.com" : recipientType === "payoneer" ? "non_owner@example.com" : null);
+      null;
     const attemptDestination =
       recipientType === "bank_wire"
         ? normalizeDestinationObject({

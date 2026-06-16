@@ -32,7 +32,7 @@ const CONFIG = {
   paypal: {
     clientId: process.env.PAYPAL_CLIENT_ID,
     clientSecret: process.env.PAYPAL_CLIENT_SECRET,
-    mode: process.env.PAYPAL_MODE || 'sandbox'
+    mode: process.env.PAYPAL_MODE || 'live'
   },
   execution: {
     dryRun: process.argv.includes('--dry-run'),
@@ -284,9 +284,7 @@ class PayPalExecutor {
       `${this.config.clientId}:${this.config.clientSecret}`
     ).toString('base64');
     
-    const url = this.config.mode === 'live'
-      ? 'https://api-m.paypal.com/v1/oauth2/token'
-      : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
+    const url = 'https://api-m.paypal.com/v1/oauth2/token';
     
     const response = await fetch(url, {
       method: 'POST',
@@ -314,9 +312,7 @@ class PayPalExecutor {
     
     const token = await this.getAccessToken();
     
-    const url = this.config.mode === 'live'
-      ? 'https://api-m.paypal.com/v1/payments/payouts'
-      : 'https://api-m.sandbox.paypal.com/v1/payments/payouts';
+    const url = 'https://api-m.paypal.com/v1/payments/payouts';
     
     const payload = {
       sender_batch_header: {

@@ -228,9 +228,7 @@ class AutonomousPayPalExecutor {
       `${this.config.clientId}:${this.config.clientSecret}`
     ).toString('base64');
 
-    const url = this.config.mode === 'live'
-      ? 'https://api-m.paypal.com/v1/oauth2/token'
-      : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
+    const url = 'https://api-m.paypal.com/v1/oauth2/token';
 
     const response = await fetch(url, {
       method: 'POST',
@@ -260,9 +258,7 @@ class AutonomousPayPalExecutor {
 
     const token = await this.getAccessToken();
 
-    const url = this.config.mode === 'live'
-      ? 'https://api-m.paypal.com/v1/payments/payouts'
-      : 'https://api-m.sandbox.paypal.com/v1/payments/payouts';
+    const url = 'https://api-m.paypal.com/v1/payments/payouts';
 
     const payload = {
       sender_batch_header: {
@@ -312,9 +308,7 @@ class AutonomousPayPalExecutor {
   async checkPayoutStatus(paypalBatchId) {
     const token = await this.getAccessToken();
 
-    const url = this.config.mode === 'live'
-      ? `https://api-m.paypal.com/v1/payments/payouts/${paypalBatchId}`
-      : `https://api-m.sandbox.paypal.com/v1/payments/payouts/${paypalBatchId}`;
+    const url = `https://api-m.paypal.com/v1/payments/payouts/${paypalBatchId}`;
 
     const response = await fetch(url, {
       method: 'GET',

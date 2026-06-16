@@ -18,7 +18,7 @@ export class FulfillmentManager {
 
         // 1. Identify Product
         const product = order.product || 'Unknown Product';
-        const customerEmail = order.customer_email || 'unknown@example.com';
+        const customerEmail = order.customer_email || 'UNKNOWN';
 
         // 2. "Deliver" (Log to persistent queue for manual/async processing)
         // In a future upgrade, this would call SendGrid/Mailgun directly.

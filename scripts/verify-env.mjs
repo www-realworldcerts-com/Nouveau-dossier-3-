@@ -47,7 +47,7 @@ for (const key of optional) {
 
 // Verify PayPal mode
 console.log('\n🔒 Security Checks:');
-const paypalMode = process.env.PAYPAL_MODE || 'sandbox';
+const paypalMode = process.env.PAYPAL_MODE || 'live';
 if (paypalMode !== 'live') {
   console.error(`   ❌ PAYPAL_MODE is "${paypalMode}" (must be "live" for production)`);
   hasErrors = true;

@@ -11,12 +11,11 @@ async function testPayPalConnection() {
 
     // Check environment
     console.log('\n📋 Configuration:');
-    const rawMode = process.env.PAYPAL_MODE || 'sandbox';
+    const rawMode = process.env.PAYPAL_MODE || 'live';
     const modeLower = String(rawMode).toLowerCase();
     const isLive = modeLower === 'live' || modeLower === 'receive_live';
     const mode = rawMode;
-    const apiBase = process.env.PAYPAL_API_BASE_URL ||
-        (modeLower === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com');
+    const apiBase = process.env.PAYPAL_API_BASE_URL || 'https://api-m.paypal.com';
 
     console.log(`   Mode: ${mode}`);
     console.log(`   API Base: ${apiBase}`);

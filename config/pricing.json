@@ -1,0 +1,35 @@
+{
+  "currency": "MAD",
+  "base_mad": 3500,
+  "tiers": {
+    "foundation": { "baseline_mad": 900, "min_mad": 500, "max_mad": 1500 },
+    "preptest": { "baseline_mad": 1500, "min_mad": 1000, "max_mad": 2500 },
+    "professional": { "baseline_mad": 2500, "min_mad": 1500, "max_mad": 3500 },
+    "certified": { "baseline_mad": 3500, "min_mad": 2500, "max_mad": 5000 },
+    "premium": { "baseline_mad": 4900, "min_mad": 4000, "max_mad": 7000 },
+    "default": { "baseline_mad": 3500, "min_mad": 2000, "max_mad": 6000 }
+  },
+  "exception_patterns": {
+    "premium_exam_boards": ["ACCA", "CFA", "PMP", "CIMA", "CIPD", "AWS", "CISCO", "CFP", "PRINCE2"],
+    "premium_title_keywords": ["advanced", "expert", "master", "premium", "executive"],
+    "baseline_band_mad": [2000, 6000],
+    "flag_awkward_prices": true
+  },
+  "rounding": {
+    "below_mad": 2000,
+    "step_below": 50,
+    "step_above": 100
+  },
+  "approval": {
+    "auto_approve_rules": true,
+    "poll_interval_ms": 30000
+  },
+  "fx": {
+    "eur_per_mad": 0.092
+  },
+  "self_improve": {
+    "min_views": 100,
+    "window_days": 30,
+    "price_cut_pct": 15
+  }
+}

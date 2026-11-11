@@ -1,0 +1,6 @@
+{"course_id":"crs_101","title":"Concours Médecine — Prépa Intensive","tier":"preptest","level":"intermediate","duration_hours":60,"price_mad":null,"price_status":"quote_required","description":"Préparation intensive au concours de médecine."}
+{"course_id":"crs_102","title":"ACCA Financial Reporting — Advanced","exam_board":"ACCA","level":"advanced","duration_hours":90,"price_mad":null,"price_status":"quote_required","description":"Advanced ACCA financial reporting preparation."}
+{"course_id":"crs_103","title":"Certified Project Manager","tier":"certified","level":"expert","duration_hours":45,"price_mad":null,"price_status":"quote_required","description":"Certified project management track."}
+{"course_id":"crs_104","title":"Foundational Digital Skills","tier":"foundation","level":"beginner","duration_hours":8,"price_mad":null,"price_status":"quote_required","description":"Foundational computer and internet skills."}
+{"course_id":"crs_105","title":"PMP Exam Mastery","exam_board":"PMP","level":"expert","duration_hours":120,"price_mad":null,"price_status":"quote_required","description":"PMP exam mastery with practice tests."}
+{"course_id":"crs_106","title":"Professional Business Writing","tier":"professional","level":"intermediate","duration_hours":20,"price_mad":2500,"price_status":"priced","description":"Professional business writing essentials."}

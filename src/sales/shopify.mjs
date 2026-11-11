@@ -30,7 +30,7 @@ function authHeaders(token) {
     };
 }
 
-async function adminRequest(settings, method, endpoint, { body, fetchImpl = globalThis.fetch, timeoutMs = 30000 } = {}) {
+export async function adminRequest(settings, method, endpoint, { body, fetchImpl = globalThis.fetch, timeoutMs = 30000 } = {}) {
     if (!settings.token) throw new Error('Shopify admin token missing (SHOPIFY_ADMIN_TOKEN)');
     const url = `https://${settings.domain}/admin/api/${settings.apiVersion}/${endpoint}`;
     let response;

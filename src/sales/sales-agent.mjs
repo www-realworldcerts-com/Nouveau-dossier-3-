@@ -20,7 +20,8 @@ import {
     priceToEur,
     resolveConfigPath,
     resolveTier,
-    roundMad
+    roundMad,
+    storePriceFor
 } from './pricing.mjs';
 import { valuateCourse } from './llm-valuation.mjs';
 import {
@@ -479,7 +480,15 @@ export class SalesAgent {
             approved: approval.approvedIds.length,
             pending_approval: approval.pendingIds.length,
             warnings: [],
-            shopify: { status: 'skipped', reason: null, created: 0, updated: 0, unchanged: 0, failed: [] },
+            shopify: {
+                status: 'skipped',
+                reason: null,
+                created: 0,
+                updated: 0,
+                unchanged: 0,
+                failed: [],
+                store_currency: String(process.env.SHOPIFY_STORE_CURRENCY || this.config.currency).toUpperCase()
+            },
             storefront: null
         };
 
@@ -490,6 +499,14 @@ export class SalesAgent {
             report.shopify.reason = 'no SHOPIFY_ADMIN_TOKEN; prices written locally only';
             report.warnings.push(report.shopify.reason);
         } else if (writes.length || skipped.length) {
+            const storeCurrency = String(process.env.SHOPIFY_STORE_CURRENCY || this.config.currency).toUpperCase();
+            try {
+                storePriceFor(1000, storeCurrency, this.config);
+            } catch (error) {
+                report.shopify.status = 'error';
+                report.shopify.reason = error.message;
+                report.warnings.push(error.message);
+            }
             try {
                 const products = await listProducts(this.shopify, { fetchImpl: this.fetchImpl });
                 const byId = new Map(approved.map(row => [row.course_id, row]));
@@ -497,10 +514,12 @@ export class SalesAgent {
                     const row = byId.get(courseId);
                     if (!row) continue;
                     try {
-                        const result = await upsertProduct({ course_id: row.course_id, title: row.title, description: '' }, row.price_mad, {
+                        const storePrice = storePriceFor(row.price_mad, storeCurrency, this.config);
+                        const result = await upsertProduct({ course_id: row.course_id, title: row.title, description: '' }, storePrice.amount, {
                             settings: this.shopify,
                             existing: products,
-                            fetchImpl: this.fetchImpl
+                            fetchImpl: this.fetchImpl,
+                            currency: storePrice.currency
                         });
                         if (result.action === 'created') report.shopify.created += 1;
                         else if (result.action === 'updated') report.shopify.updated += 1;

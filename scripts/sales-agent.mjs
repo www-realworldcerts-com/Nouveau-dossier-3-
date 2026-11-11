@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import { defaultDataDir, normalizeDecision, SalesAgent } from '../src/sales/sales-agent.mjs';
 import { readNdjson } from '../src/sales/catalog.mjs';
+import { setupShop } from '../src/sales/shopify-setup.mjs';
+import { shopifySettingsFromEnv } from '../src/sales/shopify.mjs';
 import {
     appendIntent,
     buildCheckoutIntent,
@@ -90,6 +92,7 @@ Commands:
   intent         Record a checkout_intent event (--course, --price, --session, --referrer, --source).
   funnel         Print the conversion funnel (--days 30).
   status         Print the KPI table (priced catalog, storefront, intents, orders).
+  setup-shop     Audit the Shopify shop and print the self-setup checklist (no catalog needed).
   help           Show this help.
 
 Options:
@@ -100,6 +103,8 @@ Options:
   --mock             No network: skip Shopify, deterministic pricing fallback
   --auto-approve     Approve every proposed price (founder override)
   --wait <seconds>   Poll for decision.json up to N seconds
+  --shop-domain <d>  Shopify domain for setup-shop (default SHOPIFY_STORE_DOMAIN)
+  --ensure-collection  Create the "Courses" collection when the shop is ready
   --json             Machine-readable output
 
 Environment:
@@ -172,6 +177,53 @@ async function main() {
         fs.writeFileSync(path.join(jobDir, 'decision.json'), JSON.stringify(decision, null, 2));
         if (json) printJson(decision);
         else console.log(`decision written: ${decision.decision} (${approved.length - reject.length} approved, ${reject.length} rejected)`);
+        return;
+    }
+
+    if (command === 'setup-shop') {
+        const base = shopifySettingsFromEnv();
+        const settings = {
+            ...base,
+            domain: flags['shop-domain'] || process.env.SHOPIFY_STORE_DOMAIN || base.domain
+        };
+        const report = await setupShop(settings, { ensureCollection: Boolean(flags['ensure-collection']) });
+        const reportPath = path.join(dataDir, 'ShopifySetupReport.json');
+        fs.mkdirSync(dataDir, { recursive: true });
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+        if (json) {
+            printJson(report);
+            process.exitCode = report.ready ? 0 : 2;
+            return;
+        }
+        console.log(`Shopify self-setup — ${report.domain || report.requested_domain || 'unknown shop'}`);
+        console.log(`  ready: ${report.ready ? 'YES' : 'NO'}`);
+        if (report.shop) {
+            console.log(`  shop: ${report.shop.name} (currency ${report.shop.currency}, plan ${report.shop.plan || 'unknown'})`);
+        }
+        if (report.currency) {
+            console.log(`  currency: catalog ${report.currency.catalog} → store ${report.currency.store || 'unknown'}`);
+        }
+        console.log(`  products: ${report.product_count}; password gate: ${report.storefront?.password_gate || 'unknown'}`);
+        if (report.collection) {
+            console.log(`  collection: ${report.collection.action} ${report.collection.handle || ''}`.trim());
+        }
+        if (report.blockers.length) {
+            console.log('\nBlockers:');
+            for (const blocker of report.blockers) console.log(`  - ${blocker}`);
+        }
+        if (report.warnings.length) {
+            console.log('\nWarnings:');
+            for (const warning of report.warnings) console.log(`  - ${warning}`);
+        }
+        if (report.next_step) console.log(`\nNext: ${report.next_step}`);
+        console.log('\nManual steps (Shopify does not expose these to apps):');
+        report.manual_actions.forEach((action, index) => {
+            console.log(`  ${index + 1}. ${action.title} — ${action.url}`);
+            console.log(`     ${action.why}`);
+        });
+        console.log(`\nReport: ${reportPath}`);
+        process.exitCode = report.ready ? 0 : 2;
         return;
     }
 

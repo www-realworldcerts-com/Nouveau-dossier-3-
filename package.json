@@ -9,7 +9,9 @@
     "swarm:doctor": "node scripts/swarm-doctor.mjs",
     "swarm:loop": "node ./scripts/auto-restart-loop.js",
     "sales": "node scripts/sales-agent.mjs",
-    "test:sales": "node --test test/sales.test.mjs",
+    "shopify:oauth": "node scripts/shopify-oauth.mjs",
+    "shopify:setup": "node scripts/sales-agent.mjs setup-shop",
+    "test:sales": "node --test test/sales.test.mjs test/shopify-setup.test.mjs",
     "test:loop": "node --test test/swarm-loop-health.test.mjs"
   },
   "dependencies": {

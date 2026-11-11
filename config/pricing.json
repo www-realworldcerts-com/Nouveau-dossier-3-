@@ -25,7 +25,8 @@
     "poll_interval_ms": 30000
   },
   "fx": {
-    "eur_per_mad": 0.092
+    "eur_per_mad": 0.092,
+    "usd_per_mad": 0.1
   },
   "self_improve": {
     "min_views": 100,

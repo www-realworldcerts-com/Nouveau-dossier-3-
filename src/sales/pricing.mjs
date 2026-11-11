@@ -43,7 +43,8 @@ export const DEFAULT_PRICING_CONFIG = {
         poll_interval_ms: 30000
     },
     fx: {
-        eur_per_mad: 0.092
+        eur_per_mad: 0.092,
+        usd_per_mad: 0.1
     },
     self_improve: {
         min_views: 100,
@@ -185,6 +186,29 @@ export function needsPricing(course) {
 
 export function priceToEur(priceMad, config = DEFAULT_PRICING_CONFIG) {
     return Math.round(priceMad * config.fx.eur_per_mad);
+}
+
+/**
+ * Convert a MAD catalog price into the Shopify store currency. The publisher
+ * writes this number into the variant price, so publishing MAD amounts into a
+ * USD store would overcharge by roughly 10x. Unknown currencies throw rather
+ * than guess.
+ */
+export function storePriceFor(priceMad, storeCurrency, config = DEFAULT_PRICING_CONFIG) {
+    const catalogCurrency = String(config.currency || 'MAD').toUpperCase();
+    const target = String(storeCurrency || catalogCurrency).toUpperCase();
+    const amount = Number(priceMad);
+    if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error(`Cannot convert invalid price: ${priceMad}`);
+    }
+    if (target === catalogCurrency) {
+        return { amount: Math.round(amount), currency: target, converted: false, rate: 1 };
+    }
+    const rate = config.fx?.[`${target.toLowerCase()}_per_mad`];
+    if (!Number.isFinite(rate) || rate <= 0) {
+        throw new Error(`No FX rate for ${target}; add fx.${target.toLowerCase()}_per_mad to the pricing config`);
+    }
+    return { amount: Math.round(amount * rate), currency: target, converted: true, rate };
 }
 
 /**

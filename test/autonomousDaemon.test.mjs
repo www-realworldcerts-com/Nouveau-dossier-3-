@@ -38,6 +38,24 @@ test("resolveRuntimeConfig enables auto export Payoneer from env", () => {
   }
 });
 
+test("resolveRuntimeConfig accepts legacy and current PayPal submit env names", () => {
+  const prevPayments = process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUTS;
+  const prevBatches = process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUT_BATCHES;
+  try {
+    delete process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUTS;
+    process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUT_BATCHES = "false";
+    assert.equal(resolveRuntimeConfig({}, {}).tasks.autoSubmitPayPalPayoutBatches, false);
+
+    process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUTS = "true";
+    assert.equal(resolveRuntimeConfig({}, {}).tasks.autoSubmitPayPalPayoutBatches, true);
+  } finally {
+    if (prevPayments == null) delete process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUTS;
+    else process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUTS = prevPayments;
+    if (prevBatches == null) delete process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUT_BATCHES;
+    else process.env.AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUT_BATCHES = prevBatches;
+  }
+});
+
 test("resolveRuntimeConfig reads Payoneer out dir from env", () => {
   const prev = process.env.AUTONOMOUS_PAYONEER_OUT_DIR;
   try {

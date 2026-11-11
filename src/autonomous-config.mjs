@@ -227,14 +227,21 @@ export function resolveRuntimeConfig(args, fileCfg) {
   const totp =
     args["auto-approve-totp"] ?? process.env.AUTONOMOUS_AUTO_APPROVE_TOTP ?? cfg.payout?.autoApprove?.totp ?? null;
 
+  // The env names drifted: deploy-live.ps1 and the tests use the _PAYOUT_BATCHES
+  // form, older setups use _PAYOUTS, and the deploy script also exports
+  // AUTONOMOUS_AUTO_SUBMIT_PAYPAL. Accept every alias so enabling the task does
+  // not silently depend on which spelling was documented last.
   const autoSubmitPayPalPayoutBatchesEnabled =
     args["auto-submit-paypal-payouts"] === true ||
     getEnvBool("AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUTS", false) ||
+    getEnvBool("AUTONOMOUS_AUTO_SUBMIT_PAYPAL_PAYOUT_BATCHES", false) ||
+    getEnvBool("AUTONOMOUS_AUTO_SUBMIT_PAYPAL", false) ||
     cfg.tasks?.autoSubmitPayPalPayoutBatches === true;
 
   const autoExportPayoneerPayoutBatchesEnabled =
     args["auto-export-payoneer-payouts"] === true ||
     getEnvBool("AUTONOMOUS_AUTO_EXPORT_PAYONEER_PAYOUTS", false) ||
+    getEnvBool("AUTONOMOUS_AUTO_EXPORT_PAYONEER_PAYOUT_BATCHES", false) ||
     cfg.tasks?.autoExportPayoneerPayoutBatches === true;
 
   const autoExportBankWirePayoutBatchesEnabled =

@@ -41,3 +41,9 @@ reports/
 reports/*.md
 reports/*.csv
 reports/*.pdf
+
+# autonomous sales agent runtime state
+data/sales/
+data/swarm-heartbeat.json
+data/swarm-tick-log.ndjson
+data/swarm-loop.lock

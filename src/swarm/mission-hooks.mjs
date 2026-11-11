@@ -1,4 +1,4 @@
-import { Base44Client } from '../../base44-client.mjs';
+import { Base44Client } from '../base44-client.mjs';
 import { recordSuccess } from '../ops/AutoCommitChangelog.mjs';
 
 /**

@@ -8,7 +8,7 @@
       "lastBackupAt": 0,
       "consecutiveFailures": 6,
       "freeze": {
-        "active": true,
+        "active": false,
         "since": "2026-01-04T04:51:11.384Z",
         "violations": [
           {
@@ -16,7 +16,10 @@
             "severity": "high",
             "message": "No PayPal webhooks observed"
           }
-        ]
+        ],
+        "cleared_at": "2026-11-11T22:02:58.568Z",
+        "cleared_by": "fb730a85239631b173652d4ff4",
+        "clear_reason": "stale freeze since 2026-01-04 blocking loop recovery; owner requested revival 2026-11-11"
       },
       "exportedPayoneerBatches": {},
       "optimizing": false,

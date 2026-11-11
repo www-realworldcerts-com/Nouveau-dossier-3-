@@ -2,7 +2,7 @@
 // src/marketplaces/base-marketplace.mjs
 // Base class for all marketplace integrations
 
-import { OWNER_ACCOUNTS } from '../opus/swarm_prime_directive.js';
+import { OWNER_ACCOUNTS } from '../../opus/swarm_prime_directive.js';
 
 /**
  * PSP Proof structure - REQUIRED for all revenue

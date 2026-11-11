@@ -1,0 +1,72 @@
+name: Swarm Tick
+
+# The loop had no scheduler: once the long-lived daemon stopped, nothing ever
+# restarted it and nothing recorded that it had stopped. This workflow runs the
+# bounded tick every 15 minutes, writes a heartbeat, and fails the run when the
+# heartbeat goes stale so a dead loop cannot stay silent.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swarm-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    name: Bounded swarm tick
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Preflight (doctor)
+        continue-on-error: true
+        env: &swarm_env
+          SWARM_LIVE: ${{ secrets.SWARM_LIVE }}
+          BASE44_APP_ID: ${{ secrets.BASE44_APP_ID }}
+          BASE44_SERVICE_TOKEN: ${{ secrets.BASE44_SERVICE_TOKEN }}
+          PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
+          PAYPAL_CLIENT_SECRET: ${{ secrets.PAYPAL_CLIENT_SECRET }}
+          PAYPAL_MODE: ${{ secrets.PAYPAL_MODE }}
+          AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS: ${{ secrets.AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS }}
+        run: node scripts/swarm-doctor.mjs
+
+      - name: Tick
+        continue-on-error: true
+        env: *swarm_env
+        run: node scripts/swarm-tick.mjs
+
+      - name: Verify the loop is alive
+        # Fails only when nothing has ticked for 90 minutes, i.e. the scheduler
+        # itself is broken. A tick that ran but is blocked by missing config
+        # leaves a fresh heartbeat and stays visible through the doctor step.
+        env: *swarm_env
+        run: node scripts/swarm-tick.mjs --check-only --max-silence-min 90
+
+      - name: Upload tick state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-tick-${{ github.run_id }}
+          path: |
+            data/swarm-heartbeat.json
+            data/swarm-tick-log.ndjson
+          if-no-files-found: warn
+          retention-days: 14

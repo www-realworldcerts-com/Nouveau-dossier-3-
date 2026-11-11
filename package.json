@@ -2,6 +2,16 @@
   "name": "payment-scripts",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "start": "node ./scripts/auto-restart-loop.js",
+    "swarm:tick": "node scripts/swarm-tick.mjs",
+    "swarm:tick:check": "node scripts/swarm-tick.mjs --check-only",
+    "swarm:doctor": "node scripts/swarm-doctor.mjs",
+    "swarm:loop": "node ./scripts/auto-restart-loop.js",
+    "sales": "node scripts/sales-agent.mjs",
+    "test:sales": "node --test test/sales.test.mjs",
+    "test:loop": "node --test test/swarm-loop-health.test.mjs"
+  },
   "dependencies": {
     "base64-js": "^1.5.1",
     "body-parser": "^2.2.1",

@@ -19,14 +19,16 @@ import { probePaymentWebhook } from '../src/resilience/webhook-probe.mjs';
  */
 
 function parseArgs(argv) {
-    const [command = 'help', ...rest] = argv;
+    const tokens = [...argv];
+    let command = 'help';
+    if (tokens[0] && !tokens[0].startsWith('--')) command = tokens.shift();
     const flags = {};
     const positional = [];
-    for (let i = 0; i < rest.length; i += 1) {
-        const token = rest[i];
+    for (let i = 0; i < tokens.length; i += 1) {
+        const token = tokens[i];
         if (token.startsWith('--')) {
             const key = token.slice(2);
-            const next = rest[i + 1];
+            const next = tokens[i + 1];
             if (next === undefined || next.startsWith('--')) flags[key] = true;
             else {
                 flags[key] = next;

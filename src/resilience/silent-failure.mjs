@@ -13,6 +13,7 @@ import { ProcurementStore } from '../procurement/store.mjs';
 import { evaluatePo } from '../procurement/po.mjs';
 import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
+import { storefrontVerdictHint } from './storefront-probe.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") protocol.
@@ -149,6 +150,19 @@ export const FINDING_CATALOG = {
         verification: 'A new audit entry exists within the governance window.',
         owner_action: 'Check that `audits/autonomous/` is writable and the tick is appending.',
         sla_hours: 72
+    },
+    STOREFRONT_NOT_TRANSACTIONAL: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'Storefront has no transactional runtime',
+        impact: 'The domain can answer 200 while serving static HTML from a directory with no API routes: checkout and webhook delivery are impossible, so every marketing visit is dead-end traffic.',
+        containment: 'Stop treating the live domain as a working sales channel; do not report sales readiness.',
+        obligation: 'Deploy the application build to the domain, or wire the static site to a hosted checkout/payment rail.',
+        remedy: 'Confirm which Vercel project is attached to the domain; repoint it at the application repository and root, or add hosted payment links and a reachable webhook.',
+        mitigation: 'Storefront capability probe on every tick distinguishes a static build from a working application.',
+        verification: 'The homepage exposes an application runtime and /api/webhooks/paypal returns 400 invalid_json.',
+        owner_action: 'Repoint the Vercel project serving www.realworldcerts.com at the app root, or attach a hosted checkout to the static site.',
+        sla_hours: 24
     },
     PAYPAL_UNFULFILLED_ORDERS: {
         domain: 'revenue',
@@ -372,7 +386,8 @@ export function detectSilentFailures({
     auditLatest,
     tickMonotony,
     webhookProbes,
-    paypalReconciliation
+    paypalReconciliation,
+    storefrontProbe
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -501,6 +516,18 @@ export function detectSilentFailures({
         }
     }
 
+    if (storefrontProbe && typeof storefrontProbe === 'object' && !storefrontProbe.ok) {
+        add('STOREFRONT_NOT_TRANSACTIONAL', `${storefrontProbe.url} -> ${storefrontProbe.verdict}: ${storefrontVerdictHint(storefrontProbe.verdict)}`, {
+            status: storefrontProbe.status,
+            health_status: storefrontProbe.health_status,
+            app_runtime: storefrontProbe.app_runtime,
+            api_alive: storefrontProbe.api_alive,
+            checkout_link: storefrontProbe.checkout_link,
+            verdict: storefrontProbe.verdict,
+            error: storefrontProbe.error || null
+        });
+    }
+
     const probes = webhookProbes || [];
     const failingProbes = probes.filter(probe => !probe.ok);
     if (failingProbes.length) {
@@ -535,6 +562,7 @@ export function detectSilentFailures({
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
             webhook_probes: probes,
             paypal_reconciliation: paypalReconciliation || null,
+            storefront_probe: storefrontProbe || null,
             monotony,
             duplicates: { count: duplicates.reduce((sum, row) => sum + (row.count - 1), 0), cycles: duplicates, cycle_id: duplicates.length ? 'procurement' : null }
         }
@@ -629,10 +657,11 @@ export function runSilentFailureAudit({
     write = false,
     engine = null,
     webhookProbes = [],
-    paypalReconciliation = null
+    paypalReconciliation = null,
+    storefrontProbe = null
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

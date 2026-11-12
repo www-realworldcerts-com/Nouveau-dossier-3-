@@ -17,7 +17,7 @@
     "reconcile:paypal": "node scripts/reconcile-paypal.mjs",
     "test:sales": "node --test test/sales.test.mjs test/shopify-setup.test.mjs",
     "test:procurement": "node --test test/procurement.test.mjs",
-    "test:resilience": "node --test test/redress.test.mjs test/silent-failure.test.mjs",
+    "test:resilience": "node --test test/redress.test.mjs test/silent-failure.test.mjs test/storefront-probe.test.mjs",
     "test:reconcile": "node --test test/paypal-reconciliation.test.mjs",
     "test:loop": "node --test test/swarm-loop-health.test.mjs test/tick-audit.test.mjs"
   },

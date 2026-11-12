@@ -40,6 +40,7 @@ owner authorization and is never inferred by the swarm.
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
 | `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |
+| `STOREFRONT_NOT_TRANSACTIONAL` | critical | The domain serves static HTML with no application runtime/API |
 | `PAYPAL_UNFULFILLED_ORDERS` | critical | A dry-run reconciliation finds captured orders missing from the queue |
 | `PAYPAL_RECONCILIATION_UNAVAILABLE` | medium | The reconciliation itself failed, so drift is unknown |
 
@@ -71,6 +72,18 @@ Any status other than 400 is `PAYMENT_WEBHOOK_UNREACHABLE` (critical). A bare
 `--webhook-url` with no value is a usage error (exit 1), and a non-http(s) value
 is rejected before any request is made. The probe is read-only and sends no
 order or buyer data.
+
+### Storefront capability
+
+`--storefront-url` (or `STOREFRONT_URL`) checks the live domain: it loads the
+homepage, looks for an application runtime (`_next`/`__NEXT_DATA__`) and probes
+`/api/healthz`. A 200 page with neither is `STOREFRONT_NOT_TRANSACTIONAL`
+(critical): the deployed directory has no API routes, so checkout and webhooks
+cannot work regardless of the application code elsewhere.
+
+```bash
+npm run resilience -- audit --storefront-url https://www.realworldcerts.com --fail-on high
+```
 
 ### Paid-but-unfulfilled orders
 

@@ -12,6 +12,7 @@ import {
 import { ACTION_IDS, PROMPT_GENESIS, RedressEngine } from '../src/resilience/redress.mjs';
 import { probePaymentWebhook } from '../src/resilience/webhook-probe.mjs';
 import { reconcilePayPalOrders } from '../src/real/fulfillment/paypal-reconciliation.mjs';
+import { probeStorefront } from '../src/resilience/storefront-probe.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") CLI: detect, record redress, and
@@ -102,6 +103,7 @@ Options:
   --fail-on <severity>       Exit 2 at or above this severity (default high)
   --webhook-url <url>        Probe a payment webhook (comma-separated; also PAYMENT_WEBHOOK_URL)
   --reconcile-paypal         Dry-run PayPal reconciliation and report paid-but-unfulfilled orders
+  --storefront-url <url>     Probe the storefront for an application runtime (also STOREFRONT_URL)
   --root <dir>               Repository root (default cwd)
   --file <path>              Redress state file (default data/resilience/redress.json)
 
@@ -188,6 +190,11 @@ async function main() {
             console.log('webhook probe skipped: --webhook-url was empty');
         }
         const webhookProbes = await Promise.all(webhookUrls.map(url => probePaymentWebhook(url)));
+        if (flags['storefront-url'] === true) {
+            throw new Error('--storefront-url requires a value (an absolute http(s) URL)');
+        }
+        const storefrontUrl = String(flags['storefront-url'] || process.env.STOREFRONT_URL || '').trim();
+        const storefrontProbe = storefrontUrl ? await probeStorefront(storefrontUrl) : null;
         let paypalReconciliation = null;
         if (flags['reconcile-paypal']) {
             const missing = ['PAYPAL_CLIENT_ID', 'PAYPAL_CLIENT_SECRET'].filter(name => !process.env[name]);
@@ -210,7 +217,8 @@ async function main() {
             silenceBudgetHours: Number(flags['silence-budget-hours'] || DEFAULT_SILENCE_BUDGET_HOURS),
             write: command === 'redress' || Boolean(flags.write),
             webhookProbes,
-            paypalReconciliation
+            paypalReconciliation,
+            storefrontProbe
         });
         printPlan(result, json);
         if (failOn !== 'none' && result.findings.some(finding => SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[failOn])) {

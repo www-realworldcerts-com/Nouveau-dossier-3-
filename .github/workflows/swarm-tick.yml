@@ -75,7 +75,8 @@ jobs:
           PAYPAL_MODE: ${{ secrets.PAYPAL_MODE }}
           AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS: ${{ secrets.AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS }}
           PAYMENT_WEBHOOK_URL: ${{ vars.PAYMENT_WEBHOOK_URL }}
-        run: node scripts/silent-failure.mjs audit --write --stall-days 7 --fail-on high --webhook-url "$PAYMENT_WEBHOOK_URL" --reconcile-paypal
+          STOREFRONT_URL: ${{ vars.STOREFRONT_URL }}
+        run: node scripts/silent-failure.mjs audit --write --stall-days 7 --fail-on high --webhook-url "$PAYMENT_WEBHOOK_URL" --storefront-url "$STOREFRONT_URL" --reconcile-paypal
 
       - name: Upload tick state
         if: always()

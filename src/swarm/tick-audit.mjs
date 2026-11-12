@@ -13,7 +13,7 @@ import path from 'node:path';
  * incident and the loop keeps its normal cadence.
  */
 
-export function buildTickAuditArgs({ webhookUrl = null, stallDays = 7, failOn = 'high' } = {}) {
+export function buildTickAuditArgs({ webhookUrl = null, storefrontUrl = null, stallDays = 7, failOn = 'high' } = {}) {
     const args = [
         'audit',
         '--write',
@@ -22,6 +22,7 @@ export function buildTickAuditArgs({ webhookUrl = null, stallDays = 7, failOn = 
         '--reconcile-paypal'
     ];
     if (webhookUrl) args.push('--webhook-url', String(webhookUrl));
+    if (storefrontUrl) args.push('--storefront-url', String(storefrontUrl));
     return args;
 }
 
@@ -30,12 +31,13 @@ export function runTickAudit({
     script = path.join('scripts', 'silent-failure.mjs'),
     env = process.env,
     webhookUrl = env.PAYMENT_WEBHOOK_URL || null,
+    storefrontUrl = env.STOREFRONT_URL || null,
     stallDays = 7,
     failOn = 'high',
     timeoutMs = 180000,
     stdio = 'inherit'
 } = {}) {
-    const args = buildTickAuditArgs({ webhookUrl, stallDays, failOn });
+    const args = buildTickAuditArgs({ webhookUrl, storefrontUrl, stallDays, failOn });
     const scriptPath = path.isAbsolute(script) ? script : path.join(root, script);
     return new Promise(resolve => {
         const startedAt = Date.now();

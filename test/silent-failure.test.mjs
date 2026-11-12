@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -203,6 +204,25 @@ test('webhook probe classifies reachable, undeployed, protected and unconfigured
     const unreachable = await probePaymentWebhook('https://host/api/webhooks/paypal', { fetchImpl: refused });
     assert.equal(unreachable.verdict, 'unreachable');
     assert.equal(unreachable.ok, false);
+});
+
+test('an invalid webhook URL is rejected instead of probed', async () => {
+    await assert.rejects(
+        () => probePaymentWebhook('true', { fetchImpl: async () => ({ status: 400 }) }),
+        /invalid webhook URL/
+    );
+    await assert.rejects(
+        () => probePaymentWebhook('ftp://host/webhook', { fetchImpl: async () => ({ status: 400 }) }),
+        /protocol/
+    );
+});
+
+test('a bare --webhook-url flag fails validation with a clear message', () => {
+    const cli = path.join(process.cwd(), 'scripts', 'silent-failure.mjs');
+    const run = spawnSync(process.execPath, [cli, 'audit', '--webhook-url'], { encoding: 'utf8' });
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /--webhook-url requires a value/);
+    assert.doesNotMatch(run.stdout, /true/);
 });
 
 test('a dead payment webhook is a critical silent-failure finding', () => {

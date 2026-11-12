@@ -173,10 +173,16 @@ async function main() {
     if (command === 'audit' || command === 'redress') {
         const failOn = String(flags['fail-on'] || 'high').toLowerCase();
         if (!SEVERITY_RANK[failOn] && failOn !== 'none') throw new Error(`Unknown --fail-on severity: ${failOn}`);
+        if (flags['webhook-url'] === true) {
+            throw new Error('--webhook-url requires a value (comma-separated http(s) URLs)');
+        }
         const webhookUrls = String(flags['webhook-url'] || process.env.PAYMENT_WEBHOOK_URL || '')
             .split(',')
             .map(url => url.trim())
             .filter(Boolean);
+        if (!webhookUrls.length && flags['webhook-url'] === '') {
+            console.log('webhook probe skipped: --webhook-url was empty');
+        }
         const webhookProbes = await Promise.all(webhookUrls.map(url => probePaymentWebhook(url)));
         const result = runSilentFailureAudit({
             root: flags.root || process.cwd(),

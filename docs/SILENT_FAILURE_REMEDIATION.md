@@ -65,8 +65,10 @@ npm run resilience -- audit \
   --webhook-url https://<public-host>/api/webhooks/paypal --fail-on high
 ```
 
-Any status other than 400 is `PAYMENT_WEBHOOK_UNREACHABLE` (critical). The probe
-is read-only and sends no order or buyer data.
+Any status other than 400 is `PAYMENT_WEBHOOK_UNREACHABLE` (critical). A bare
+`--webhook-url` with no value is a usage error (exit 1), and a non-http(s) value
+is rejected before any request is made. The probe is read-only and sends no
+order or buyer data.
 
 ## Redress: what "full" means here
 

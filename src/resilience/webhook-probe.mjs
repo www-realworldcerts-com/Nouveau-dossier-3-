@@ -27,13 +27,27 @@ export function classifyWebhookStatus(status, error = null) {
     return 'unexpected';
 }
 
+export function assertWebhookUrl(url) {
+    if (!url || typeof url !== 'string') throw new Error('a webhook URL is required');
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        throw new Error(`invalid webhook URL: ${JSON.stringify(url)} (expected an absolute http(s) URL)`);
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error(`invalid webhook URL protocol: ${parsed.protocol} (expected http or https)`);
+    }
+    return parsed.toString();
+}
+
 export async function probePaymentWebhook(url, { fetchImpl = globalThis.fetch, timeoutMs = 15000 } = {}) {
-    if (!url) throw new Error('a webhook URL is required');
+    const target = assertWebhookUrl(url);
     const startedAt = Date.now();
     let status = null;
     let error = null;
     try {
-        const response = await fetchImpl(url, {
+        const response = await fetchImpl(target, {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
@@ -49,7 +63,7 @@ export async function probePaymentWebhook(url, { fetchImpl = globalThis.fetch, t
     }
     const verdict = classifyWebhookStatus(status, error);
     return {
-        url,
+        url: target,
         status,
         verdict,
         ok: verdict === 'reachable',

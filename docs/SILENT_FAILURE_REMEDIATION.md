@@ -139,9 +139,24 @@ node scripts/silent-failure.mjs check-settlements   # exit 3 when frozen
 ```
 
 The sentinel runs in `.github/workflows/swarm-tick.yml` right after the loop
-liveness check. While live credentials are missing, the step is expected to
-fail: a fresh heartbeat that cannot earn is exactly the silent failure this
-protocol exists to expose.
+liveness check, and uploads `data/resilience/incidents/*.json` as evidence.
+Set the repository **variable** `PAYMENT_WEBHOOK_URL` (comma-separated for
+several hosts) to enable the P8 probe on every tick; leaving it empty skips the
+probe. While live credentials are missing, the step is expected to fail: a
+fresh heartbeat that cannot earn is exactly the silent failure this protocol
+exists to expose.
+
+Registered hosts for the P8 probe (verified 2026-11-12):
+
+```
+https://www.realworldcerts.com/api/webhooks/paypal          -> 404
+https://supply-chain-swarm.vercel.app/api/webhooks/paypal   -> 401
+https://swarm-ops-project.vercel.app/api/webhooks/paypal    -> 401
+```
+
+The `401` hosts are protected, not healthy: PayPal cannot authenticate through
+deployment protection. A probe that returns 401 must not be read as "route
+alive".
 
 ## Current limitations
 

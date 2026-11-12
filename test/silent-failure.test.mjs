@@ -307,7 +307,7 @@ test('every catalog finding has a full remediation contract', () => {
         for (const field of ['title', 'impact', 'containment', 'obligation', 'remedy', 'mitigation', 'verification', 'owner_action', 'sla_hours']) {
             assert.ok(meta[field], `${code} is missing ${field}`);
         }
-        assert.ok(['low', 'medium', 'high', 'critical'].includes(meta.severity), `${code} has an invalid severity`);
+        assert.ok(['low', 'warning', 'medium', 'high', 'critical'].includes(meta.severity), `${code} has an invalid severity`);
     }
     assert.ok(listMitigations().every(item => item.status === 'implemented'));
 });

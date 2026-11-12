@@ -40,7 +40,9 @@ owner authorization and is never inferred by the swarm.
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
 | `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |
-| `STOREFRONT_NOT_TRANSACTIONAL` | critical | The domain serves static HTML with no application runtime/API |
+| `STOREFRONT_NOT_TRANSACTIONAL` | critical | An origin 200 response proves static HTML with no application runtime/API |
+| `STOREFRONT_UNREACHABLE` | warning | DNS/timeout/connection failure or persistent 502/503/504 after retries |
+| `STOREFRONT_HTTP_ERROR` | warning | The origin answered with an unexpected 4xx/5xx status |
 | `PAYPAL_UNFULFILLED_ORDERS` | critical | A dry-run reconciliation finds captured orders missing from the queue |
 | `PAYPAL_RECONCILIATION_UNAVAILABLE` | medium | The reconciliation itself failed, so drift is unknown |
 
@@ -83,6 +85,12 @@ and probes `/api/healthz`. A 200 page with neither is
 `STOREFRONT_NOT_TRANSACTIONAL` (critical): the deployed directory has no API
 routes, so checkout and webhooks cannot work regardless of application code
 elsewhere.
+
+Transport is classified separately. Request failures (`ECONNRESET`,
+`ETIMEDOUT`, `ENOTFOUND`, aborts, `fetch failed`) and 502/503/504 are retried
+twice with 500ms/1000ms backoff; if they persist the finding is a warning
+(`STOREFRONT_UNREACHABLE`), never a critical static-build claim. A deterministic
+200 is never retried, so a real static deployment still fails fast and loud.
 
 ```bash
 # production domain (default)

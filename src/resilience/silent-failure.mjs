@@ -28,7 +28,7 @@ import { storefrontVerdictHint } from './storefront-probe.mjs';
  * It never moves money. Monetary redress stays owner-gated.
  */
 
-export const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+export const SEVERITY_RANK = { low: 1, warning: 2, medium: 2, high: 3, critical: 4 };
 export const DEFAULT_MAX_SILENCE_MIN = 90;
 export const DEFAULT_STALL_DAYS = 7;
 export const DEFAULT_SILENCE_BUDGET_HOURS = 24;
@@ -163,6 +163,32 @@ export const FINDING_CATALOG = {
         verification: 'The homepage exposes an application runtime and /api/webhooks/paypal returns 400 invalid_json.',
         owner_action: 'Repoint the Vercel project serving www.realworldcerts.com at the app root, or attach a hosted checkout to the static site.',
         sla_hours: 24
+    },
+    STOREFRONT_UNREACHABLE: {
+        domain: 'revenue',
+        severity: 'warning',
+        title: 'Storefront reachability could not be verified',
+        impact: 'A network error or edge 5xx hides whether the domain can transact. It is not evidence of a broken deployment, but a sustained outage still blocks sales.',
+        containment: 'Do not claim the storefront is healthy or broken while reachability is unknown; retry on the next tick.',
+        obligation: 'Confirm the domain answers before drawing any conclusion about the deployed build.',
+        remedy: 'Check DNS, the Vercel deployment status and upstream errors; rerun the probe once the edge recovers.',
+        mitigation: 'Transport failures are retried with backoff and reported separately from deployment findings.',
+        verification: 'A later probe returns application or static_only with an HTTP response from the origin.',
+        owner_action: 'Check the Vercel deployment/edge status if this persists beyond one tick.',
+        sla_hours: 72
+    },
+    STOREFRONT_HTTP_ERROR: {
+        domain: 'revenue',
+        severity: 'warning',
+        title: 'Storefront answered with an unexpected HTTP status',
+        impact: 'The origin responded, so this is not a network blip, but the page or API is not serving the expected 200/404 contract.',
+        containment: 'Do not treat the deployment as verified while the unexpected status persists.',
+        obligation: 'Identify which layer returns the status and restore the expected response.',
+        remedy: 'Check the deployment logs for the storefront and the /api/healthz route; fix the failing page or API.',
+        mitigation: 'HTTP errors are reported separately from static builds and from transport failures.',
+        verification: 'The homepage returns 200 and /api/healthz returns 200 or 404.',
+        owner_action: 'Inspect the Vercel deployment logs for the failing response.',
+        sla_hours: 48
     },
     PAYPAL_UNFULFILLED_ORDERS: {
         domain: 'revenue',
@@ -517,13 +543,19 @@ export function detectSilentFailures({
     }
 
     if (storefrontProbe && typeof storefrontProbe === 'object' && !storefrontProbe.ok) {
-        add('STOREFRONT_NOT_TRANSACTIONAL', `${storefrontProbe.url} -> ${storefrontProbe.verdict}: ${storefrontVerdictHint(storefrontProbe.verdict)}`, {
+        const verdict = storefrontProbe.verdict;
+        const code = verdict === 'unreachable'
+            ? 'STOREFRONT_UNREACHABLE'
+            : (verdict === 'http_error' ? 'STOREFRONT_HTTP_ERROR' : 'STOREFRONT_NOT_TRANSACTIONAL');
+        add(code, `${storefrontProbe.url} -> ${verdict}: ${storefrontVerdictHint(verdict)}`, {
             status: storefrontProbe.status,
             health_status: storefrontProbe.health_status,
+            health_error: storefrontProbe.health_error || null,
             app_runtime: storefrontProbe.app_runtime,
             api_alive: storefrontProbe.api_alive,
             checkout_link: storefrontProbe.checkout_link,
-            verdict: storefrontProbe.verdict,
+            verdict,
+            attempts: storefrontProbe.attempts || null,
             error: storefrontProbe.error || null
         });
     }

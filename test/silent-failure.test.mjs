@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { buildPo, transitionPo } from '../src/procurement/po.mjs';
+import { probePaymentWebhook } from '../src/resilience/webhook-probe.mjs';
 import {
     FINDING_CATALOG,
     buildRedressPlan,
@@ -188,6 +189,39 @@ test('a clean write records state but no incident', () => {
     const result = runSilentFailureAudit({ root, now: NOW, ...cleanOptions(), write: true });
     assert.equal(result.findings.length, 0);
     assert.equal(result.written.incident, null);
+});
+
+test('webhook probe classifies reachable, undeployed, protected and unconfigured hosts', async () => {
+    const fake = status => async () => ({ status });
+    assert.equal((await probePaymentWebhook('https://host/api/webhooks/paypal', { fetchImpl: fake(400) })).verdict, 'reachable');
+    assert.equal((await probePaymentWebhook('https://host/api/webhooks/paypal', { fetchImpl: fake(404) })).verdict, 'route_not_deployed');
+    assert.equal((await probePaymentWebhook('https://host/api/webhooks/paypal', { fetchImpl: fake(401) })).verdict, 'protection_blocking');
+    assert.equal((await probePaymentWebhook('https://host/api/webhooks/paypal', { fetchImpl: fake(503) })).verdict, 'webhook_not_configured');
+    assert.equal((await probePaymentWebhook('https://host/api/webhooks/paypal', { fetchImpl: fake(500) })).verdict, 'server_error');
+
+    const refused = async () => { throw new Error('ECONNREFUSED'); };
+    const unreachable = await probePaymentWebhook('https://host/api/webhooks/paypal', { fetchImpl: refused });
+    assert.equal(unreachable.verdict, 'unreachable');
+    assert.equal(unreachable.ok, false);
+});
+
+test('a dead payment webhook is a critical silent-failure finding', () => {
+    const probes = [
+        { url: 'https://www.realworldcerts.com/api/webhooks/paypal', status: 404, verdict: 'route_not_deployed', ok: false },
+        { url: 'https://supply-chain-swarm.vercel.app/api/webhooks/paypal', status: 401, verdict: 'protection_blocking', ok: false }
+    ];
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ webhookProbes: probes }) });
+    const webhook = findings.find(finding => finding.code === 'PAYMENT_WEBHOOK_UNREACHABLE');
+    assert.ok(webhook);
+    assert.equal(webhook.severity, 'critical');
+    assert.match(webhook.detail, /404/);
+    assert.match(webhook.detail, /401/);
+});
+
+test('a healthy webhook probe adds no finding', () => {
+    const probes = [{ url: 'https://host/api/webhooks/paypal', status: 400, verdict: 'reachable', ok: true }];
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ webhookProbes: probes }) });
+    assert.deepEqual(findings, []);
 });
 
 test('every catalog finding has a full remediation contract', () => {

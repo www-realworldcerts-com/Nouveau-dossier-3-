@@ -12,6 +12,7 @@ import {
 import { ProcurementStore } from '../procurement/store.mjs';
 import { evaluatePo } from '../procurement/po.mjs';
 import { RedressEngine } from './redress.mjs';
+import { probeVerdictHint } from './webhook-probe.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") protocol.
@@ -148,6 +149,19 @@ export const FINDING_CATALOG = {
         verification: 'A new audit entry exists within the governance window.',
         owner_action: 'Check that `audits/autonomous/` is writable and the tick is appending.',
         sla_hours: 72
+    },
+    PAYMENT_WEBHOOK_UNREACHABLE: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'Payment webhook cannot deliver to the application',
+        impact: 'A buyer can pay and never receive the product: the payment succeeds, fulfilment never runs, and PayPal eventually stops retrying. Silent revenue loss with no alarm.',
+        containment: 'Treat webhook fulfilment as unavailable; do not rely on the backup delivery path.',
+        obligation: 'Restore a reachable, authenticated webhook endpoint and deliver every missed order.',
+        remedy: 'Deploy a build containing the webhook route, configure its credentials, remove or bypass the protection layer, then replay missed notifications.',
+        mitigation: 'Public reachability probe expects HTTP 400 invalid_json; 404/401/503 are findings, not benign responses.',
+        verification: 'POST not-json to the public webhook URL returns 400, and a signed PayPal sandbox notification is fulfilled idempotently.',
+        owner_action: 'Fix the deployment surface (route deployed, protection bypass or preview-only SSO) and verify with the P8 acceptance probe.',
+        sla_hours: 4
     }
 };
 
@@ -330,7 +344,8 @@ export function detectSilentFailures({
     fulfillment,
     silentCatches,
     auditLatest,
-    tickMonotony
+    tickMonotony,
+    webhookProbes
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -442,6 +457,14 @@ export function detectSilentFailures({
         });
     }
 
+    const probes = webhookProbes || [];
+    const failingProbes = probes.filter(probe => !probe.ok);
+    if (failingProbes.length) {
+        add('PAYMENT_WEBHOOK_UNREACHABLE', failingProbes.map(probe => `${probe.url} -> ${probe.status ?? 'no response'} (${probe.verdict}: ${probeVerdictHint(probe.verdict)})`).join('; '), {
+            probes: failingProbes
+        });
+    }
+
     const monotony = tickMonotony === undefined ? readTickMonotony(root) : tickMonotony;
     const duplicates = pos.length
         ? Object.entries(pos.reduce((acc, po) => {
@@ -466,6 +489,7 @@ export function detectSilentFailures({
             fulfillment: { pending: pending.length, oldest_days: round(oldestPending) },
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
+            webhook_probes: probes,
             monotony,
             duplicates: { count: duplicates.reduce((sum, row) => sum + (row.count - 1), 0), cycles: duplicates, cycle_id: duplicates.length ? 'procurement' : null }
         }
@@ -506,8 +530,7 @@ export function buildRedressPlan(findings, { now = new Date(), evidence = {} } =
         severity,
         summary: sorted.length
             ? `${sorted.length} silent-failure finding(s); highest severity ${severity}`
-            : 'No silent-failure signals detected',
-        findings: sorted.map(finding => {
+            : 'No silent-failure signals detected',        findings: sorted.map(finding => {
             const meta = FINDING_CATALOG[finding.code] || {};
             const deadline = new Date(at.getTime() + Number(meta.sla_hours || 24) * 3600000);
             return {
@@ -559,10 +582,11 @@ export function runSilentFailureAudit({
     stallDays = DEFAULT_STALL_DAYS,
     silenceBudgetHours = DEFAULT_SILENCE_BUDGET_HOURS,
     write = false,
-    engine = null
+    engine = null,
+    webhookProbes = []
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

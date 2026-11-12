@@ -10,6 +10,7 @@ import {
     runSilentFailureAudit
 } from '../src/resilience/silent-failure.mjs';
 import { ACTION_IDS, PROMPT_GENESIS, RedressEngine } from '../src/resilience/redress.mjs';
+import { probePaymentWebhook } from '../src/resilience/webhook-probe.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") CLI: detect, record redress, and
@@ -96,12 +97,13 @@ Options:
   --stall-days <n>           Revenue/PO/fulfillment stall window (default 7)
   --silence-budget-hours <n> Escalate unresolved findings to critical after n hours (default 24)
   --fail-on <severity>       Exit 2 at or above this severity (default high)
+  --webhook-url <url>        Probe a payment webhook (comma-separated; also PAYMENT_WEBHOOK_URL)
   --root <dir>               Repository root (default cwd)
   --file <path>              Redress state file (default data/resilience/redress.json)
 
 Exit codes: 0 clear, 1 error, 2 findings found, 3 settlements frozen.`;
 
-function main() {
+async function main() {
     const { command, flags, positional } = parseArgs(process.argv.slice(2));
     const json = Boolean(flags.json);
     if (command === 'help' || flags.help) return console.log(HELP);
@@ -171,12 +173,18 @@ function main() {
     if (command === 'audit' || command === 'redress') {
         const failOn = String(flags['fail-on'] || 'high').toLowerCase();
         if (!SEVERITY_RANK[failOn] && failOn !== 'none') throw new Error(`Unknown --fail-on severity: ${failOn}`);
+        const webhookUrls = String(flags['webhook-url'] || process.env.PAYMENT_WEBHOOK_URL || '')
+            .split(',')
+            .map(url => url.trim())
+            .filter(Boolean);
+        const webhookProbes = await Promise.all(webhookUrls.map(url => probePaymentWebhook(url)));
         const result = runSilentFailureAudit({
             root: flags.root || process.cwd(),
             maxSilenceMin: Number(flags['max-silence-min'] || DEFAULT_MAX_SILENCE_MIN),
             stallDays: Number(flags['stall-days'] || DEFAULT_STALL_DAYS),
             silenceBudgetHours: Number(flags['silence-budget-hours'] || DEFAULT_SILENCE_BUDGET_HOURS),
-            write: command === 'redress' || Boolean(flags.write)
+            write: command === 'redress' || Boolean(flags.write),
+            webhookProbes
         });
         printPlan(result, json);
         if (failOn !== 'none' && result.findings.some(finding => SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[failOn])) {
@@ -188,9 +196,7 @@ function main() {
     console.log(HELP);
 }
 
-try {
-    main();
-} catch (error) {
+main().catch(error => {
     console.error(`silent-failure: ${error.message}`);
     process.exit(1);
-}
+});

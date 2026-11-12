@@ -39,10 +39,34 @@ owner authorization and is never inferred by the swarm.
 | `FULFILLMENT_BACKLOG` | high | `PENDING_DELIVERY` orders older than the stall window |
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
+| `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |
 
 Findings that stay unresolved past the **silence budget** (`--silence-budget-hours`,
 default 24) are escalated to `critical` with an audit trail. Silence is never
 treated as success a second time.
+
+### Payment webhook (P8)
+
+A paid order whose webhook never arrives is silent revenue loss: the buyer is
+charged, fulfilment never runs, and PayPal stops retrying. `--webhook-url`
+(or `PAYMENT_WEBHOOK_URL`) sends one `not-json` POST from this host and expects
+`400 invalid_json`:
+
+| Status | Verdict |
+| --- | --- |
+| 400 | reachable and configured |
+| 404 | route not deployed on that host |
+| 401/403/302/307 | deployment protection blocks PayPal |
+| 503 | route present, webhook id or credentials missing |
+| 5xx | server failure, fulfilment unproven |
+
+```bash
+npm run resilience -- audit \
+  --webhook-url https://<public-host>/api/webhooks/paypal --fail-on high
+```
+
+Any status other than 400 is `PAYMENT_WEBHOOK_UNREACHABLE` (critical). The probe
+is read-only and sends no order or buyer data.
 
 ## Redress: what "full" means here
 

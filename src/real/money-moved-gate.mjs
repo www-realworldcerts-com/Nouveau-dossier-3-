@@ -1,6 +1,7 @@
 // src/real/money-moved-gate.mjs
 import { ProofValidator } from './proof-validator.mjs';
 import { EvidenceIntegrityChain } from './evidence-integrity.mjs';
+import { RedressEngine } from '../resilience/redress.mjs';
 
 export class MoneyMovedGate {
   /**
@@ -13,6 +14,13 @@ export class MoneyMovedGate {
   static async assertMoneyMoved(event) {
     if (!event) {
       throw new Error('MONEY_GATE_FAIL: event_missing');
+    }
+
+    // A velocity-without-revenue freeze halts new settlements until the
+    // capital-efficiency audit is done or the freeze expires.
+    const redress = new RedressEngine();
+    if (!redress.isSettlementAllowed()) {
+      throw new Error('MONEY_GATE_FAIL: settlement_frozen_velocity_without_revenue');
     }
 
     if (event.status === 'hallucination') {

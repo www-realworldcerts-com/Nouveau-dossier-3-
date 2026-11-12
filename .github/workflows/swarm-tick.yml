@@ -60,6 +60,13 @@ jobs:
         env: *swarm_env
         run: node scripts/swarm-tick.mjs --check-only --max-silence-min 90
 
+      - name: Silent-failure sentinel (faillite silencieuse)
+        # A fresh heartbeat that cannot earn is still a silent failure. This
+        # audit fails the run for high/critical findings and records the
+        # incident, redress plan and mitigations.
+        env: *swarm_env
+        run: node scripts/silent-failure.mjs audit --write --stall-days 7 --fail-on high
+
       - name: Upload tick state
         if: always()
         uses: actions/upload-artifact@v4

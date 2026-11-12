@@ -1,0 +1,18 @@
+{
+  "po_ref": "PO-TEMU-TEST-RECIP-270926-01",
+  "carrier": "AMANA",
+  "tracking": "AMANA-OWNER-TEMU-270926",
+  "scans": [
+    { "status": "PICKUP", "at": "2026-09-27T14:05:00+01:00", "location": "Casablanca Sidi Maarouf" },
+    { "status": "HUB", "at": "2026-09-27T21:40:00+01:00", "location": "Casablanca tri" },
+    {
+      "status": "DELIVER",
+      "at": "2026-09-28T10:22:00+01:00",
+      "location": "Agdal, Rabat",
+      "destination_city": "Agdal, Rabat",
+      "signed_by": "TEST RECIPIENT",
+      "weight_kg": 2.55,
+      "pod_reference": "POD:AMANA-sha256:8c1f0a4d9e2b7c3f5a6d8e0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d"
+    }
+  ]
+}

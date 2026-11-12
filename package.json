@@ -11,7 +11,12 @@
     "sales": "node scripts/sales-agent.mjs",
     "shopify:oauth": "node scripts/shopify-oauth.mjs",
     "shopify:setup": "node scripts/sales-agent.mjs setup-shop",
+    "procurement": "node scripts/procurement.mjs",
+    "resilience": "node scripts/silent-failure.mjs",
+    "redress": "node scripts/silent-failure.mjs redress",
     "test:sales": "node --test test/sales.test.mjs test/shopify-setup.test.mjs",
+    "test:procurement": "node --test test/procurement.test.mjs",
+    "test:resilience": "node --test test/redress.test.mjs test/silent-failure.test.mjs",
     "test:loop": "node --test test/swarm-loop-health.test.mjs"
   },
   "dependencies": {

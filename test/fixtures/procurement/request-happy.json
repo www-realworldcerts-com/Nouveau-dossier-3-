@@ -1,0 +1,26 @@
+{
+  "external_id": "TEMU-270926-RAIS-WAFAE",
+  "supplier": "TEMU",
+  "carrier": "AMANA",
+  "origin": "owner_initiated",
+  "prepaid_by": "swarm",
+  "recipient_charge": false,
+  "currency": "MAD",
+  "requested_by": "owner",
+  "recipient": {
+    "name": "Test Recipient",
+    "city": "Rabat",
+    "phone": "0600000000",
+    "address": "Test address, Rabat"
+  },
+  "expected_delivery_at": "2026-09-28T10:22:00+01:00",
+  "items": [
+    { "sku": "TAB-CR10", "title": "Tablet CR 10.1", "qty": 1, "unit_price_mad": 1350, "expected_min_weight_kg": 0.6 },
+    { "sku": "AUD-SB20", "title": "Soundbar 2.0", "qty": 1, "unit_price_mad": 669, "expected_min_weight_kg": 0.25 },
+    { "sku": "CAM-IPC", "title": "IP camera", "qty": 1, "unit_price_mad": 499, "expected_min_weight_kg": 0.2 },
+    { "sku": "ACC-HUB", "title": "USB hub", "qty": 1, "unit_price_mad": 190, "expected_min_weight_kg": 0.05 },
+    { "sku": "ACC-CBL", "title": "Cable pack", "qty": 1, "unit_price_mad": 179, "expected_min_weight_kg": 0.05 },
+    { "sku": "ACC-STD", "title": "Tablet stand", "qty": 1, "unit_price_mad": 230, "expected_min_weight_kg": 0.2 },
+    { "sku": "ACC-CSE", "title": "Protective case", "qty": 1, "unit_price_mad": 185, "expected_min_weight_kg": 0.15 }
+  ]
+}

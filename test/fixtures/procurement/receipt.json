@@ -1,0 +1,14 @@
+{
+  "po_ref": "PO-TEMU-TEST-RECIP-270926-01",
+  "items": [
+    { "sku": "TAB-CR10", "qty": 1 },
+    { "sku": "AUD-SB20", "qty": 1 },
+    { "sku": "CAM-IPC", "qty": 1 },
+    { "sku": "ACC-HUB", "qty": 1 },
+    { "sku": "ACC-CBL", "qty": 1 },
+    { "sku": "ACC-STD", "qty": 1 },
+    { "sku": "ACC-CSE", "qty": 1 }
+  ],
+  "confirmed_by": "operator:procurement",
+  "received_at": "2026-09-28T11:00:00+01:00"
+}

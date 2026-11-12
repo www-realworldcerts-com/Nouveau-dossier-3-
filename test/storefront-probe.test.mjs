@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { probeStorefront } from '../src/resilience/storefront-probe.mjs';
+import { DEFAULT_STOREFRONT_URL, probeStorefront, resolveStorefrontUrl } from '../src/resilience/storefront-probe.mjs';
 import { detectSilentFailures } from '../src/resilience/silent-failure.mjs';
 import { buildTickAuditArgs } from '../src/swarm/tick-audit.mjs';
 
@@ -44,6 +44,26 @@ test('a network failure is unreachable, not static_only', async () => {
     });
     assert.equal(probe.verdict, 'unreachable');
     assert.match(probe.error, /ECONNREFUSED/);
+});
+
+test('the storefront defaults to the production domain without configuration', () => {
+    assert.equal(resolveStorefrontUrl({ env: {} }), DEFAULT_STOREFRONT_URL);
+    assert.equal(DEFAULT_STOREFRONT_URL, 'https://www.realworldcerts.com');
+});
+
+test('STOREFRONT_URL overrides the default and the flag overrides the env', () => {
+    assert.equal(
+        resolveStorefrontUrl({ env: { STOREFRONT_URL: 'https://staging.example' } }),
+        'https://staging.example'
+    );
+    assert.equal(
+        resolveStorefrontUrl({ flag: 'https://flag.example', env: { STOREFRONT_URL: 'https://staging.example' } }),
+        'https://flag.example'
+    );
+});
+
+test('an empty flag or env value still falls back to production', () => {
+    assert.equal(resolveStorefrontUrl({ flag: '', env: { STOREFRONT_URL: '  ' } }), DEFAULT_STOREFRONT_URL);
 });
 
 test('probeStorefront rejects a non-http URL', async () => {

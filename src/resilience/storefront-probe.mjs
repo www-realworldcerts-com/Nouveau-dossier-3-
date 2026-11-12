@@ -11,6 +11,15 @@
 
 const APP_RUNTIME_PATTERN = /__NEXT_DATA__|_next\/static|\/_next\//i;
 
+/** The domain the business sells from; probed unless overridden. */
+export const DEFAULT_STOREFRONT_URL = 'https://www.realworldcerts.com';
+
+/** Explicit flag, then env override, then the production domain. */
+export function resolveStorefrontUrl({ flag = null, env = process.env } = {}) {
+    const value = String(flag || env.STOREFRONT_URL || DEFAULT_STOREFRONT_URL).trim();
+    return value || DEFAULT_STOREFRONT_URL;
+}
+
 export async function probeStorefront(url, { fetchImpl = globalThis.fetch, timeoutMs = 15000 } = {}) {
     if (!url) throw new Error('a storefront URL is required');
     let base;

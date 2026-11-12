@@ -75,14 +75,20 @@ order or buyer data.
 
 ### Storefront capability
 
-`--storefront-url` (or `STOREFRONT_URL`) checks the live domain: it loads the
-homepage, looks for an application runtime (`_next`/`__NEXT_DATA__`) and probes
-`/api/healthz`. A 200 page with neither is `STOREFRONT_NOT_TRANSACTIONAL`
-(critical): the deployed directory has no API routes, so checkout and webhooks
-cannot work regardless of the application code elsewhere.
+The storefront probe checks `https://www.realworldcerts.com` by default, so the
+CI sentinel and `npm start` raise `STOREFRONT_NOT_TRANSACTIONAL` with no extra
+configuration. `--storefront-url` or `STOREFRONT_URL` overrides the domain. It
+loads the homepage, looks for an application runtime (`_next`/`__NEXT_DATA__`)
+and probes `/api/healthz`. A 200 page with neither is
+`STOREFRONT_NOT_TRANSACTIONAL` (critical): the deployed directory has no API
+routes, so checkout and webhooks cannot work regardless of application code
+elsewhere.
 
 ```bash
-npm run resilience -- audit --storefront-url https://www.realworldcerts.com --fail-on high
+# production domain (default)
+npm run resilience -- audit --fail-on high
+# staging override
+STOREFRONT_URL=https://staging.example npm run resilience -- audit --fail-on high
 ```
 
 ### Paid-but-unfulfilled orders

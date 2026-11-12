@@ -11,6 +11,7 @@ import {
 } from '../src/resilience/silent-failure.mjs';
 import { ACTION_IDS, PROMPT_GENESIS, RedressEngine } from '../src/resilience/redress.mjs';
 import { probePaymentWebhook } from '../src/resilience/webhook-probe.mjs';
+import { reconcilePayPalOrders } from '../src/real/fulfillment/paypal-reconciliation.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") CLI: detect, record redress, and
@@ -100,6 +101,7 @@ Options:
   --silence-budget-hours <n> Escalate unresolved findings to critical after n hours (default 24)
   --fail-on <severity>       Exit 2 at or above this severity (default high)
   --webhook-url <url>        Probe a payment webhook (comma-separated; also PAYMENT_WEBHOOK_URL)
+  --reconcile-paypal         Dry-run PayPal reconciliation and report paid-but-unfulfilled orders
   --root <dir>               Repository root (default cwd)
   --file <path>              Redress state file (default data/resilience/redress.json)
 
@@ -186,13 +188,29 @@ async function main() {
             console.log('webhook probe skipped: --webhook-url was empty');
         }
         const webhookProbes = await Promise.all(webhookUrls.map(url => probePaymentWebhook(url)));
+        let paypalReconciliation = null;
+        if (flags['reconcile-paypal']) {
+            const missing = ['PAYPAL_CLIENT_ID', 'PAYPAL_CLIENT_SECRET'].filter(name => !process.env[name]);
+            if (missing.length) {
+                paypalReconciliation = { skipped: 'missing_paypal_credentials', missing };
+                console.log(`paypal reconciliation skipped: missing ${missing.join(', ')}`);
+            } else {
+                try {
+                    const report = await reconcilePayPalOrders({ apply: false });
+                    paypalReconciliation = { report };
+                } catch (error) {
+                    paypalReconciliation = { error: error.message };
+                }
+            }
+        }
         const result = runSilentFailureAudit({
             root: flags.root || process.cwd(),
             maxSilenceMin: Number(flags['max-silence-min'] || DEFAULT_MAX_SILENCE_MIN),
             stallDays: Number(flags['stall-days'] || DEFAULT_STALL_DAYS),
             silenceBudgetHours: Number(flags['silence-budget-hours'] || DEFAULT_SILENCE_BUDGET_HOURS),
             write: command === 'redress' || Boolean(flags.write),
-            webhookProbes
+            webhookProbes,
+            paypalReconciliation
         });
         printPlan(result, json);
         if (failOn !== 'none' && result.findings.some(finding => SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[failOn])) {

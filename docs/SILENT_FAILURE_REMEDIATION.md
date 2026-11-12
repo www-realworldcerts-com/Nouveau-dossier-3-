@@ -40,6 +40,8 @@ owner authorization and is never inferred by the swarm.
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
 | `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |
+| `PAYPAL_UNFULFILLED_ORDERS` | critical | A dry-run reconciliation finds captured orders missing from the queue |
+| `PAYPAL_RECONCILIATION_UNAVAILABLE` | medium | The reconciliation itself failed, so drift is unknown |
 
 Findings that stay unresolved past the **silence budget** (`--silence-budget-hours`,
 default 24) are escalated to `critical` with an audit trail. Silence is never
@@ -69,6 +71,22 @@ Any status other than 400 is `PAYMENT_WEBHOOK_UNREACHABLE` (critical). A bare
 `--webhook-url` with no value is a usage error (exit 1), and a non-http(s) value
 is rejected before any request is made. The probe is read-only and sends no
 order or buyer data.
+
+### Paid-but-unfulfilled orders
+
+`--reconcile-paypal` runs the idempotent reconciliation in dry-run mode as part
+of the audit (and therefore in the tick workflow): it scans PayPal reporting
+transactions, verifies a `COMPLETED` capture, and compares each order id with
+`logs/fulfillment_queue.log`. Any captured order missing from the queue is
+`PAYPAL_UNFULFILLED_ORDERS` (critical). If the check itself cannot run, it is
+`PAYPAL_RECONCILIATION_UNAVAILABLE` (medium) — never a silent "0 missing".
+Without PayPal credentials the step prints a skip message and records the skip
+in evidence; the loop-blocked finding already covers that state.
+
+```bash
+npm run resilience -- audit --reconcile-paypal --fail-on high
+npm run reconcile:paypal -- --apply     # replay after reviewing the finding
+```
 
 ## Redress: what "full" means here
 

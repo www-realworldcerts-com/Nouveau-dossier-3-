@@ -238,6 +238,64 @@ test('a dead payment webhook is a critical silent-failure finding', () => {
     assert.match(webhook.detail, /401/);
 });
 
+test('paid orders missing from the fulfilment queue are a critical finding', () => {
+    const paypalReconciliation = {
+        report: {
+            missing_count: 2,
+            missing: [
+                { order_id: 'ORD-1', revenue: 49, currency: 'USD' },
+                { order_id: 'ORD-2', revenue: 10, currency: 'USD' }
+            ]
+        }
+    };
+    const { findings, evidence } = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
+    const finding = findings.find(item => item.code === 'PAYPAL_UNFULFILLED_ORDERS');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'critical');
+    assert.deepEqual(finding.evidence.order_ids, ['ORD-1', 'ORD-2']);
+    assert.equal(evidence.paypal_reconciliation.report.missing_count, 2);
+});
+
+test('a clean reconciliation adds no finding', () => {
+    const paypalReconciliation = { report: { missing_count: 0, missing: [] } };
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
+    assert.deepEqual(findings, []);
+});
+
+test('a failed reconciliation is a medium finding, never a silent zero', () => {
+    const { findings } = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ paypalReconciliation: { error: 'reporting API unavailable' } })
+    });
+    const finding = findings.find(item => item.code === 'PAYPAL_RECONCILIATION_UNAVAILABLE');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'medium');
+    assert.match(finding.detail, /reporting API unavailable/);
+});
+
+test('a skipped reconciliation without credentials adds no finding', () => {
+    const paypalReconciliation = { skipped: 'missing_paypal_credentials', missing: ['PAYPAL_CLIENT_ID'] };
+    const { findings, evidence } = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
+    assert.deepEqual(findings, []);
+    assert.equal(evidence.paypal_reconciliation.skipped, 'missing_paypal_credentials');
+});
+
+test('the audit skips reconciliation cleanly when PayPal credentials are absent', () => {
+    const cli = path.join(process.cwd(), 'scripts', 'silent-failure.mjs');
+    const env = { ...process.env };
+    delete env.PAYPAL_CLIENT_ID;
+    delete env.PAYPAL_CLIENT_SECRET;
+    const run = spawnSync(process.execPath, [cli, 'audit', '--reconcile-paypal', '--fail-on', 'none', '--json'], {
+        encoding: 'utf8',
+        env
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /paypal reconciliation skipped: missing PAYPAL_CLIENT_ID/);
+    const payload = JSON.parse(run.stdout.slice(run.stdout.indexOf('{')));
+    assert.ok(!payload.plan.findings.some(finding => finding.code === 'PAYPAL_UNFULFILLED_ORDERS'));
+    assert.equal(payload.evidence.paypal_reconciliation.skipped, 'missing_paypal_credentials');
+});
+
 test('a healthy webhook probe adds no finding', () => {
     const probes = [{ url: 'https://host/api/webhooks/paypal', status: 400, verdict: 'reachable', ok: true }];
     const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ webhookProbes: probes }) });

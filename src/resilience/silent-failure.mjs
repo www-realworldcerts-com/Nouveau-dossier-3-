@@ -150,6 +150,32 @@ export const FINDING_CATALOG = {
         owner_action: 'Check that `audits/autonomous/` is writable and the tick is appending.',
         sla_hours: 72
     },
+    PAYPAL_UNFULFILLED_ORDERS: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'Paid PayPal orders are missing fulfilment',
+        impact: 'Buyers were charged and PayPal captured the payment, but no delivery was queued. Missed webhooks become silent revenue loss and refund exposure.',
+        containment: 'Stop reporting fulfilment as healthy; do not mark these orders delivered.',
+        obligation: 'Deliver or refund every captured order that is absent from the fulfilment queue.',
+        remedy: 'Run the reconciliation with --apply (idempotent), then deliver each queued order and fix the webhook path that missed it.',
+        mitigation: 'Dry-run reconciliation in every tick; any drift is a critical finding.',
+        verification: 'A later dry run reports missing_count 0 and every order has a fulfilment record.',
+        owner_action: 'Run `npm run reconcile:paypal -- --apply`, then deliver/refund the listed orders.',
+        sla_hours: 4
+    },
+    PAYPAL_RECONCILIATION_UNAVAILABLE: {
+        domain: 'revenue',
+        severity: 'medium',
+        title: 'PayPal reconciliation could not verify fulfilment',
+        impact: 'Paid-but-unfulfilled orders cannot be seen, so webhook drift is unknown.',
+        containment: 'Do not read "no missing orders" as verified while this check is failing.',
+        obligation: 'Restore read access so every captured order can be compared with the queue.',
+        remedy: 'Fix PayPal credentials or reporting API access, then rerun the dry run.',
+        mitigation: 'A failed reconciliation is recorded as a finding, never silently skipped.',
+        verification: 'The reconciliation returns a report with search_error null.',
+        owner_action: 'Check PayPal credentials and reporting API access.',
+        sla_hours: 24
+    },
     PAYMENT_WEBHOOK_UNREACHABLE: {
         domain: 'revenue',
         severity: 'critical',
@@ -345,7 +371,8 @@ export function detectSilentFailures({
     silentCatches,
     auditLatest,
     tickMonotony,
-    webhookProbes
+    webhookProbes,
+    paypalReconciliation
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -457,6 +484,23 @@ export function detectSilentFailures({
         });
     }
 
+    if (paypalReconciliation && typeof paypalReconciliation === 'object') {
+        if (paypalReconciliation.report) {
+            const report = paypalReconciliation.report;
+            if (Number(report.missing_count) > 0) {
+                add('PAYPAL_UNFULFILLED_ORDERS', `${report.missing_count} captured order(s) are absent from the fulfilment queue.`, {
+                    order_ids: (report.missing || []).map(order => order.order_id),
+                    missing: report.missing || [],
+                    window: report.window || null
+                });
+            }
+        } else if (paypalReconciliation.error) {
+            add('PAYPAL_RECONCILIATION_UNAVAILABLE', paypalReconciliation.error, {
+                reason: paypalReconciliation.error
+            });
+        }
+    }
+
     const probes = webhookProbes || [];
     const failingProbes = probes.filter(probe => !probe.ok);
     if (failingProbes.length) {
@@ -490,6 +534,7 @@ export function detectSilentFailures({
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
             webhook_probes: probes,
+            paypal_reconciliation: paypalReconciliation || null,
             monotony,
             duplicates: { count: duplicates.reduce((sum, row) => sum + (row.count - 1), 0), cycles: duplicates, cycle_id: duplicates.length ? 'procurement' : null }
         }
@@ -583,10 +628,11 @@ export function runSilentFailureAudit({
     silenceBudgetHours = DEFAULT_SILENCE_BUDGET_HOURS,
     write = false,
     engine = null,
-    webhookProbes = []
+    webhookProbes = [],
+    paypalReconciliation = null
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

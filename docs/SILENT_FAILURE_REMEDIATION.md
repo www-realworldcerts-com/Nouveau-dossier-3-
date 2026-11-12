@@ -159,7 +159,10 @@ node scripts/silent-failure.mjs check-settlements   # exit 3 when frozen
 ```
 
 The sentinel runs in `.github/workflows/swarm-tick.yml` right after the loop
-liveness check, and uploads `data/resilience/incidents/*.json` as evidence.
+liveness check, and uploads `data/resilience/incidents/*.json` as evidence. The
+local supervisor (`npm start`) runs the same audit after every tick via
+`src/swarm/tick-audit.mjs` (`SWARM_TICK_AUDIT=false` disables it), so a VM
+deployment raises the same findings as CI.
 Set the repository **variable** `PAYMENT_WEBHOOK_URL` (comma-separated for
 several hosts) to enable the P8 probe on every tick; leaving it empty skips the
 probe. While live credentials are missing, the step is expected to fail: a

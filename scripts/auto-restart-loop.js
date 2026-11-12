@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '../src/load-env.mjs';
 import { heartbeatPath, writeHeartbeat } from '../src/swarm/loop-health.mjs';
+import { runTickAudit } from '../src/swarm/tick-audit.mjs';
 
 /**
  * Long-lived supervisor for local/VM deployment (`npm start`).
@@ -22,6 +23,9 @@ const LOCK_FILE = path.join(ROOT_DIR, 'data', 'swarm-loop.lock');
 
 const intervalMs = Math.max(60000, Number(process.env.SWARM_LOOP_INTERVAL_MS || 15 * 60 * 1000));
 const maxBackoffMs = Math.max(intervalMs, Number(process.env.SWARM_LOOP_MAX_BACKOFF_MS || 30 * 60 * 1000));
+// Run the same audit the CI workflow runs, including the PayPal dry-run
+// reconciliation, after every local tick. Disable with SWARM_TICK_AUDIT=false.
+const auditEnabled = String(process.env.SWARM_TICK_AUDIT ?? 'true').toLowerCase() !== 'false';
 
 let stopping = false;
 let backoffMs = 0;
@@ -80,6 +84,18 @@ async function loop() {
     while (!stopping) {
         const code = await runTick();
         if (stopping) break;
+
+        if (auditEnabled) {
+            const audit = await runTickAudit({ root: ROOT_DIR });
+            if (stopping) break;
+            if (audit.timedOut) {
+                console.error('tick audit timed out; findings may be incomplete');
+            } else if (audit.code === 2) {
+                console.error('tick audit reported findings; see data/resilience/incidents');
+            } else if (audit.code !== 0) {
+                console.error(`tick audit exited ${audit.code}; see logs above`);
+            }
+        }
 
         if (code === 0) {
             backoffMs = 0;

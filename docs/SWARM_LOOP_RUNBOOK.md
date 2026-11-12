@@ -85,6 +85,14 @@ node scripts/swarm-doctor.mjs --clear-stale-freeze --ack-owner \
 
 * Every tick writes `data/swarm-heartbeat.json` with `status` (`ok`, `blocked`,
   `failed`), `tick_at`, `last_success_at`, `missing_env` and `last_error`.
+* After every local tick (`npm start`), the supervisor runs the same
+  silent-failure audit as CI, including the PayPal dry-run reconciliation, so
+  paid-but-unfulfilled orders raise `PAYPAL_UNFULFILLED_ORDERS` on a VM too.
+  Findings are written to `data/resilience/incidents/` and
+  `audits/autonomous/`; disable with `SWARM_TICK_AUDIT=false`.
+* `scripts/auto-restart-loop.js` also writes a `supervising` heartbeat between
+  ticks (`next_tick_in_ms`), so a running supervisor is distinguishable from a
+  dead one.
 * The workflow's `--check-only` step fails when the heartbeat is older than 90
   minutes, so GitHub marks the scheduled run failed and notifies you.
 * A tick that runs but is blocked by missing configuration keeps a fresh
@@ -98,6 +106,8 @@ node scripts/swarm-doctor.mjs --clear-stale-freeze --ack-owner \
 
 ```bash
 SWARM_LOOP_INTERVAL_MS=900000 npm start
+# optional: point the tick audit at the public webhook
+PAYMENT_WEBHOOK_URL=https://<host>/api/webhooks/paypal npm start
 ```
 
 The supervisor refuses to start if another pid holds `data/swarm-loop.lock`,

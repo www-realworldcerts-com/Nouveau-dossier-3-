@@ -112,7 +112,7 @@ async function main() {
         const payload = {
             alive,
             heartbeat: previous,
-            heartbeat_age_minutes: Number.isFinite(ageMs) ? Math.round(ageMs / 60) : null,
+            heartbeat_age_minutes: Number.isFinite(ageMs) ? Math.round(ageMs / 60000) : null,
             max_silence_minutes: Math.round(maxSilenceMs / 60000),
             heartbeat_path: hbFile,
             log_path: tickLogPath(ROOT)

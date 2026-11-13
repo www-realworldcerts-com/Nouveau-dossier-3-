@@ -5,6 +5,15 @@ const PAYPAL_API_BASE =
 
 const globalCircuitBreaker = new CircuitBreaker(5, 60000);
 
+// Access tokens are valid for hours; fetching one per request burns rate limit
+// and invites 401 spikes. Cache per credential/base URL and refresh early.
+const tokenCache = new Map();
+const TOKEN_REFRESH_SAFETY_MS = 60000;
+
+function tokenCacheKey(clientId) {
+  return `${PAYPAL_API_BASE}|${clientId}`;
+}
+
 function isPlaceholderValue(value) {
   if (value == null) return true;
   const v = String(value).trim();
@@ -33,9 +42,12 @@ function base64BasicAuth(clientId, clientSecret) {
   return `Basic ${token}`;
 }
 
-export async function getPayPalAccessToken() {
+export async function getPayPalAccessToken({ forceRefresh = false } = {}) {
   const clientId = getEnvOrThrow("PAYPAL_CLIENT_ID");
   const clientSecret = getEnvOrThrow("PAYPAL_CLIENT_SECRET");
+  const cacheKey = tokenCacheKey(clientId);
+  const cached = tokenCache.get(cacheKey);
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) return cached.token;
   const live = String(process.env.SWARM_LIVE ?? "false").toLowerCase() === "true";
   const paypalMode = String(process.env.PAYPAL_MODE ?? "live").toLowerCase();
   const paypalBase = String(process.env.PAYPAL_API_BASE_URL ?? "").toLowerCase();
@@ -70,7 +82,31 @@ export async function getPayPalAccessToken() {
 
   const json = await res.json();
   if (!json?.access_token) throw new Error("PayPal token response missing access_token");
+  const expiresInMs = Number(json.expires_in) > 0 ? Number(json.expires_in) * 1000 : 300000;
+  tokenCache.set(cacheKey, {
+    token: json.access_token,
+    expiresAt: Date.now() + Math.max(0, expiresInMs - TOKEN_REFRESH_SAFETY_MS)
+  });
   return json.access_token;
+}
+
+/** Drop a cached token (credential rotation, tests). */
+export function clearPayPalTokenCache() {
+  tokenCache.clear();
+}
+
+function paypalErrorMessage(status, method, path, text) {
+  let name = null;
+  let debugId = null;
+  try {
+    const parsed = JSON.parse(text);
+    name = parsed?.name ?? null;
+    debugId = parsed?.debug_id ?? null;
+  } catch { /* non-JSON error body */ }
+  const parts = [`PayPal request failed (${status}) ${method} ${path}`];
+  if (name) parts.push(`[${name}]`);
+  if (debugId) parts.push(`debug_id=${debugId}`);
+  return `${parts.join(" ")}: ${text}`;
 }
 
 export async function paypalRequest(path, { method = "GET", token, headers, body } = {}) {
@@ -80,6 +116,7 @@ export async function paypalRequest(path, { method = "GET", token, headers, body
     const retryable = new Set([429, 500, 502, 503, 504]);
 
     let lastErr = null;
+    let authRetried = false;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), getHttpTimeoutMs());
@@ -108,7 +145,19 @@ export async function paypalRequest(path, { method = "GET", token, headers, body
       if (!res.ok) {
         const status = Number(res.status);
         const text = await res.text().catch(() => "");
-        const err = new Error(`PayPal request failed (${status}) ${method} ${path}: ${text}`);
+
+        // A 401 usually means the cached token expired early. Refresh once and
+        // repeat the request without consuming a normal retry.
+        if (status === 401 && token && !authRetried) {
+          authRetried = true;
+          try {
+            token = await getPayPalAccessToken({ forceRefresh: true });
+            attempt -= 1;
+            continue;
+          } catch { /* fall through to the original error */ }
+        }
+
+        const err = new Error(paypalErrorMessage(status, method, path, text));
         lastErr = err;
 
         const retryAfter = res.headers.get("retry-after");

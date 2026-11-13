@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-11-13
+- Storefront capability probe now runs against `https://www.realworldcerts.com` by default
+  (`STOREFRONT_URL` / `--storefront-url` override) and raises
+  `STOREFRONT_NOT_TRANSACTIONAL` only when an origin 200 proves a static build
+  with no application runtime or API route.
+- Probe recognises `/api/healthz`, `/health` and the webhook route, so a deployed
+  plain-HTML app is no longer misreported as static; transient 5xx on health
+  stays a warning.
+- Transport failures (DNS, timeout, 502/503/504 after bounded retries) downgraded to
+  `STOREFRONT_UNREACHABLE` warnings; unexpected origin status is
+  `STOREFRONT_HTTP_ERROR`; a `warning` severity rank was added.
+- Local supervisor (`scripts/auto-restart-loop.js`) runs the silent-failure audit
+  after every tick, matching the CI sentinel; `SWARM_TICK_AUDIT=false` disables it.
+- PayPal reconciliation dry run runs from the tick audit and raises
+  `PAYPAL_UNFULFILLED_ORDERS` for captured-but-unfulfilled orders;
+  `PAYPAL_RECONCILIATION_UNAVAILABLE` covers missing credentials.
+- PayPal API calls cache access tokens with early refresh, force one refresh and
+  replay on 401, and include the error `name` and `debug_id` in thrown errors.
+- Webhook server can run as a Vercel function: handler export, no port binding
+  under `VERCEL`, `api/index.mjs` entry point and path-scoped rewrites that keep
+  the static storefront intact.
+- Webhook raw-body reader prefers streamed bytes, falls back only to exact
+  buffered bytes, and fails closed on a pre-parsed body, preserving signature
+  verification input.
+- Added `docs/PAYPAL_PERMANENT_SOLUTIONS.md`, `docs/VERCEL_NODE_DEPLOY.md`, and
+  tests for the storefront probe, tick audit, deployment wrapper and PayPal API
+  controls (`npm run test:deploy`, `npm run test:reconcile`).
+
 ## 2026-01-05
 - Added on-chain verification support in ProofValidator via ChainVerifier (USDT on BSC).
 - Integrated 72h Settlement SLA auto-fail pre-check in OwnerSettlementEnforcer.

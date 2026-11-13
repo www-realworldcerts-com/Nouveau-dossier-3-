@@ -1,0 +1,54 @@
+jarvis:
+  name: "JARVIS"
+  personality: "professional, witty, loyal"
+  personality_mode: "professional"  # professional, witty, concise, detailed
+  voice:
+    engine: "pyttsx3"
+    rate: 190
+    volume: 1.0
+    voice_id: 0
+    stt_backend: "google"  # google, whisper, sphinx
+
+security:
+  jwt_secret_key: "${JWT_SECRET_KEY}"
+  jwt_expiry: 3600
+  jwt_algorithm: "HS256"
+  rate_limit: 60
+  rate_limit_window: 60
+  encryption_key: "${AES_ENCRYPTION_KEY}"
+  encryption_algorithm: "AES-256-GCM"
+  password_iterations: 600000
+
+swarm:
+  url: "https://github.com/younestsouli2019-bot/Nouveau-dossier-3-"
+  ws_url: "${SWARM_WS_URL}"
+  reconnect_interval: 5
+  heartbeat: 30
+  max_retries: 5
+  encryption: true
+
+openai:
+  model: "gpt-4o"
+  temperature: 0.7
+  max_tokens: 2048
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins: ["*"]
+  debug: false
+
+memory:
+  max_messages: 20
+  persist: true
+  file_path: "./data/memory.json"
+
+upload:
+  max_file_size: 52428800  # 50MB
+  allowed_types: ["*"]
+  storage_path: "./uploads"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/jarvis.log"

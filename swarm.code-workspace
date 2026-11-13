@@ -1,0 +1,9 @@
+{
+  "folders": [
+    { "name": "Revenue Swarm (root)", "path": "." },
+    { "name": "JARVIS", "path": "jarvis" }
+  ],
+  "settings": {
+    "typescript.tsdk": "jarvis/node_modules/typescript/lib"
+  }
+}

@@ -1,0 +1,269 @@
+# =============================================================================
+# JARVIS AI Agent System - Git Ignore
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Environment & Secrets
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.env.development
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+credentials.json
+service-account.json
+google-credentials.json
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+sdist/
+*.whl
+pip-wheel-metadata/
+share/python-wheels/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+develop-eggs/
+.installed.cfg
+*.egg-info/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# pytype
+.pytype/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Environments
+.python-version
+
+# Spyder
+.spyproject/
+
+# mkdocs
+/site/
+
+# ---------------------------------------------------------------------------
+# Node.js
+# ---------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+.next-env.d.ts
+
+# Nuxt
+.nuxt/
+dist/
+
+# Gatsby
+.cache/
+public/
+
+# Vue
+.vite/
+
+# Build
+build/
+dist/
+.output/
+.nitro/
+.cache/
+
+# ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+docker-compose.override.yml
+docker-compose.*.yml
+!docker-compose.dev.yml
+.docker/
+docker-data/
+
+# ---------------------------------------------------------------------------
+# IDE & Editors
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+.history/
+*.code-workspace
+.fleet/
+
+# ---------------------------------------------------------------------------
+# OS Files
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+.directory
+.nfs*
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.sql.gz
+db/*.db
+db/*.sqlite
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-debug.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# Uploads & Data
+# ---------------------------------------------------------------------------
+uploads/
+data/
+cache/
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# ---------------------------------------------------------------------------
+# Prisma
+# ---------------------------------------------------------------------------
+prisma/migrations/
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+*.pid
+*.seed
+*.pid.lock
+.npm
+.eslintcache
+.stylelintcache
+.node_repl_history
+*.tgz
+.yarn-integrity
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*

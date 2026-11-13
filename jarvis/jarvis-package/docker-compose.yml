@@ -1,0 +1,232 @@
+# =============================================================================
+# JARVIS AI Agent System - Docker Compose Configuration
+# =============================================================================
+# Services:
+#   - jarvis-agent: Python FastAPI backend (port 8000)
+#   - jarvis-web:   Next.js frontend application (port 3000)
+#   - redis:        Redis cache and message broker (port 6379)
+# =============================================================================
+
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # JARVIS Agent - Python FastAPI Backend
+  # ---------------------------------------------------------------------------
+  jarvis-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        - JARVIS_ENV=${JARVIS_ENV:-production}
+        - JARVIS_VERSION=${JARVIS_VERSION:-2.0.0}
+    container_name: jarvis-agent
+    hostname: jarvis-agent
+    restart: unless-stopped
+    ports:
+      - "${JARVIS_AGENT_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - JARVIS_ENV=${JARVIS_ENV:-production}
+      - JARVIS_HOST=0.0.0.0
+      - JARVIS_PORT=8000
+      - JARVIS_WORKERS=${JARVIS_WORKERS:-4}
+      - JARVIS_LOG_LEVEL=${JARVIS_LOG_LEVEL:-info}
+      - JARVIS_CONFIG_PATH=/app/config/config.yaml
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///app/data/jarvis.db}
+      - JARVIS_WEB_URL=http://jarvis-web:3000
+    volumes:
+      - jarvis-agent-data:/app/data
+      - jarvis-agent-logs:/app/logs
+      - jarvis-agent-uploads:/app/uploads
+      - jarvis-agent-cache:/app/cache
+      - ./python-agent/config.yaml:/app/config/config.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - jarvis-network
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    labels:
+      - "com.jarvis.service=agent"
+      - "com.jarvis.version=2.0.0"
+      - "com.jarvis.environment=${JARVIS_ENV:-production}"
+
+  # ---------------------------------------------------------------------------
+  # JARVIS Web - Next.js Frontend Application
+  # ---------------------------------------------------------------------------
+  jarvis-web:
+    build:
+      context: ./nextjs-app
+      dockerfile: Dockerfile
+      args:
+        - NODE_ENV=${NODE_ENV:-production}
+        - NEXT_PUBLIC_JARVIS_API_URL=${NEXT_PUBLIC_JARVIS_API_URL:-http://localhost:8000}
+    container_name: jarvis-web
+    hostname: jarvis-web
+    restart: unless-stopped
+    ports:
+      - "${JARVIS_WEB_PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - NEXT_PUBLIC_JARVIS_API_URL=${NEXT_PUBLIC_JARVIS_API_URL:-http://jarvis-agent:8000}
+      - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:-ws://jarvis-agent:8000}
+      - JARVIS_AGENT_INTERNAL_URL=http://jarvis-agent:8000
+      - DATABASE_URL=${DATABASE_URL:-file:/app/data/jarvis-web.db}
+      - REDIS_URL=redis://redis:6379/1
+    volumes:
+      - jarvis-web-data:/app/data
+      - jarvis-web-logs:/app/logs
+    depends_on:
+      jarvis-agent:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/jarvis/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - jarvis-network
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "30m"
+        max-file: "3"
+    labels:
+      - "com.jarvis.service=web"
+      - "com.jarvis.version=2.0.0"
+      - "com.jarvis.environment=${JARVIS_ENV:-production}"
+
+  # ---------------------------------------------------------------------------
+  # Redis - Cache, Session Store, and Message Broker
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: jarvis-redis
+    hostname: redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-jarvis_redis_2024}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1000
+      --save 300 100
+      --save 900 1
+      --tcp-keepalive 60
+      --timeout 300
+      --loglevel notice
+    env_file:
+      - .env
+    volumes:
+      - jarvis-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-jarvis_redis_2024}", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - jarvis-network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    labels:
+      - "com.jarvis.service=redis"
+      - "com.jarvis.version=2.0.0"
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  jarvis-agent-data:
+    driver: local
+    labels:
+      - "com.jarvis.volume=agent-data"
+  jarvis-agent-logs:
+    driver: local
+    labels:
+      - "com.jarvis.volume=agent-logs"
+  jarvis-agent-uploads:
+    driver: local
+    labels:
+      - "com.jarvis.volume=agent-uploads"
+  jarvis-agent-cache:
+    driver: local
+    labels:
+      - "com.jarvis.volume=agent-cache"
+  jarvis-web-data:
+    driver: local
+    labels:
+      - "com.jarvis.volume=web-data"
+  jarvis-web-logs:
+    driver: local
+    labels:
+      - "com.jarvis.volume=web-logs"
+  jarvis-redis-data:
+    driver: local
+    labels:
+      - "com.jarvis.volume=redis-data"
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  jarvis-network:
+    driver: bridge
+    name: jarvis-network
+    labels:
+      - "com.jarvis.network=main"
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

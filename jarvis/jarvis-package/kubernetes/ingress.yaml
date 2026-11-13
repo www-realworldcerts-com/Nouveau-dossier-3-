@@ -1,0 +1,153 @@
+# =============================================================================
+# JARVIS AI Agent System - Kubernetes Ingress
+# =============================================================================
+# NGINX Ingress with TLS termination and WebSocket support
+# Routes:
+#   /           -> jarvis-web:3000
+#   /api/       -> jarvis-agent:8000
+#   /ws/        -> jarvis-agent:8000 (WebSocket)
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jarvis-ingress
+  namespace: jarvis
+  labels:
+    app: jarvis
+    component: ingress
+  annotations:
+    # NGINX ingress controller annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+
+    # WebSocket support
+    nginx.ingress.kubernetes.io/websocket-services: "jarvis-agent"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+
+    # Connection upgrade for WebSocket
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header Host $host;
+
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/limit-rps: "30"
+
+    # CORS headers
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://jarvis.example.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Content-Type, Authorization, X-API-Key, X-Request-ID"
+    nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+    nginx.ingress.kubernetes.io/cors-max-age: "86400"
+
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+      more_set_headers "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss: https:; media-src 'self' blob:;";
+      more_set_headers "Permissions-Policy: microphone=(self), camera=()";
+
+    # TLS configuration
+    nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.2 TLSv1.3"
+    nginx.ingress.kubernetes.io/ssl-ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+    nginx.ingress.kubernetes.io/ssl-prefer-server-ciphers: "true"
+
+    # HSTS
+    nginx.ingress.kubernetes.io/force-hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+    nginx.ingress.kubernetes.io/hsts-preload: "true"
+
+    # Cert-manager for automatic TLS certificates
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/issuer: letsencrypt-prod
+
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - jarvis.example.com
+      secretName: jarvis-tls-secret
+  rules:
+    # Primary domain - Web UI
+    - host: jarvis.example.com
+      http:
+        paths:
+          # API routes -> Agent backend
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: jarvis-agent
+                port:
+                  number: 8000
+
+          # WebSocket routes -> Agent backend
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: jarvis-agent
+                port:
+                  number: 8000
+
+          # Metrics endpoint -> Agent backend
+          - path: /metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: jarvis-agent
+                port:
+                  number: 8000
+
+          # Health endpoint -> Agent backend
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: jarvis-agent
+                port:
+                  number: 8000
+
+          # Default -> Web frontend
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jarvis-web
+                port:
+                  number: 3000
+
+---
+# Certificate resource for cert-manager
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: jarvis-tls
+  namespace: jarvis
+spec:
+  secretName: jarvis-tls-secret
+  duration: 2160h    # 90 days
+  renewBefore: 360h  # 15 days before expiry
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - jarvis.example.com
+    - api.jarvis.example.com
+  usages:
+    - digital signature
+    - key encipherment

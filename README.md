@@ -3,6 +3,14 @@
 ## Overview
 This system is an autonomous revenue generation and settlement engine designed to operate with minimal human intervention. It leverages a swarm of specialized agents to identify opportunities, execute tasks, and settle funds to verified owner accounts.
 
+## 🧩 Subprojects
+
+- **[JARVIS](jarvis/README.md)** — Next.js 16 agent dashboard (chat, voice, swarm,
+  uploads). Has its own Bun lockfile; run its commands from `jarvis/`.
+- Open both projects in one IDE window with [`swarm.code-workspace`](swarm.code-workspace).
+- Agent/Copilot conventions live in [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
+  and [`jarvis/AGENTS.md`](jarvis/AGENTS.md).
+
 ## 📚 Documentation
 Comprehensive documentation is available in the `docs/` directory:
 

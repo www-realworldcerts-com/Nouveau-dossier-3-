@@ -1,6 +1,15 @@
 # Changelog
 
 ## 2026-11-13
+- Added procurement contentieux case files (`npm run contentieux`): late or held
+  POs become `CTX-<po_ref>` cases with amount at stake, hold meanings, an
+  evidence checklist and a next action. The report is read-only and never
+  fabricates a POD, receipt or invoice.
+- Attijari bank-wire export no longer hardcodes Windows paths or the owner's
+  account: batch/account come from flags or environment, the account is masked,
+  and amounts, currency and references are validated. `--dry-run` validates
+  without writing. `docs/ATTIJARI_CONTENTIEUX.md` records that bulk CSV upload
+  needs Attijari Entreprise, so a personal account must use unit transfers.
 - Storefront capability probe now runs against `https://www.realworldcerts.com` by default
   (`STOREFRONT_URL` / `--storefront-url` override) and raises
   `STOREFRONT_NOT_TRANSACTIONAL` only when an origin 200 proves a static build

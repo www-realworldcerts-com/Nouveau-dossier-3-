@@ -34,6 +34,10 @@ no PO delivery has ever been "successful" in the system's own terms.
 ## Usage
 
 ```bash
+# Import existing orders + real carrier evidence, dry-run first
+npm run procurement:import -- --orders orders.json --evidence scans/ --dry-run
+npm run procurement:import -- --orders orders.json --evidence scans/ --apply
+
 npm run procurement -- ingest request.json --place
 npm run procurement -- list
 npm run procurement -- status

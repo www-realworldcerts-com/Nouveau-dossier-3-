@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-11-13
+- Added a dry-run-first procurement bootstrap importer for existing orders and
+  AMANA scan files (`npm run procurement:import`). It backdates creation and
+  placement, matches evidence by PO/tracking, and leaves invalid or missing
+  PODs on hold instead of fabricating delivery proof.
 - Wired procurement contentieux into the tick audit: every written audit raises
   `PROCUREMENT_CONTENTIEUX` with case IDs, amount at stake, oldest aging and hold
   codes, and persists `data/resilience/contentieux.json` for JARVIS.

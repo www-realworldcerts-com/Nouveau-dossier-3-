@@ -82,15 +82,15 @@ export class ProcurementAgent {
                 po = { ...po, po_ref: createPoRef({ supplier: request.supplier, recipient: request.recipient.name, date: at, seq: seq + 1 }) };
             }
             po = this.save(po, 'created', { external_id: po.external_id });
-            if (place) po = this.place(po.po_ref, { actor: request.requested_by || 'swarm' });
+            if (place) po = this.place(po.po_ref, { actor: request.requested_by || 'swarm', at });
             created.push(po);
         }
         return { created, skipped };
     }
 
-    place(poRef, { actor = 'operator' } = {}) {
+    place(poRef, { actor = 'operator', at = this.now() } = {}) {
         const po = this.require(poRef);
-        return this.save(transitionPo(po, 'placed', { at: this.now(), actor }), 'placed');
+        return this.save(transitionPo(po, 'placed', { at, actor }), 'placed');
     }
 
     ship(poRef, { carrier, tracking, shipped_at, scans = [] } = {}) {

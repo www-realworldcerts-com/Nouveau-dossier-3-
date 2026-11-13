@@ -20,7 +20,9 @@
     "test:resilience": "node --test test/redress.test.mjs test/silent-failure.test.mjs test/storefront-probe.test.mjs",
     "test:reconcile": "node --test test/paypal-reconciliation.test.mjs test/paypal-api.test.mjs",
     "test:loop": "node --test test/swarm-loop-health.test.mjs test/tick-audit.test.mjs",
-    "test:deploy": "node --test test/vercel-handler.test.mjs"
+    "test:deploy": "node --test test/vercel-handler.test.mjs",
+    "pricing:table": "node scripts/generate-price-table.mjs",
+    "test:pricing-table": "node --test test/generate-price-table.test.mjs"
   },
   "dependencies": {
     "base64-js": "^1.5.1",

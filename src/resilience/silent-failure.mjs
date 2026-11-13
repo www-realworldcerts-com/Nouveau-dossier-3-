@@ -184,9 +184,9 @@ export const FINDING_CATALOG = {
         impact: 'The origin responded, so this is not a network blip, but the page or API is not serving the expected 200/404 contract.',
         containment: 'Do not treat the deployment as verified while the unexpected status persists.',
         obligation: 'Identify which layer returns the status and restore the expected response.',
-        remedy: 'Check the deployment logs for the storefront and the /api/healthz route; fix the failing page or API.',
+        remedy: 'Check the deployment logs for the storefront and its health routes (/api/healthz, /health); fix the failing page or API.',
         mitigation: 'HTTP errors are reported separately from static builds and from transport failures.',
-        verification: 'The homepage returns 200 and /api/healthz returns 200 or 404.',
+        verification: 'The homepage returns 200 and a health route returns 200 or 404.',
         owner_action: 'Inspect the Vercel deployment logs for the failing response.',
         sla_hours: 48
     },
@@ -550,6 +550,7 @@ export function detectSilentFailures({
         add(code, `${storefrontProbe.url} -> ${verdict}: ${storefrontVerdictHint(verdict)}`, {
             status: storefrontProbe.status,
             health_status: storefrontProbe.health_status,
+            health_path: storefrontProbe.health_path || null,
             health_error: storefrontProbe.health_error || null,
             app_runtime: storefrontProbe.app_runtime,
             api_alive: storefrontProbe.api_alive,

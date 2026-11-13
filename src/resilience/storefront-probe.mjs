@@ -13,6 +13,9 @@
 
 const APP_RUNTIME_PATTERN = /__NEXT_DATA__|_next\/static|\/_next\//i;
 
+/** Health/routes the application actually exposes; first non-404 wins. */
+export const API_PROBE_PATHS = ['/api/healthz', '/health', '/api/webhooks/paypal'];
+
 /** Upstream/edge statuses worth one retry; they do not prove a broken build. */
 export const TRANSIENT_STATUSES = new Set([408, 429, 502, 503, 504]);
 
@@ -121,43 +124,53 @@ export async function probeStorefront(url, {
     let healthStatus = null;
     let healthError = null;
     let healthAttempts = 0;
+    let apiPath = null;
 
     if (home.ok) {
         status = home.response.status;
         html = typeof home.response.text === 'function' ? await home.response.text() : '';
-        if (status >= 200 && status < 400) {
-            const health = await fetchWithRetry(new URL('/api/healthz', base).toString(), {
-                fetchImpl, timeoutMs, retries, retryDelayMs, sleepImpl,
-                method: 'GET',
-                redirect: 'manual'
-            });
-            healthAttempts = health.attempts;
-            if (health.ok) healthStatus = health.response.status;
-            else healthError = describeError(health.error);
-        }
     } else {
         error = describeError(home.error);
     }
 
+    if (home.ok && status >= 200 && status < 400) {
+        for (const candidate of API_PROBE_PATHS) {
+            const health = await fetchWithRetry(new URL(candidate, base).toString(), {
+                fetchImpl, timeoutMs, retries, retryDelayMs, sleepImpl,
+                method: 'GET',
+                redirect: 'manual'
+            });
+            healthAttempts += health.attempts;
+            if (!health.ok) {
+                if (healthStatus === null) healthError = describeError(health.error);
+                continue;
+            }
+            healthStatus = health.response.status;
+            apiPath = candidate;
+            if (healthStatus !== 404) break;
+        }
+    }
+
     const appRuntime = APP_RUNTIME_PATTERN.test(html);
     const reachable = home.ok && status >= 200 && status < 400;
-    const apiAlive = Number.isFinite(healthStatus) && healthStatus >= 200 && healthStatus < 400;
+    const apiReachable = healthStatus !== null && healthStatus !== 404;
+    const apiAlive = apiReachable && healthStatus < 500;
     let verdict;
     if (!home.ok) {
         verdict = 'unreachable';
     } else if (!reachable) {
         verdict = TRANSIENT_STATUSES.has(status) ? 'unreachable' : 'http_error';
-    } else if (healthError) {
-        // The origin answered but the API probe could not: not enough evidence
-        // to claim a static build, and not a transactional success.
+    } else if (healthStatus === null) {
+        // The origin answered but no API candidate did: not enough evidence to
+        // claim a static build, and not a transactional success.
         verdict = 'unreachable';
     } else if (TRANSIENT_STATUSES.has(healthStatus)) {
         verdict = 'unreachable';
-    } else if (!appRuntime && healthStatus === 404) {
+    } else if (!appRuntime && !apiReachable) {
         verdict = 'static_only';
-    } else if (appRuntime && healthStatus === 404) {
+    } else if (appRuntime && !apiReachable) {
         verdict = 'application_without_api';
-    } else if (Number.isFinite(healthStatus) && healthStatus >= 400) {
+    } else if (healthStatus >= 500) {
         verdict = 'http_error';
     } else {
         verdict = 'application';
@@ -167,6 +180,7 @@ export async function probeStorefront(url, {
         url: base.toString(),
         status,
         health_status: healthStatus,
+        health_path: apiPath,
         health_error: healthError,
         verdict,
         ok: verdict === 'application',
@@ -184,7 +198,7 @@ export function storefrontVerdictHint(verdict) {
     return {
         application: 'Application runtime and API route are reachable.',
         static_only: 'Static HTML build: no application runtime and no API route, so checkout/webhooks cannot work.',
-        application_without_api: 'Application runtime present but the health API is missing.',
+        application_without_api: 'Application runtime present but every API health route returns 404.',
         http_error: 'The storefront answered with an unexpected HTTP status.',
         unreachable: 'No usable HTTP response after retries; reachability is unknown, not proven broken.'
     }[verdict] || 'Unknown verdict.';

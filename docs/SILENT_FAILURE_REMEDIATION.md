@@ -81,7 +81,8 @@ The storefront probe checks `https://www.realworldcerts.com` by default, so the
 CI sentinel and `npm start` raise `STOREFRONT_NOT_TRANSACTIONAL` with no extra
 configuration. `--storefront-url` or `STOREFRONT_URL` overrides the domain. It
 loads the homepage, looks for an application runtime (`_next`/`__NEXT_DATA__`)
-and probes `/api/healthz`. A 200 page with neither is
+and probes `/api/healthz`, then `/health`, then `/api/webhooks/paypal`, stopping
+at the first non-404. A 200 page with neither runtime nor any API route is
 `STOREFRONT_NOT_TRANSACTIONAL` (critical): the deployed directory has no API
 routes, so checkout and webhooks cannot work regardless of application code
 elsewhere.

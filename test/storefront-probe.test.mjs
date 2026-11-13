@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    API_PROBE_PATHS,
     DEFAULT_STOREFRONT_URL,
     fetchWithRetry,
     isTransientNetworkError,
@@ -14,11 +15,15 @@ import { buildTickAuditArgs } from '../src/swarm/tick-audit.mjs';
 const sleepNone = async () => {};
 const retryOptions = { retryDelayMs: 1, sleepImpl: sleepNone };
 
-function fakeFetch({ html = '', health = 404 } = {}) {
-    return async url => ({
-        status: String(url).endsWith('/api/healthz') ? health : 200,
-        text: async () => html
-    });
+function fakeFetch({ html = '', health = 404, healthPath = '/api/healthz', apiStatuses = {} } = {}) {
+    return async url => {
+        const pathname = new URL(url).pathname;
+        if (API_PROBE_PATHS.includes(pathname)) {
+            const status = apiStatuses[pathname] ?? (pathname === healthPath ? health : 404);
+            return { status, text: async () => '' };
+        }
+        return { status: 200, text: async () => html };
+    };
 }
 
 function networkError(code) {
@@ -50,6 +55,36 @@ test('an application build with a missing API is application_without_api', async
     });
     assert.equal(probe.verdict, 'application_without_api');
     assert.equal(probe.ok, false);
+});
+
+test('a plain-HTML app that exposes /health is application, not static', async () => {
+    const probe = await probeStorefront('https://shop.example/', {
+        fetchImpl: fakeFetch({ html: '<html>Shop</html>', healthPath: '/health', health: 200 })
+    });
+    assert.equal(probe.verdict, 'application');
+    assert.equal(probe.health_path, '/health');
+    const { findings } = detectSilentFailures({ now: new Date(), storefrontProbe: probe });
+    assert.deepEqual(findings.filter(item => item.code.startsWith('STOREFRONT_')), []);
+});
+
+test('a protected health route (401) still proves the API layer exists', async () => {
+    const probe = await probeStorefront('https://shop.example/', {
+        fetchImpl: fakeFetch({
+            html: '<html>Shop</html>',
+            apiStatuses: { '/api/healthz': 404, '/health': 401 }
+        })
+    });
+    assert.equal(probe.verdict, 'application');
+    assert.equal(probe.health_status, 401);
+});
+
+test('a 500 health route is WARN-http_error, not a static build', async () => {
+    const probe = await probeStorefront('https://shop.example/', {
+        fetchImpl: fakeFetch({ html: '<html>Shop</html>', healthPath: '/health', health: 500 })
+    });
+    assert.equal(probe.verdict, 'http_error');
+    const { findings } = detectSilentFailures({ now: new Date(), storefrontProbe: probe });
+    assert.equal(findings.find(item => item.code === 'STOREFRONT_HTTP_ERROR').severity, 'warning');
 });
 
 test('the storefront defaults to the production domain without configuration', () => {
@@ -143,7 +178,7 @@ test('a static 200 on the first try is immediately critical with no retry', asyn
     let calls = 0;
     const probe = await probeStorefront('https://shop.example/', {
         fetchImpl: async url => {
-            if (String(url).endsWith('/api/healthz')) return { status: 404, text: async () => '' };
+            if (API_PROBE_PATHS.includes(new URL(url).pathname)) return { status: 404, text: async () => '' };
             calls += 1;
             return { status: 200, text: async () => '<html><a href="/checkout/paypal">Pay</a></html>' };
         },

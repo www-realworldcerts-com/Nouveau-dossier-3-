@@ -53,9 +53,9 @@ bun run lint          # eslint
 bun run build         # production compile
 ```
 
-All three are expected to pass. The build config sets
-`typescript.ignoreBuildErrors: true` for deployment tolerance, so run `tsc`
-in CI or before a release — Next.js alone will not catch type regressions.
+All three are expected to pass. `next build` now enforces types (the previous
+`ignoreBuildErrors` flag was removed), so a type regression fails the build
+instead of shipping.
 
 ## Layout
 
@@ -69,19 +69,27 @@ in CI or before a release — Next.js alone will not catch type regressions.
 | `db/custom.db` | local database, created by `db:push` (ignored) |
 | `jarvis-package/` | distribution copy: Docker, Kubernetes, Python agent, docs |
 
-`examples/` and `jarvis-package/` are excluded from this app's typecheck and
-lint because they are standalone references and a distributable snapshot, not
-part of the Next build. Treat `src/` as the source of truth.
+`jarvis-package/` is a distributable snapshot (Docker, Kubernetes, Python
+agent) and is excluded from this app's typecheck and lint. It is **not** built
+by the Next app; its `nextjs-app/` copy can drift from `src/`. Treat `src/` as
+the only source of truth and regenerate or drop that copy when the package is
+next cut.
 
 ## Fixes applied on import
 
 - Generated the Prisma client so `@prisma/client` exports `PrismaClient`.
-- Replaced `Record<string, unknown>` callback annotations that clashed with SDK
-  `SearchFunctionResultItem` types.
-- Cast image sizes to the SDK's union after runtime validation.
+- Replaced untyped SDK callbacks with the exported `SearchFunctionResultItem`
+  type, which also fixed search titles: they were read from a nonexistent
+  `title` field instead of `name`.
+- Replaced image-size casts with the SDK's own `CreateImageGenerationBody`
+  union and a type guard; unsupported sizes (256/512/1792) were removed.
+- Corrected the page-reading tool to invoke the SDK's `page_reader`
+  (previously called a nonexistent `web_reader` function).
 - Added the required `model` to `createVision` (override with
   `ZAI_VISION_MODEL`).
 - Added `activate?: boolean` to the swarm activation payload.
-- Added the missing `status` field to chat attachments sent to the store.
-- Excluded duplicated/example trees from typecheck and lint; added a workspace
-  file at the repository root for multi-root IDE sessions.
+- Removed the unused `examples/` tree (it depended on socket.io, which is not a
+  project dependency).
+- Removed `typescript.ignoreBuildErrors`; `tsc` and `next build` now enforce
+  types again.
+- Added a workspace file at the repository root for multi-root IDE sessions.

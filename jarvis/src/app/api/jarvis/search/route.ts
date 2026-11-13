@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
+import type { SearchFunctionResultItem } from 'z-ai-web-dev-sdk';
 
 interface SearchRequest {
   query: string;
@@ -32,15 +33,12 @@ export async function POST(req: NextRequest) {
 
     // Normalize results to ensure consistent format
     const normalizedResults: SearchResult[] = Array.isArray(results)
-      ? results.map((result) => {
-          const r = result as unknown as Record<string, unknown>;
-          return {
-            title: String(r.title || ''),
-            url: String(r.url || ''),
-            snippet: String(r.snippet || r.content || ''),
-            host_name: String(r.host_name || r.hostname || new URL(String(r.url || 'https://unknown')).hostname),
-          };
-        })
+      ? results.map((result: SearchFunctionResultItem) => ({
+          title: result.name,
+          url: result.url,
+          snippet: result.snippet,
+          host_name: result.host_name || new URL(result.url || 'https://unknown').hostname,
+        }))
       : [];
 
     return NextResponse.json({

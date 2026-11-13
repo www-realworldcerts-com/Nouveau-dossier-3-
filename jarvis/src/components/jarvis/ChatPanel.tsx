@@ -404,18 +404,14 @@ export default function ChatPanel() {
       if (!text.trim() || isProcessing) return
 
       // Build file contexts from attachments
-      const fileContexts = chatAttachments
-        .filter((a) => a.status === 'complete')
-        .map((a) => ({
-          name: a.name,
-          type: a.type,
-          analysis: a.analysis,
-          content: a.content,
-        }))
-
-      const attachedFiles = chatAttachments
-        .filter((a) => a.status === 'complete')
-        .map((a) => ({ id: a.id, name: a.name, size: a.size, type: a.type, status: a.status }))
+      const completedAttachments = chatAttachments.filter((a) => a.status === 'complete')
+      const fileContexts = completedAttachments.map((a) => ({
+        name: a.name,
+        type: a.type,
+        analysis: a.analysis,
+        content: a.content,
+      }))
+      const attachedFiles = completedAttachments
 
       const userMessage: Message = {
         id: `msg-${Date.now()}`,

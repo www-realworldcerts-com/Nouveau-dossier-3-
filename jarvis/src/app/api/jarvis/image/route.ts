@@ -1,18 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
+import type { CreateImageGenerationBody } from 'z-ai-web-dev-sdk';
 
 interface ImageRequest {
   prompt: string;
   size?: string;
 }
 
-const VALID_SIZES = [
-  '256x256',
-  '512x512',
+type ImageSize = NonNullable<CreateImageGenerationBody['size']>;
+const VALID_SIZES: readonly ImageSize[] = [
   '1024x1024',
-  '1024x1792',
-  '1792x1024',
+  '768x1344',
+  '864x1152',
+  '1344x768',
+  '1152x864',
+  '1440x720',
+  '720x1440',
 ];
+
+function isImageSize(value: unknown): value is ImageSize {
+  return typeof value === 'string' && (VALID_SIZES as readonly string[]).includes(value);
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -27,7 +35,7 @@ export async function POST(req: NextRequest) {
     }
 
     const selectedSize = size || '1024x1024';
-    if (!VALID_SIZES.includes(selectedSize)) {
+    if (!isImageSize(selectedSize)) {
       return NextResponse.json(
         { error: `Invalid size "${selectedSize}". Valid sizes: ${VALID_SIZES.join(', ')}` },
         { status: 400 }
@@ -37,7 +45,7 @@ export async function POST(req: NextRequest) {
     const zai = await ZAI.create();
     const response = await zai.images.generations.create({
       prompt: prompt,
-      size: selectedSize as Parameters<typeof zai.images.generations.create>[0]["size"],
+      size: selectedSize,
     });
 
     if (!response.data || response.data.length === 0 || !response.data[0].base64) {

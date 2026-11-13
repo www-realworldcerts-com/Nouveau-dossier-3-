@@ -49,6 +49,29 @@ test('legacy price books and ndjson rows are accepted', () => {
     assert.deepEqual(ready, [{ slug: 'crs_101', price_mad: '1500.00' }]);
 });
 
+test('marketing descriptions cannot downgrade a title-derived tier', () => {
+    const { ready, review } = buildPriceTable({
+        items: [
+            {
+                slug: 'acca-f5-performance-management-test',
+                title: 'ACCA F5 Performance Management test',
+                description: 'A foundation course for absolute beginners.'
+            },
+            {
+                slug: 'everyday-workplace-skills',
+                title: 'Everyday Workplace Skills',
+                description: 'A professional certificate for career growth.'
+            }
+        ]
+    });
+    assert.equal(review.length, 0);
+    const prices = Object.fromEntries(ready.map(row => [row.slug, row.price_mad]));
+    // "test" in the title wins over "foundation" in the description.
+    assert.equal(prices['acca-f5-performance-management-test'], '1500.00');
+    // Description is used only when the title has no tier keyword.
+    assert.equal(prices['everyday-workplace-skills'], '2500.00');
+});
+
 test('premium exception courses are routed to review, not guessed', () => {
     const { ready, review } = buildPriceTable({
         items: [

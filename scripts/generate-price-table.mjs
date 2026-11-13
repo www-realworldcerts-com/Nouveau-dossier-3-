@@ -25,11 +25,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-    loadPricingConfig,
-    priceByRules,
-    resolveConfigPath,
+    clampPrice,
     exceptionReasons,
-    resolveTier
+    getTierConfig,
+    loadPricingConfig,
+    resolveConfigPath,
+    resolveTier,
+    roundMad
 } from '../src/sales/pricing.mjs';
 
 export const CATALOG_CANDIDATES = [
@@ -85,6 +87,17 @@ function toCourse(raw) {
     };
 }
 
+/**
+ * Titles are the reliable signal: marketing descriptions mention "foundation",
+ * "advanced" and similar words loosely, which moved 121/302 courses into the
+ * wrong tier (82 were priced at the 900 MAD foundation baseline). Use the
+ * description only when the title carries no tier keyword at all.
+ */
+export function resolveCourseTier(course, config) {
+    const titleTier = resolveTier({ ...course, description: '' }, config);
+    return titleTier !== 'default' ? titleTier : resolveTier(course, config);
+}
+
 function csvCell(value) {
     const text = String(value ?? '');
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -116,7 +129,7 @@ export function buildPriceTable(rawCatalog, { config = loadPricingConfig(resolve
             continue;
         }
 
-        const tier = resolveTier(course, config);
+        const tier = resolveCourseTier(course, config);
         const reasons = exceptionReasons(course, tier, config).map(item => item.reason);
         if (reasons.length) {
             review.push({ slug: course.slug, reason: reasons.join('; ') });
@@ -124,12 +137,9 @@ export function buildPriceTable(rawCatalog, { config = loadPricingConfig(resolve
         }
 
         try {
-            const valuation = priceByRules(course, config);
-            if (!Number.isFinite(valuation.price_mad) || valuation.price_mad <= 0) {
-                review.push({ slug: course.slug, reason: 'rules_engine_returned_no_price' });
-                continue;
-            }
-            ready.push({ slug: course.slug, price_mad: Number(valuation.price_mad).toFixed(2) });
+            const tierConfig = getTierConfig(tier, config);
+            const price = clampPrice(roundMad(tierConfig.baseline_mad, config), tierConfig);
+            ready.push({ slug: course.slug, price_mad: Number(price).toFixed(2) });
         } catch (error) {
             review.push({ slug: course.slug, reason: `pricing_error: ${error.message}` });
         }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
+  "rewrites": [
+    { "source": "/health", "destination": "/api/index" },
+    { "source": "/all-good", "destination": "/api/index" },
+    { "source": "/revenue/(.*)", "destination": "/api/index" },
+    { "source": "/acp/(.*)", "destination": "/api/index" },
+    { "source": "/x402/(.*)", "destination": "/api/index" },
+    { "source": "/rails/(.*)", "destination": "/api/index" },
+    { "source": "/ilp/(.*)", "destination": "/api/index" },
+    { "source": "/paypal/webhook", "destination": "/api/index" },
+    { "source": "/api/webhooks/paypal", "destination": "/api/index" }
+  ]
+}

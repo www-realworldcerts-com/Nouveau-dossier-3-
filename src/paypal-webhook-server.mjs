@@ -1,6 +1,8 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import "./load-env.mjs";
 import { enforceConstitutionSoft } from "./bootstrap/constitution-validator.mjs";
 import { buildBase44ServiceClient } from "./base44-client.mjs";
@@ -21,6 +23,21 @@ import { maybeSendAlert } from "./alerts.mjs";
 import { createDedupeStore } from "./dedupe-store.mjs";
 import { enforceAuthorityProtocol } from "./authority.mjs";
 import { addSecurityHeaders, validateRequest, validateAuth } from "./security-middleware.mjs";
+
+const isDirectExecution =
+  Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+let requestHandler = null;
+
+/**
+ * Handler for embedded/serverless runtimes (Vercel). The module initialises the
+ * dedupe store and config check on import, then registers this handler instead
+ * of binding a port.
+ */
+export function getRequestHandler() {
+  if (!requestHandler) throw new Error("webhook server handler is not initialised");
+  return requestHandler;
+}
 
 function parseArgs(argv) {
   const args = {};
@@ -942,9 +959,9 @@ if (args.check === true || args["config-check"] === true) {
     process.once("SIGTERM", () => shutdown(0));
   }
 
-  attachFlushOnSignals();
+  if (isDirectExecution) attachFlushOnSignals();
 
-  const server = http.createServer(async (req, res) => {
+  const handler = async (req, res) => {
     addSecurityHeaders(res);
     const secErr = validateRequest(req);
     if (secErr) {
@@ -1546,7 +1563,7 @@ if (args.check === true || args["config-check"] === true) {
       return;
     }
 
-    if (pathname !== "/paypal/webhook") {
+    if (pathname !== "/paypal/webhook" && pathname !== "/api/webhooks/paypal") {
       json(res, 404, { ok: false, error: "Not found" });
       return;
     }
@@ -1836,24 +1853,30 @@ if (args.check === true || args["config-check"] === true) {
     }
     json(res, 500, { ok: false, error: e?.message ?? String(e), processingMs: Date.now() - startMs });
   }
-  });
+  };
+  requestHandler = handler;
 
-  const port = Number(process.env.PORT ?? "8787");
-  server.listen(port, () => {
-    const localUrl = `http://127.0.0.1:${port}/paypal/webhook`;
-    const healthUrl = `http://127.0.0.1:${port}/health`;
-    process.stdout.write(`${JSON.stringify({ ok: true, listening: true, port, path: "/paypal/webhook", localUrl, healthUrl })}\n`);
-    const publicBase = (process.env.PUBLIC_BASE_URL ?? process.env.PUBLIC_WEBHOOK_BASE_URL ?? "").trim();
-    if (publicBase) {
-      const base = publicBase.replace(/\/+$/g, "");
-      process.stdout.write(
-        `${JSON.stringify({
-          ok: true,
-          publicBase: base,
-          webhookUrl: `${base}/paypal/webhook`,
-          healthUrl: `${base}/health`
-        })}\n`
-      );
-    }
-  });
+  if (isDirectExecution && !process.env.VERCEL) {
+    const server = http.createServer(handler);
+    const port = Number(process.env.PORT ?? "8787");
+    server.listen(port, () => {
+      const localUrl = `http://127.0.0.1:${port}/paypal/webhook`;
+      const healthUrl = `http://127.0.0.1:${port}/health`;
+      process.stdout.write(`${JSON.stringify({ ok: true, listening: true, port, path: "/paypal/webhook", localUrl, healthUrl })}\n`);
+      const publicBase = (process.env.PUBLIC_BASE_URL ?? process.env.PUBLIC_WEBHOOK_BASE_URL ?? "").trim();
+      if (publicBase) {
+        const base = publicBase.replace(/\/+$/g, "");
+        process.stdout.write(
+          `${JSON.stringify({
+            ok: true,
+            publicBase: base,
+            webhookUrl: `${base}/paypal/webhook`,
+            healthUrl: `${base}/health`
+          })}\n`
+        );
+      }
+    });
+  } else {
+    process.stdout.write(`${JSON.stringify({ ok: true, embedded: true, path: "/paypal/webhook", healthUrl: "/health" })}\n`);
+  }
 }

@@ -66,9 +66,10 @@ test('CLI writes the CSV and dry-run writes nothing', () => {
     const batchFile = path.join(dir, 'batch.json');
     fs.writeFileSync(batchFile, JSON.stringify(BATCH));
     const outDir = path.join(dir, 'out');
+    const ledgerFile = path.join(dir, 'ledger.json');
     const messages = [];
 
-    const dry = run(['--batch', batchFile, '--account', ACCOUNT, '--out-dir', outDir, '--dry-run'], {
+    const dry = run(['--batch', batchFile, '--account', ACCOUNT, '--out-dir', outDir, '--ledger', ledgerFile, '--no-history', '--dry-run'], {
         stdout: message => messages.push(message)
     });
     assert.equal(dry.rows.length, 2);
@@ -76,7 +77,7 @@ test('CLI writes the CSV and dry-run writes nothing', () => {
     assert.match(messages[0], /DRY RUN/);
     assert.doesNotMatch(messages[0], /007810000448500030594182/);
 
-    run(['--batch', batchFile, '--account', ACCOUNT, '--out-dir', outDir], { stdout: () => {} });
+    run(['--batch', batchFile, '--account', ACCOUNT, '--out-dir', outDir, '--ledger', ledgerFile, '--no-history'], { stdout: () => {} });
     const written = fs.readFileSync(path.join(outDir, 'bank_wire_BATCH_TEST.csv'), 'utf8');
     assert.match(written, /^Beneficiary Account,Amount,Currency,Reference,Date,Description/);
     assert.match(written, /ITEM_2/);

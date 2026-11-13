@@ -1,6 +1,14 @@
 # Changelog
 
 ## 2026-11-13
+- Added a persistent payout ledger: every CSV export reserves both `earning_id`
+  and `item_id`, checks the ledger plus all historical payout batches, and
+  refuses a duplicate export. Payouts move through submitted/credited/failed/
+  returned, with `--mark-credited` for manual settlement.
+- Added Attijari/Payoneer statement import (`npm run import:payout-statement`)
+  with reference-first matching, amount/date fallback only when unique,
+  idempotent fingerprints, and fee, net amount, FX rate and FX difference
+  recorded per settlement.
 - Added procurement contentieux case files (`npm run contentieux`): late or held
   POs become `CTX-<po_ref>` cases with amount at stake, hold meanings, an
   evidence checklist and a next action. The report is read-only and never

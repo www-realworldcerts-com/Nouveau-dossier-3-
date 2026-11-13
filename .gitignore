@@ -49,3 +49,6 @@ data/resilience/
 data/swarm-heartbeat.json
 data/swarm-tick-log.ndjson
 data/swarm-loop.lock
+
+# payout ledger (runtime financial state)
+data/financial/payout_ledger.json

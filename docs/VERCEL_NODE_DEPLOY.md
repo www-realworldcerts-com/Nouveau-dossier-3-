@@ -93,3 +93,19 @@ node scripts/silent-failure.mjs audit --fail-on high
 
 PayPal retries a non-2xx delivery up to 25 times over 3 days, so the health and
 webhook checks must pass before relying on the endpoint.
+
+## Raw webhook body
+
+Signature verification needs the exact bytes PayPal sent. Vercel exposes
+`request.body` as a lazy, parsed helper, so the handler must never touch it
+before reading the stream. `readRawBody` therefore:
+
+1. reads the request stream first and returns it unchanged;
+2. only if the stream is already ended, falls back to `req.rawBody` or
+   `req.body` when that value is a Buffer, string or byte array;
+3. throws (fail closed) if the only remaining value is a parsed object, since
+   re-serialising it would change whitespace and key order.
+
+The wrapper test feeds a real `Readable` through the handler and asserts the
+parsed event reaches signature verification, so an empty or reformatted body
+fails the test rather than production.

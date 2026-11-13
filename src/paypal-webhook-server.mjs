@@ -108,8 +108,51 @@ function getPathname(req) {
   }
 }
 
-function readRawBody(req, { limitBytes }) {
+function bufferToText(value) {
+  if (Buffer.isBuffer(value)) return value.toString("utf8");
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("utf8");
+  if (value instanceof ArrayBuffer) return Buffer.from(value).toString("utf8");
+  return null;
+}
+
+/**
+ * Raw bytes that a runtime buffered before invoking the handler. Only exact
+ * representations are accepted; a parsed object cannot be verified, because
+ * re-serialising it changes whitespace and key order.
+ */
+function readBufferedRawBody(req) {
+  for (const key of ["rawBody", "body"]) {
+    const value = req?.[key];
+    if (value == null) continue;
+    const text = bufferToText(value);
+    if (text != null) return text;
+    if (typeof value === "object") {
+      throw new Error("Raw request body was parsed before signature verification");
+    }
+  }
+  return null;
+}
+
+export function readRawBody(req, { limitBytes }) {
+  const finish = (text) => {
+    if (text == null) return "";
+    if (Buffer.byteLength(text, "utf8") > limitBytes) throw new Error("Request body too large");
+    return text;
+  };
+
   return new Promise((resolve, reject) => {
+    // Some runtimes hand over an already-consumed stream with the body buffered
+    // separately; use those bytes rather than an empty string.
+    if (req?.readableEnded === true) {
+      try {
+        resolve(finish(readBufferedRawBody(req)));
+      } catch (e) {
+        reject(e);
+      }
+      return;
+    }
+
     const chunks = [];
     let size = 0;
 
@@ -123,7 +166,18 @@ function readRawBody(req, { limitBytes }) {
       chunks.push(chunk);
     });
 
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      const streamed = Buffer.concat(chunks).toString("utf8");
+      if (streamed.length > 0) {
+        resolve(streamed);
+        return;
+      }
+      try {
+        resolve(finish(readBufferedRawBody(req)));
+      } catch (e) {
+        reject(e);
+      }
+    });
     req.on("error", reject);
   });
 }

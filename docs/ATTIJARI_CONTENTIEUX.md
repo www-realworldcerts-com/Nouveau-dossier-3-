@@ -108,6 +108,13 @@ Rules:
 - Evidence must come from the carrier/supplier. The generator will not fill in a
   POD, weight or receipt to make a case look complete.
 
+Every silent-failure audit (`--write`, including the tick audit) now raises a
+`PROCUREMENT_CONTENTIEUX` finding with the case IDs, amount at stake, oldest
+aging and hold codes, and writes `data/resilience/contentieux.json`. JARVIS
+serves that report at `/api/jarvis/contentieux` and shows it above the swarm
+agents, so a late or held PO no longer requires a manual CLI run. Set
+`SWARM_ROOT` if JARVIS runs outside the repository directory.
+
 The operational escalation is: request the missing evidence in writing, keep the
 PO open, then either obtain delivery or claim a refund. A supplier claim should
 quote the `PO` reference, supplier, amount, order date, tracking number and the

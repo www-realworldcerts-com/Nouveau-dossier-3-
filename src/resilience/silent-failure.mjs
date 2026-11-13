@@ -11,6 +11,7 @@ import {
 } from '../swarm/loop-health.mjs';
 import { ProcurementStore } from '../procurement/store.mjs';
 import { evaluatePo } from '../procurement/po.mjs';
+import { buildContentieuxCases } from '../procurement/contentieux.mjs';
 import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
 import { storefrontVerdictHint } from './storefront-probe.mjs';
@@ -97,6 +98,19 @@ export const FINDING_CATALOG = {
         mitigation: 'PO delivery evidence gate and AMANA scan ingestion.',
         verification: 'Each stalled PO reaches delivered/verified with POD, weight, city and invoice match.',
         owner_action: 'Provide carrier tracking/POD or escalate the order with the supplier.',
+        sla_hours: 48
+    },
+    PROCUREMENT_CONTENTIEUX: {
+        domain: 'procurement',
+        severity: 'high',
+        title: 'Purchase orders need contentieux action',
+        impact: 'Paid or committed orders are late, held or unverifiable, so owner funds are exposed without a delivery.',
+        containment: 'Keep every listed case open; do not close a PO or release payment without the missing evidence.',
+        obligation: 'Resolve every contentieux case by obtaining delivery or a refund.',
+        remedy: 'Open the case file, request the missing evidence from the supplier/carrier, and escalate per the case next action.',
+        mitigation: 'Contentieux case generation in every audit, with case IDs, amounts and aging.',
+        verification: 'The next audit reports zero contentieux cases and no PO older than the stall window.',
+        owner_action: 'Work the high-severity cases first and provide carrier POD or supplier refund evidence.',
         sla_hours: 48
     },
     DELIVERY_UNVERIFIED: {
@@ -494,6 +508,35 @@ export function detectSilentFailures({
         });
     }
 
+    const contentieux = buildContentieuxCases(pos, { now: at, minDays: stallDays });
+    if (contentieux.cases.length) {
+        const severityRank = { low: 1, medium: 2, high: 3 };
+        const highest = [...contentieux.cases].sort((a, b) => severityRank[b.severity] - severityRank[a.severity])[0];
+        const oldest = Math.max(...contentieux.cases.map(item => item.waiting_days));
+        add(
+            'PROCUREMENT_CONTENTIEUX',
+            `${contentieux.cases.length} contentieux case(s), ${contentieux.totals.amount_mad} MAD at stake, oldest ${round(oldest)} days.`,
+            {
+                case_ids: contentieux.cases.map(item => item.case_id),
+                cases: contentieux.cases.map(item => ({
+                    case_id: item.case_id,
+                    po_ref: item.po_ref,
+                    supplier: item.supplier,
+                    status: item.status,
+                    amount_mad: item.amount_mad,
+                    waiting_days: item.waiting_days,
+                    severity: item.severity,
+                    holds: item.holds.map(hold => hold.code),
+                    next_action: item.next_action
+                })),
+                amount_at_stake_mad: contentieux.totals.amount_mad,
+                oldest_waiting_days: round(oldest),
+                high_severity: contentieux.totals.high
+            },
+            highest.severity
+        );
+    }
+
     const queue = fulfillment === undefined ? readFulfillmentQueue(root) : fulfillment;
     const pending = queue.filter(entry => String(entry.status || '').toUpperCase() === 'PENDING_DELIVERY');
     const pendingDays = pending.map(entry => {
@@ -588,7 +631,16 @@ export function detectSilentFailures({
                 total: pos.length,
                 stalled: stalled.length,
                 unverified: unverified.length,
-                stalled_value_mad: round(stalled.reduce((sum, view) => sum + Number(view.subtotal_mad || 0), 0), 2)
+                stalled_value_mad: round(stalled.reduce((sum, view) => sum + Number(view.subtotal_mad || 0), 0), 2),
+                contentieux: {
+                    cases: contentieux.cases.length,
+                    amount_at_stake_mad: contentieux.totals.amount_mad,
+                    oldest_waiting_days: contentieux.cases.length
+                        ? round(Math.max(...contentieux.cases.map(item => item.waiting_days)))
+                        : 0,
+                    high_severity: contentieux.totals.high
+                },
+                contentieux_cases: contentieux.cases
             },
             fulfillment: { pending: pending.length, oldest_days: round(oldestPending) },
             silent_catches: catches,
@@ -661,6 +713,8 @@ export function buildRedressPlan(findings, { now = new Date(), evidence = {} } =
             exposure: {
                 stalled_po_value_mad: evidence.procurement?.stalled_value_mad || 0,
                 unverified_po_value_mad: evidence.procurement?.unverified_value_mad || 0,
+                contentieux_amount_mad: evidence.procurement?.contentieux?.amount_at_stake_mad || 0,
+                contentieux_cases: evidence.procurement?.contentieux?.cases || 0,
                 pending_fulfillments: evidence.fulfillment?.pending || 0,
                 revenue_stalled_days: evidence.revenue?.stalled_days ?? null,
                 swallowed_exceptions: evidence.silent_catches?.count || 0
@@ -729,6 +783,16 @@ export function runSilentFailureAudit({
         fs.mkdirSync(incidentDir, { recursive: true });
         fs.mkdirSync(path.dirname(stateFile), { recursive: true });
         fs.writeFileSync(stateFile, JSON.stringify({ updated_at: stamp, findings: nextFindings }, null, 2));
+        fs.writeFileSync(
+            path.join(root, 'data', 'resilience', 'contentieux.json'),
+            JSON.stringify({
+                generated_at: stamp,
+                total_pos: detected.evidence.procurement?.total || 0,
+                min_days: stallDays,
+                totals: detected.evidence.procurement?.contentieux || { cases: 0, amount_at_stake_mad: 0, oldest_waiting_days: 0, high_severity: 0 },
+                cases: detected.evidence.procurement?.contentieux_cases || []
+            }, null, 2)
+        );
         if (detected.findings.length) {
             const incidentFile = path.join(incidentDir, `${plan.incident_id}.json`);
             fs.writeFileSync(incidentFile, JSON.stringify({ plan, evidence: detected.evidence }, null, 2));

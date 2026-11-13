@@ -1,6 +1,11 @@
 # Changelog
 
 ## 2026-11-13
+- Wired procurement contentieux into the tick audit: every written audit raises
+  `PROCUREMENT_CONTENTIEUX` with case IDs, amount at stake, oldest aging and hold
+  codes, and persists `data/resilience/contentieux.json` for JARVIS.
+- JARVIS now serves the contentieux report at `/api/jarvis/contentieux` and shows
+  case IDs, amounts, aging, severity and holds above the swarm agents.
 - Added a persistent payout ledger: every CSV export reserves both `earning_id`
   and `item_id`, checks the ledger plus all historical payout batches, and
   refuses a duplicate export. Payouts move through submitted/credited/failed/

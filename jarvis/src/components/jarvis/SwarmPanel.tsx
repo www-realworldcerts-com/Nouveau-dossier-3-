@@ -2,6 +2,7 @@
 
 import { useCallback } from 'react'
 import { useJarvisStore, type SwarmAgent } from '@/lib/jarvis-store'
+import ContentieuxPanel from '@/components/jarvis/ContentieuxPanel'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -258,6 +259,7 @@ export default function SwarmPanel() {
 
       {/* Agent grid */}
       <div className="flex-1 overflow-y-auto p-4 jarvis-scrollbar">
+        <ContentieuxPanel />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {swarmAgents.map((agent) => (
             <AgentCard key={agent.id} agent={agent} />

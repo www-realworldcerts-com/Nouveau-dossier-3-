@@ -107,6 +107,47 @@ test('stalled placed purchase orders aggregate into one finding', () => {
     assert.equal(stall.evidence.value_mad, 100);
 });
 
+test('late POs raise a contentieux finding with case IDs, amounts and aging', () => {
+    const old = new Date(NOW.getTime() - 15 * DAY);
+    const po = transitionPo(buildPo(request(), { now: old, seq: 1 }), 'placed', { at: old });
+    const { findings, evidence } = detectSilentFailures({ now: NOW, ...cleanOptions({ procurement: [po] }) });
+    const finding = findings.find(item => item.code === 'PROCUREMENT_CONTENTIEUX');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'medium');
+    assert.deepEqual(finding.evidence.case_ids, [`CTX-${po.po_ref}`]);
+    assert.equal(finding.evidence.amount_at_stake_mad, 100);
+    assert.equal(finding.evidence.cases[0].waiting_days, 15);
+    assert.match(finding.detail, /contentieux case/);
+    assert.equal(evidence.procurement.contentieux.cases, 1);
+    assert.equal(evidence.procurement.contentieux.amount_at_stake_mad, 100);
+    assert.equal(evidence.procurement.contentieux_cases.length, 1);
+});
+
+test('held POs are contentieux cases even before the stall window', () => {
+    const old = new Date(NOW.getTime() - DAY);
+    let po = transitionPo(buildPo(request(), { now: old, seq: 1 }), 'placed', { at: old });
+    po = { ...po, status: 'on_hold', holds: [{ code: 'HOLD_CITY_MISMATCH', detail: 'wrong city' }] };
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ procurement: [po] }) });
+    const finding = findings.find(item => item.code === 'PROCUREMENT_CONTENTIEUX');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'high');
+    assert.deepEqual(finding.evidence.cases[0].holds, ['HOLD_CITY_MISMATCH']);
+});
+
+test('the audit persists the contentieux report for JARVIS', () => {
+    const root = tempRoot();
+    const old = new Date(NOW.getTime() - 12 * DAY);
+    const po = transitionPo(buildPo(request(), { now: old, seq: 1 }), 'placed', { at: old });
+    fs.mkdirSync(path.join(root, 'data', 'procurement'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'data', 'procurement', 'pos.ndjson'), `${JSON.stringify(po)}\n`);
+
+    runSilentFailureAudit({ root, now: NOW, write: true });
+    const report = JSON.parse(fs.readFileSync(path.join(root, 'data', 'resilience', 'contentieux.json'), 'utf8'));
+    assert.equal(report.totals.cases, 1);
+    assert.equal(report.totals.amount_at_stake_mad, 100);
+    assert.equal(report.cases[0].case_id, `CTX-${po.po_ref}`);
+});
+
 test('recorded but unverified deliveries are flagged', () => {
     const old = new Date(NOW.getTime() - 5 * DAY);
     let po = transitionPo(buildPo(request(), { now: old, seq: 1 }), 'placed', { at: old });

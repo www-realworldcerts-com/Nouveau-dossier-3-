@@ -87,5 +87,6 @@ jobs:
             data/swarm-heartbeat.json
             data/swarm-tick-log.ndjson
             data/resilience/incidents/*.json
+            data/resilience/contentieux.json
           if-no-files-found: warn
           retention-days: 14

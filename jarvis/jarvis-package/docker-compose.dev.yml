@@ -5,8 +5,6 @@
 # Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 # =============================================================================
 
-version: "3.9"
-
 services:
   # ---------------------------------------------------------------------------
   # JARVIS Agent - Development Override
@@ -66,7 +64,7 @@ services:
   # ---------------------------------------------------------------------------
   jarvis-web:
     build:
-      context: ./nextjs-app
+      context: ..
       dockerfile: Dockerfile.dev
       args:
         - NODE_ENV=development
@@ -80,9 +78,9 @@ services:
       - CHOKIDAR_USEPOLLING=true
     volumes:
       # Mount source code for hot reload
-      - ./nextjs-app/src:/app/src:ro
-      - ./nextjs-app/public:/app/public:ro
-      - ./nextjs-app/prisma:/app/prisma:ro
+      - ../src:/app/src:ro
+      - ../public:/app/public:ro
+      - ../prisma:/app/prisma:ro
       # Persist data
       - jarvis-web-data:/app/data
       - jarvis-web-logs:/app/logs

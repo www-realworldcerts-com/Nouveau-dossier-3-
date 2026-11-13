@@ -216,7 +216,7 @@ The frontend is built with Next.js 16 using the App Router pattern, providing bo
 ### Application Architecture
 
 ```
-nextjs-app/
+../jarvis/            # single source of truth for the frontend
 ├── src/
 │   ├── app/
 │   │   ├── layout.tsx           # Root layout (theme, fonts)

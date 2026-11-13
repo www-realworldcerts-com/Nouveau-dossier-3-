@@ -12,8 +12,9 @@ Rules:
 
 - Run commands inside the project you are changing; do not install root
   dependencies into `jarvis/` or vice versa.
-- `jarvis/jarvis-package/` is a distribution snapshot (Docker/K8s/Python
-  agent), excluded from typecheck and lint. Change `jarvis/src/` instead.
+- `jarvis/jarvis-package/` is the container/deployment layer (Docker/K8s/Python
+  agent). Its Compose builds use `jarvis/` directly; do not add a copied app
+  there. Change `jarvis/src/` for app code.
 - Never commit `.env` files, `jarvis/db/*.db`, tokens or keys.
 - For JARVIS changes, verify with `cd jarvis && bunx tsc --noEmit && bun run lint && bun run build`.
 - For root changes, run the relevant `npm run test:*` suite and keep the

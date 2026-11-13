@@ -90,10 +90,10 @@ cd jarvis-package
 # Build the JARVIS Agent image
 docker build -t jarvis-agent:2.0.0 .
 
-# Build the JARVIS Web image
-cd nextjs-app
-docker build -t jarvis-web:2.0.0 .
+# Build the JARVIS Web image from the single source of truth
 cd ..
+docker build -t jarvis-web:2.0.0 ./jarvis
+cd jarvis-package
 ```
 
 ### Build Arguments
@@ -381,8 +381,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Set up Node.js environment
-cd ../nextjs-app
-bun install
+cd ../../jarvis
+bun install --frozen-lockfile
 bun run db:push
 
 # 4. Configure environment
@@ -407,7 +407,7 @@ source venv/bin/activate
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 
 # Terminal 3: Start Web
-cd nextjs-app
+cd ../jarvis
 bun run dev
 # Or for production: bun run build && bun run start
 ```
@@ -460,7 +460,7 @@ Wants=jarvis-agent.service
 Type=simple
 User=jarvis
 Group=jarvis
-WorkingDirectory=/opt/jarvis/nextjs-app
+WorkingDirectory=/opt/jarvis/jarvis
 EnvironmentFile=/opt/jarvis/.env
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/bun run start

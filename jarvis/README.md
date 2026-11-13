@@ -69,11 +69,10 @@ instead of shipping.
 | `db/custom.db` | local database, created by `db:push` (ignored) |
 | `jarvis-package/` | distribution copy: Docker, Kubernetes, Python agent, docs |
 
-`jarvis-package/` is a distributable snapshot (Docker, Kubernetes, Python
-agent) and is excluded from this app's typecheck and lint. It is **not** built
-by the Next app; its `nextjs-app/` copy can drift from `src/`. Treat `src/` as
-the only source of truth and regenerate or drop that copy when the package is
-next cut.
+`jarvis-package/` is the container/deployment layer (Docker, Kubernetes,
+Python agent, docs). It has **no copy of this app**: its Compose files build
+from this directory using `Dockerfile` / `Dockerfile.dev`. Treat `src/` here as
+the only source of truth.
 
 ## Fixes applied on import
 
@@ -92,4 +91,30 @@ next cut.
   project dependency).
 - Removed `typescript.ignoreBuildErrors`; `tsc` and `next build` now enforce
   types again.
+- Removed the duplicated `jarvis-package/nextjs-app/` tree and pointed its
+  Docker/Compose/Makefile/docs at this directory; the old Compose web service
+  referenced Dockerfiles that did not exist and could not build.
 - Added a workspace file at the repository root for multi-root IDE sessions.
+
+## Container
+
+From this directory:
+
+```bash
+docker build -t jarvis-web:2.0.0 .
+docker run --rm -p 3000:3000 \
+  -e DATABASE_URL=file:/app/data/jarvis.db \
+  -v jarvis-web-data:/app/data \
+  jarvis-web:2.0.0
+```
+
+Or from `jarvis-package/` with the full agent + Redis stack:
+
+```bash
+cp .env.example .env             # fill in real secrets, then edit
+make build                       # builds jarvis-agent and jarvis-web
+docker compose up -d             # web is built from ../ via Dockerfile
+```
+
+The Compose files expect a `jarvis-package/.env` (gitignored); without it the
+agent has no credentials.

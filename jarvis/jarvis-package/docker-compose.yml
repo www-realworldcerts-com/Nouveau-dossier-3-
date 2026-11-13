@@ -7,8 +7,6 @@
 #   - redis:        Redis cache and message broker (port 6379)
 # =============================================================================
 
-version: "3.9"
-
 services:
   # ---------------------------------------------------------------------------
   # JARVIS Agent - Python FastAPI Backend
@@ -80,7 +78,9 @@ services:
   # ---------------------------------------------------------------------------
   jarvis-web:
     build:
-      context: ./nextjs-app
+      # Build the Next.js app from its single source of truth (../jarvis),
+      # not a checked-in copy.
+      context: ..
       dockerfile: Dockerfile
       args:
         - NODE_ENV=${NODE_ENV:-production}

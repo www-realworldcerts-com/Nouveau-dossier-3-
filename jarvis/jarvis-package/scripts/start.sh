@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 AGENT_DIR="${PROJECT_DIR}/python-agent"
-WEB_DIR="${PROJECT_DIR}/nextjs-app"
+WEB_DIR="${PROJECT_DIR}/../jarvis"
 DATA_DIR="${PROJECT_DIR}/data"
 LOG_DIR="${PROJECT_DIR}/logs"
 UPLOAD_DIR="${PROJECT_DIR}/uploads"

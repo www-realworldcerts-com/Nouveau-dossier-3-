@@ -113,8 +113,8 @@ COPY --from=builder /build/python-agent ./python-agent
 COPY python-agent/main.py ./main.py
 COPY python-agent/config.yaml ./config/config.yaml
 
-# Copy Next.js web application (built assets)
-COPY nextjs-app/ ./nextjs-app/
+# The Next.js app is packaged separately from ../jarvis (see docker-compose.yml)
+# and served by its own container; this image only runs the Python agent.
 
 # Ensure correct ownership
 RUN chown -R jarvis:jarvis /app

@@ -16,7 +16,6 @@ IMAGE_NAME       = jarvis-agent
 IMAGE_TAG        ?= 2.0.0
 REGISTRY         ?= ghcr.io/jarvis-ai
 PYTHON_DIR       = python-agent
-NEXTJS_DIR       = nextjs-app
 K8S_NAMESPACE    ?= jarvis
 K8S_DIR          = kubernetes
 

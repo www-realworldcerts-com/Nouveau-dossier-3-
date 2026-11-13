@@ -203,9 +203,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
    source venv/bin/activate
    pip install -r requirements.txt
 
-   # Next.js web
-   cd ../nextjs-app
-   bun install
+   # Next.js web (single source of truth one level up)
+   cd ../../jarvis
+   bun install --frozen-lockfile
    bun run db:push
    ```
 
@@ -216,8 +216,8 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
    source venv/bin/activate
    uvicorn main:app --reload --port 8000
 
-   # Terminal 2: Web
-   cd nextjs-app
+   # Terminal 2: Web (sibling directory, not a copy)
+   cd ../jarvis
    bun run dev
    ```
 
@@ -526,7 +526,7 @@ jarvis-package/
 │       ├── web_performance.py    # Performance audit agent
 │       ├── payment_agent.py      # Payment processing agent
 │       └── custom_agent.py       # Custom agent
-└── nextjs-app/                   # Next.js frontend
+└── ../jarvis/                    # Next.js frontend (single source of truth)
     ├── package.json              # Node.js dependencies
     ├── next.config.ts            # Next.js configuration
     ├── tailwind.config.ts        # Tailwind CSS configuration
@@ -601,7 +601,7 @@ make test
 
 # Check types
 cd python-agent && mypy .
-cd nextjs-app && bun run lint
+cd ../jarvis && bunx tsc --noEmit && bun run lint
 ```
 
 ---

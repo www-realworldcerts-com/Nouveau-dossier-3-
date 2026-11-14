@@ -2,8 +2,9 @@
 
 Next.js 16 / React 19 / Tailwind 4 dashboard for the JARVIS agent: chat, voice,
 swarm agents, file analysis, image generation and web search. The API layer is
-server-side (`src/app/api/jarvis/**`) and calls `z-ai-web-dev-sdk`; no model key
-is exposed to the browser.
+server-side (`src/app/api/jarvis/**`). Chat can run against a local
+OpenAI-compatible endpoint (for example Strata) or `z-ai-web-dev-sdk`; no model
+key is exposed to the browser.
 
 This app lives inside the revenue-swarm repository as a subproject. It has its
 own `package.json` and lockfile; run all commands from this directory.
@@ -41,6 +42,11 @@ so `bun run start` serves a complete app.
 | --- | --- | --- |
 | `DATABASE_URL` | yes | Prisma SQLite URL, e.g. `file:./db/custom.db` |
 | `ZAI_VISION_MODEL` | no | Vision model for image uploads; defaults to `glm-4v` |
+| `JARVIS_LOCAL_BASE_URL` | no | OpenAI-compatible local endpoint; enables local chat |
+| `JARVIS_LOCAL_MODEL` | no | Model name sent to the local endpoint |
+| `JARVIS_LOCAL_API_KEY` | no | Key for the local endpoint, if it requires one |
+| `JARVIS_LOCAL_TIMEOUT_MS` | no | Local request timeout; defaults to 120000 |
+| `JARVIS_ALLOW_CLOUD_FALLBACK` | no | Send chat to ZAI if the local endpoint fails; off by default |
 
 `.env` is ignored by git. Commit only `.env.example`; never a real key or the
 SQLite file.
@@ -51,11 +57,39 @@ SQLite file.
 bunx tsc --noEmit     # strict typecheck
 bun run lint          # eslint
 bun run build         # production compile
+bun test test/jarvis-privacy.test.ts test/jarvis-model-gateway.test.ts
 ```
 
 All three are expected to pass. `next build` now enforces types (the previous
 `ignoreBuildErrors` flag was removed), so a type regression fails the build
 instead of shipping.
+
+## Local-first model gateway
+
+Strata shows that a capable model can run on the operator's own machine behind
+an OpenAI-compatible API. Magpie shows the other half: one gateway, explicit
+routing and privacy at the boundary. JARVIS follows both, narrowly:
+
+```bash
+# Strata or another OpenAI-compatible server on localhost
+export JARVIS_LOCAL_BASE_URL=http://127.0.0.1:8080/v1
+export JARVIS_LOCAL_MODEL=qwen3.8-flash-next
+bun run dev
+```
+
+When `JARVIS_LOCAL_BASE_URL` is set, both chat passes use that endpoint. The
+cloud is **not** a silent fallback: set `JARVIS_ALLOW_CLOUD_FALLBACK=true` only
+if you accept sending the same prompt to ZAI when the local server is down.
+Search, page reading and image generation still need the ZAI tool backend; a
+local chat without it works, but those tool calls return a clear error.
+
+Chat also masks high-confidence secrets and personal identifiers before the
+request leaves the server: API keys, tokens, private keys, emails, IBANs,
+Luhn-valid card numbers, long bank account numbers and Moroccan phone numbers.
+The same value gets a stable placeholder, and placeholders in the reply are
+restored for the client. The map is request-local; values are never logged or
+written to disk. Tool calls do not receive restored secrets, so a search cannot
+leak one.
 
 ## Operating guardrails
 
@@ -87,6 +121,8 @@ routes are protected.
 | `src/components/jarvis/` | Chat, Voice, Swarm, FileUpload, Status, Visualizer |
 | `src/lib/jarvis-store.ts` | Zustand store and client types |
 | `src/lib/guardrails.ts` | evidence and draft-document rules |
+| `src/lib/privacy.ts` | per-request secret/PII masking and restoration |
+| `src/lib/model-gateway.ts` | local-first OpenAI-compatible chat with opt-in fallback |
 | `src/lib/swarm-state.ts` | real heartbeat/findings/procurement/payout status |
 | `prisma/schema.prisma` | SQLite schema (`User`, `Post`) |
 | `db/custom.db` | local database, created by `db:push` (ignored) |

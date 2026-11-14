@@ -29,7 +29,8 @@
     "test:loop": "node --test test/swarm-loop-health.test.mjs test/tick-audit.test.mjs",
     "test:deploy": "node --test test/vercel-handler.test.mjs",
     "pricing:table": "node scripts/generate-price-table.mjs",
-    "test:pricing-table": "node --test test/generate-price-table.test.mjs"
+    "test:pricing-table": "node --test test/generate-price-table.test.mjs",
+    "test:jarvis": "bun test test/jarvis-privacy.test.ts test/jarvis-model-gateway.test.ts"
   },
   "dependencies": {
     "base64-js": "^1.5.1",

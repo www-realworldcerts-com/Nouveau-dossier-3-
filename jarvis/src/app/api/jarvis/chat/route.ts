@@ -2,6 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
 import type { CreateImageGenerationBody, SearchFunctionResultItem } from 'z-ai-web-dev-sdk';
 import { ACTION_GUARDRAILS, DRAFT_DISCLAIMER } from '@/lib/guardrails';
+import { createPrivacyMasker } from '@/lib/privacy';
+import {
+  completeLocal,
+  localGatewayConfig,
+  ModelGatewayError,
+  type GatewayMessage,
+} from '@/lib/model-gateway';
 
 // ============================================================
 // JARVIS OPERATIONAL SYSTEM PROMPT
@@ -435,12 +442,39 @@ export async function POST(req: NextRequest) {
   try {
     const body: ChatRequest = await req.json();
     const { message, history = [], agentId, fileContexts = [] } = body;
+    const privacy = createPrivacyMasker();
 
     if (!message || typeof message !== 'string' || message.trim().length === 0) {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 });
     }
 
-    const zai = await ZAI.create();
+    let zaiPromise: Promise<ZAI> | null = null;
+    const getZai = () => (zaiPromise ??= ZAI.create());
+    let gatewayInfo: { provider: 'local' | 'zai'; model: string; fallbackFromLocal?: boolean } | null = null;
+
+    const completeChat = async (chatMessages: GatewayMessage[]) => {
+      const local = localGatewayConfig();
+      if (local) {
+        try {
+          const content = await completeLocal(local, chatMessages);
+          gatewayInfo = { provider: 'local', model: local.model };
+          return content;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'unknown error';
+          console.warn('[JARVIS Model] Local endpoint failed:', reason);
+          if (!local.allowCloudFallback) throw new ModelGatewayError();
+        }
+      }
+
+      const completion = await (await getZai()).chat.completions.create({
+        messages: chatMessages,
+        thinking: { type: 'disabled' },
+      });
+      gatewayInfo = local
+        ? { provider: 'zai', model: 'zai', fallbackFromLocal: true }
+        : { provider: 'zai', model: 'zai' };
+      return completion.choices?.[0]?.message?.content || '';
+    };
 
     let systemPrompt = JARVIS_SYSTEM_PROMPT;
     let metadata: Record<string, unknown> = {};
@@ -470,21 +504,40 @@ export async function POST(req: NextRequest) {
       if (!agentId) metadata = { type: 'file_upload', ...metadata };
     }
 
+    const safeHistory = history.map((h) => ({
+      role: h.role as 'user' | 'assistant' | 'system',
+      content: privacy.mask(h.content),
+    }));
+    const safeMessage = privacy.mask(enrichedMessage);
     const messages = [
       { role: 'assistant' as const, content: systemPrompt },
-      ...history.map((h) => ({ role: h.role as 'user' | 'assistant' | 'system', content: h.content })),
-      { role: 'user' as const, content: enrichedMessage },
+      ...safeHistory,
+      { role: 'user' as const, content: safeMessage },
     ];
 
     // PASS 1: Get LLM response with potential tool calls
-    const completion = await zai.chat.completions.create({ messages, thinking: { type: 'disabled' } });
-    const rawResponse = completion.choices?.[0]?.message?.content || "I'm unable to process that request at the moment.";
+    const rawResponse = (await completeChat(messages)) || "I'm unable to process that request at the moment.";
 
-    // Parse and execute tool calls
+    // Parse and execute tool calls. Search, page reading and image generation
+    // still use the ZAI tool backend even when chat itself runs locally.
     const { toolCalls, cleanText } = parseToolCalls(rawResponse);
     const toolResults: ToolResult[] = [];
+    let toolBackend: ZAI | null = null;
+    if (toolCalls.length > 0) {
+      try {
+        toolBackend = await getZai();
+      } catch {
+        console.warn('[JARVIS Tools] Tool backend is not configured.');
+      }
+    }
     for (const toolCall of toolCalls) {
-      const result = await executeTool(zai, toolCall);
+      const result = toolBackend
+        ? await executeTool(toolBackend, toolCall)
+        : {
+            tool: toolCall.tool,
+            success: false as const,
+            error: 'Tool backend is not configured. Local chat works, but search/image tools need ZAI.',
+          };
       toolResults.push(result);
     }
 
@@ -522,18 +575,21 @@ export async function POST(req: NextRequest) {
 
       const refinedMessages = [
         { role: 'assistant' as const, content: systemPrompt },
-        ...history.map((h) => ({ role: h.role as 'user' | 'assistant' | 'system', content: h.content })),
-        { role: 'user' as const, content: enrichedMessage },
-        { role: 'assistant' as const, content: cleanText || 'Processing your request now.' },
+        ...safeHistory,
+        { role: 'user' as const, content: safeMessage },
+        { role: 'assistant' as const, content: privacy.mask(cleanText || 'Processing your request now.') },
         {
           role: 'user' as const,
-          content: `Here are the real results from the tools executed:\n\n${toolResultsContext}\n\nBased on these real results, provide a comprehensive operational response. Be authoritative and action-oriented. Cite actual sources and data from the tool results.`,
+          content: `Here are the real results from the tools executed:\n\n${privacy.mask(toolResultsContext)}\n\nBased on these real results, provide a comprehensive operational response. Cite only data actually present in the tool results, and say what is unknown.`,
         },
       ];
 
-      const refinedCompletion = await zai.chat.completions.create({ messages: refinedMessages, thinking: { type: 'disabled' } });
-      finalResponse = refinedCompletion.choices?.[0]?.message?.content || cleanText || 'Processing complete.';
+      finalResponse = (await completeChat(refinedMessages)) || cleanText || 'Processing complete.';
     }
+
+    // Restore user values only for the response returned to this client. The
+    // masking map is request-local and is never logged or persisted.
+    finalResponse = privacy.unmask(finalResponse);
 
     // Build response metadata
     const searchResults: Array<{ title: string; url: string }> = [];
@@ -570,6 +626,9 @@ export async function POST(req: NextRequest) {
     if (generatedDocuments.length > 0) responseMetadata.documents = generatedDocuments;
     if (trackingResults.length > 0) responseMetadata.tracking = trackingResults;
     if (toolResults.length > 0) responseMetadata.toolsUsed = toolResults.map((r) => r.tool);
+    if (gatewayInfo) responseMetadata.model = gatewayInfo;
+    const privacySummary = privacy.summary();
+    if (privacySummary.masked_values > 0) responseMetadata.privacy = privacySummary;
 
     return NextResponse.json({
       response: finalResponse,
@@ -577,6 +636,9 @@ export async function POST(req: NextRequest) {
       metadata: Object.keys(responseMetadata).length > 0 ? responseMetadata : undefined,
     });
   } catch (error) {
+    if (error instanceof ModelGatewayError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     console.error('[JARVIS Chat] Error:', error);
     if (error instanceof SyntaxError) {
       return NextResponse.json({ error: 'Invalid JSON in request body' }, { status: 400 });

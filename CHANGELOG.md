@@ -1,6 +1,13 @@
 # Changelog
 
 ## 2026-11-13
+- JARVIS chat is now local-first: set `JARVIS_LOCAL_BASE_URL` to use a Strata or
+  other OpenAI-compatible endpoint. Cloud use is an explicit opt-in fallback, not
+  a silent one, and search/image tools still use ZAI when available.
+- Added per-request privacy masking for secrets, tokens, private keys, emails,
+  IBANs, Luhn-valid cards, long bank account numbers and Moroccan phone numbers.
+  Values get stable placeholders before leaving the server and are restored only
+  in the reply; the map is never logged or persisted.
 - JARVIS now follows evidence guardrails inspired by Bonsai: prompts distinguish
   observed/search/user-supplied/unknown data, generated documents are marked
   `DRAFT` with no authorization or payment-confirmation codes, and the chat no

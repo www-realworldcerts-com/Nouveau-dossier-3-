@@ -23,6 +23,8 @@ import { maybeSendAlert } from "./alerts.mjs";
 import { createDedupeStore } from "./dedupe-store.mjs";
 import { enforceAuthorityProtocol } from "./authority.mjs";
 import { addSecurityHeaders, validateRequest, validateAuth } from "./security-middleware.mjs";
+import { escapeHtml, fulfillPaidOrder, verifyAccessToken } from "./financial/fulfillment-service.mjs";
+import { productsFromCoursePrices, storefrontPricePayload } from "./sales/store-prices.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -193,6 +195,12 @@ function json(res, status, data) {
 
 function html(res, status, body) {
   const text = String(body ?? "");
+  // HTML pages are self-contained and use inline scripts. Keep the strict API
+  // CSP, but allow the page's own inline code so checkout buttons work.
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none';"
+  );
   res.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Length": Buffer.byteLength(text)
@@ -217,26 +225,195 @@ function shouldCreatePayPalOrders() {
   return (process.env.PAYPAL_ENABLE_ORDER_CREATE ?? "false").toLowerCase() === "true";
 }
 
-async function createPayPalCheckoutOrder({ amount, currency, description, customId, returnUrl, cancelUrl }) {
+async function createPayPalCheckoutOrder({ amount, currency, description, customId, productId, returnUrl, cancelUrl }) {
   const token = await getPayPalAccessToken();
+  const purchaseUnit = {
+    amount: {
+      currency_code: currency,
+      value: Number(amount).toFixed(2)
+    },
+    ...(description ? { description } : {}),
+    ...(productId || customId ? { custom_id: String(productId || customId).slice(0, 127) } : {}),
+    ...(customId ? { invoice_id: String(customId).slice(0, 127) } : {})
+  };
   const body = {
     intent: "CAPTURE",
-    purchase_units: [
-      {
-        amount: {
-          currency_code: currency,
-          value: Number(amount).toFixed(2)
-        },
-        ...(description ? { description } : {}),
-        ...(customId ? { custom_id: customId } : {})
-      }
-    ],
+    purchase_units: [purchaseUnit],
     application_context: {
       return_url: returnUrl,
       cancel_url: cancelUrl
     }
   };
   return paypalRequest("/v2/checkout/orders", { method: "POST", token, body });
+}
+
+function shouldFulfillPaidOrders() {
+  return String(process.env.FULFILLMENT_ENABLED ?? "true").toLowerCase() !== "false";
+}
+
+async function capturePayPalCheckoutOrder(orderId) {
+  const token = await getPayPalAccessToken();
+  return paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+    method: "POST",
+    token,
+    headers: { "PayPal-Request-Id": `capture_${orderId}` }
+  });
+}
+
+function publicProducts() {
+  try {
+    return productsFromCoursePrices();
+  } catch (error) {
+    console.warn(`[store-prices] ${error.message}`);
+    return [];
+  }
+}
+
+function buyPage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Checkout · RealWorldCerts</title>
+<style>
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0c10;color:#eaeef2}
+main{max-width:640px;margin:0 auto;padding:28px 20px}.card{border:1px solid #1e2532;border-radius:12px;padding:20px;background:#0e1118}
+a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1cf}label{display:block;margin:16px 0 6px;font-weight:600}select,button{width:100%;padding:12px;border-radius:8px;border:1px solid #2a3e58;background:#16263a;color:#eaf1ff;font-size:16px}button{margin-top:16px;background:#2f81f7;border-color:#2f81f7;font-weight:700;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.err{display:none;margin-top:14px;padding:10px;border:1px solid #f85149;border-radius:8px;color:#ffb4ab;background:#2a1113;white-space:pre-wrap}.muted{font-size:13px;color:#8b949e}
+</style>
+</head>
+<body><main><div class="card">
+<h1>Complete your purchase</h1>
+<p>Pay securely with PayPal. Access is emailed after PayPal confirms the payment.</p>
+<form id="checkout">
+<label for="product">Course</label>
+<select id="product" required><option value="">Loading courses…</option></select>
+<button id="pay" type="submit" disabled>Continue to PayPal</button>
+</form>
+<div id="error" class="err" role="alert"></div>
+<p class="muted">Need help? Email <a href="mailto:billing@realworldcerts.com">billing@realworldcerts.com</a>.</p>
+</div></main>
+<script>
+(function(){
+  var q = new URLSearchParams(location.search);
+  var select = document.getElementById('product');
+  var button = document.getElementById('pay');
+  var error = document.getElementById('error');
+  var requested = q.get('product_id') || '';
+  function show(message){ error.textContent = message; error.style.display = 'block'; }
+  function clear(){ error.textContent = ''; error.style.display = 'none'; }
+  function reference(){
+    var ref = q.get('ref');
+    if (ref && /^[A-Za-z0-9._-]{1,64}$/.test(ref)) return ref;
+    return 'RWC-' + Date.now().toString(36).toUpperCase();
+  }
+  fetch('/acp/v1/discovery', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(data){
+    var products = Array.isArray(data.products) ? data.products : [];
+    select.innerHTML = '';
+    if (!products.length) {
+      select.innerHTML = '<option value="">Checkout is not configured yet</option>';
+      show('No products are configured. Email billing@realworldcerts.com and we will complete your order.');
+      return;
+    }
+    products.forEach(function(p){
+      if (!p || !p.id) return;
+      var option = document.createElement('option');
+      option.value = String(p.id);
+      var price = p.price != null ? ' — ' + Number(p.price).toFixed(2) + ' ' + String(p.currency || 'USD') : '';
+      option.textContent = String(p.name || p.title || p.id) + price;
+      if (requested && String(p.id) === requested) option.selected = true;
+      select.appendChild(option);
+    });
+    if (!select.value && products[0] && products[0].id) select.value = String(products[0].id);
+    button.disabled = !select.value;
+    if (requested && select.value !== requested) show('That course is not available. Choose another course below.');
+  }).catch(function(e){ show('Could not load courses: ' + (e && e.message ? e.message : e)); });
+  select.addEventListener('change', function(){ button.disabled = !select.value; });
+  document.getElementById('checkout').addEventListener('submit', function(event){
+    event.preventDefault();
+    clear();
+    var productId = select.value;
+    if (!productId) return show('Choose a course first.');
+    button.disabled = true;
+    button.textContent = 'Starting secure checkout…';
+    fetch('/acp/v1/transactions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        product_id: productId,
+        reference: reference(),
+        return_url: location.origin + '/buy/success',
+        cancel_url: location.origin + '/buy/cancel'
+      })
+    }).then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); }).then(function(result){
+      var body = result.body || {};
+      if (result.status >= 300 || body.ok !== true) throw new Error(body.error || ('Checkout failed (HTTP ' + result.status + ')'));
+      var approval = body.payment_instructions && body.payment_instructions.approval_url;
+      if (!approval) throw new Error('PayPal did not return an approval link. Nothing was charged.');
+      location.href = approval;
+    }).catch(function(e){
+      button.disabled = false;
+      button.textContent = 'Continue to PayPal';
+      show('Checkout could not start: ' + (e && e.message ? e.message : e));
+    });
+  });
+})();
+</script>
+</body></html>`;
+}
+
+function buySuccessPage() {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Confirming payment · RealWorldCerts</title>
+<style>body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0c10;color:#eaeef2}main{max-width:640px;margin:0 auto;padding:28px 20px}.card{border:1px solid #1e2532;border-radius:12px;padding:20px;background:#0e1118}a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1cf}.err{display:none;margin-top:14px;padding:10px;border:1px solid #f85149;border-radius:8px;color:#ffb4ab;background:#2a1113;white-space:pre-wrap}.ok{display:none;margin-top:14px;padding:10px;border:1px solid #2ea043;border-radius:8px;color:#7ee787;background:#0d1a14}.muted{font-size:13px;color:#8b949e}</style></head>
+<body><main><div class="card"><h1 id="title">Confirming your payment…</h1><p id="copy">Please keep this page open while PayPal confirms the transaction.</p><div id="ok" class="ok"></div><div id="error" class="err" role="alert"></div><p class="muted">Order reference: <strong id="ref">—</strong></p><p class="muted">Need help? Email <a href="mailto:billing@realworldcerts.com">billing@realworldcerts.com</a>.</p></div></main>
+<script>
+(function(){
+  var q = new URLSearchParams(location.search);
+  var token = q.get('token') || '';
+  var title = document.getElementById('title');
+  var copy = document.getElementById('copy');
+  var ok = document.getElementById('ok');
+  var error = document.getElementById('error');
+  document.getElementById('ref').textContent = q.get('ref') || token || '—';
+  function fail(message){ title.textContent = 'Payment not confirmed'; copy.textContent = 'No access was delivered. You can retry checkout or contact support.'; error.textContent = message; error.style.display = 'block'; }
+  if (!token) return fail('Missing PayPal order token. Return to checkout and try again.');
+  fetch('/acp/v1/transactions/' + encodeURIComponent(token) + '/capture', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+    .then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); })
+    .then(function(result){
+      var body = result.body || {};
+      if (result.status >= 300 || body.ok !== true) throw new Error(body.error || ('Capture failed (HTTP ' + result.status + ')'));
+      if (body.status !== 'COMPLETED') { title.textContent = 'Payment pending'; copy.textContent = 'PayPal has not completed the payment yet. Keep this page open and refresh in a moment.'; return; }
+      title.textContent = 'Payment received';
+      var fulfillment = body.fulfillment || {};
+      if (fulfillment.ok === false) {
+        copy.textContent = 'Payment is confirmed, but access is blocked pending support. Quote your order reference.';
+      } else if (fulfillment.delivery === 'emailed') {
+        copy.textContent = 'Your access email has been sent. Check your inbox and spam folder.';
+      } else if (fulfillment.delivery === 'queued') {
+        copy.textContent = 'Payment is confirmed. Your access is queued for email; contact support if it does not arrive.';
+      } else if (fulfillment.delivery === 'disabled') {
+        copy.textContent = 'Payment is confirmed. Access delivery is temporarily unavailable; contact support with your order reference.';
+      } else {
+        copy.textContent = 'Thank you. Your access is being prepared for email delivery.';
+      }
+      ok.textContent = 'Paid' + (body.amount ? ' ' + body.amount.value + ' ' + body.amount.currency : '') + '. Order ' + (body.transaction_id || token) + ' confirmed.';
+      ok.style.display = 'block';
+    }).catch(function(e){ fail(e && e.message ? e.message : String(e)); });
+})();
+</script></body></html>`;
+}
+
+function accessPage({ orderId, product }) {
+  const name = escapeHtml(product?.name || product?.title || 'Your course');
+  const slug = product?.slug || product?.id;
+  const target = product?.url || (slug ? `/catalog/${encodeURIComponent(slug)}.html` : '/catalog/index.html');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Your access · RealWorldCerts</title><style>body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0c10;color:#eaeef2}main{max-width:640px;margin:0 auto;padding:28px 20px}.card{border:1px solid #1e2532;border-radius:12px;padding:20px;background:#0e1118}a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1cf}.btn{display:inline-block;margin-top:12px;background:#2f81f7;color:#fff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700}</style></head><body><main><div class="card"><h1>${name}</h1><p>Your payment is confirmed and your access is ready.</p><p><a class="btn" href="${escapeHtml(target)}">Open course</a></p><p style="font-size:13px;color:#8b949e">Order ${escapeHtml(orderId)}</p></div></main></body></html>`;
+}
+
+function buyCancelPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Checkout cancelled · RealWorldCerts</title><style>body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0c10;color:#eaeef2}main{max-width:640px;margin:0 auto;padding:28px 20px}.card{border:1px solid #1e2532;border-radius:12px;padding:20px;background:#0e1118}a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1cf}</style></head><body><main><div class="card"><h1>Checkout cancelled</h1><p>Nothing was charged. You can return to the catalog and start again whenever you are ready.</p><p><a href="/catalog/index.html">Back to catalog</a></p></div></main></body></html>`;
 }
 
 function lastJsonLine(text) {
@@ -1145,12 +1322,72 @@ if (args.check === true || args["config-check"] === true) {
       return;
     }
 
+    if (pathname === "/data/store-prices.json") {
+      if (req.method !== "GET") {
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        json(res, 200, storefrontPricePayload());
+      } catch (error) {
+        json(res, 503, { ok: false, error: error.message });
+      }
+      return;
+    }
+
+    if (pathname === "/buy") {
+      if (req.method !== "GET") {
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      html(res, 200, buyPage());
+      return;
+    }
+
+    if (pathname === "/buy/success") {
+      if (req.method !== "GET") {
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      html(res, 200, buySuccessPage());
+      return;
+    }
+
+    if (pathname === "/buy/cancel") {
+      if (req.method !== "GET") {
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      html(res, 200, buyCancelPage());
+      return;
+    }
+
+    if (pathname.startsWith("/access/")) {
+      if (req.method !== "GET") {
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      const token = pathname.slice("/access/".length);
+      try {
+        const verified = verifyAccessToken(token, process.env.FULFILLMENT_ACCESS_SECRET || '');
+        if (!verified.ok) {
+          html(res, verified.reason === 'EXPIRED_TOKEN' ? 410 : 401, "<!doctype html><html><body style='font-family:system-ui;background:#0b0c10;color:#eaeef2;padding:40px'><h1>Access link unavailable</h1><p>This link is invalid or has expired. Email billing@realworldcerts.com for help.</p></body></html>");
+          return;
+        }
+        const product = publicProducts().find((item) => String(item.id ?? '') === String(verified.productId ?? '')) || null;
+        html(res, 200, accessPage({ orderId: verified.orderId, product }));
+      } catch {
+        html(res, 401, "<!doctype html><html><body style='font-family:system-ui;background:#0b0c10;color:#eaeef2;padding:40px'><h1>Access link unavailable</h1><p>Email billing@realworldcerts.com for help.</p></body></html>");
+      }
+      return;
+    }
+
     if (pathname === "/acp/v1/discovery") {
       if (req.method !== "GET") {
         json(res, 405, { ok: false, error: "Method not allowed" });
         return;
       }
-      const products = safeJsonParse(process.env.ACP_PRODUCTS_JSON, []) ?? [];
+      const products = publicProducts();
       json(res, 200, {
         ok: true,
         protocol: "ACP-1.0",
@@ -1161,12 +1398,79 @@ if (args.check === true || args["config-check"] === true) {
         },
         products: Array.isArray(products) ? products : [],
         endpoints: {
+          checkout: "/buy",
           initiate_transaction: "/acp/v1/transactions",
+          capture_transaction: "/acp/v1/transactions/:id/capture",
           transaction_status: "/acp/v1/transactions/:id",
           health: "/acp/health"
         },
         compliance: { sbds: "1.0", direct_settlement: true, no_intermediaries: true }
       });
+      return;
+    }
+
+    if (pathname.startsWith("/acp/v1/transactions/") && pathname.endsWith("/capture")) {
+      if (req.method !== "POST") {
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      if (!shouldCreatePayPalOrders()) {
+        json(res, 403, { ok: false, error: "Order capture disabled (set PAYPAL_ENABLE_ORDER_CREATE=true)" });
+        return;
+      }
+      try {
+        requireLiveMode("capture PayPal order");
+      } catch (e) {
+        json(res, 403, { ok: false, error: e?.message ?? String(e) });
+        return;
+      }
+      const parts = pathname.split("/").filter(Boolean);
+      const orderId = parts.length === 5 && parts[4] === "capture" ? parts[3] : null;
+      if (!orderId) {
+        json(res, 400, { ok: false, error: "Missing transaction id" });
+        return;
+      }
+      try {
+        let order;
+        try {
+          order = await capturePayPalCheckoutOrder(orderId);
+        } catch (error) {
+          if (!/ORDER_ALREADY_CAPTURED|ORDER_ALREADY_COMPLETED/.test(String(error?.message ?? error))) throw error;
+          order = await getPayPalOrderDetails(orderId);
+        }
+        const units = Array.isArray(order?.purchase_units) ? order.purchase_units : [];
+        const captures = units.flatMap((unit) => Array.isArray(unit?.payments?.captures) ? unit.payments.captures : []);
+        const amount = captures[0]?.amount ?? units[0]?.amount ?? null;
+        const productId = units[0]?.custom_id ? String(units[0].custom_id) : null;
+        const product = productId ? publicProducts().find((item) => String(item.id ?? '') === productId) || null : null;
+        const fulfill = shouldFulfillPaidOrders();
+        let fulfillment = null;
+        if (fulfill && String(order?.status || '').toUpperCase() === 'COMPLETED') {
+          try {
+            const result = await fulfillPaidOrder({ order, product });
+            fulfillment = { ok: result.ok === true, delivery: result.delivery || null };
+          } catch {
+            fulfillment = { ok: false, delivery: null };
+          }
+        } else if (!fulfill) {
+          fulfillment = { ok: true, delivery: 'disabled' };
+        }
+        json(res, 200, {
+          ok: true,
+          protocol: "ACP-1.0",
+          transaction_id: order?.id ?? orderId,
+          status: order?.status ?? null,
+          amount: amount ? { value: amount.value ?? null, currency: amount.currency_code ?? amount.currency ?? null } : null,
+          captures: captures.map((capture) => ({
+            id: capture?.id ?? null,
+            status: capture?.status ?? null,
+            final_capture: capture?.final_capture ?? null
+          })),
+          fulfillment
+        });
+      } catch (e) {
+        json(res, 502, { ok: false, error: e?.message ?? String(e) });
+      }
       return;
     }
 
@@ -1251,20 +1555,24 @@ if (args.check === true || args["config-check"] === true) {
         return;
       }
 
-      const products = safeJsonParse(process.env.ACP_PRODUCTS_JSON, []) ?? [];
-      const list = Array.isArray(products) ? products : [];
       const productId = body.product_id ?? body.productId ?? null;
-      const picked = productId ? list.find((p) => p && typeof p === "object" && String(p.id ?? "") === String(productId)) : null;
-
-      const amountRaw = picked?.price ?? picked?.amount ?? body.amount ?? body.total ?? null;
-      const amount = Number(amountRaw);
-      if (!amount || Number.isNaN(amount) || amount <= 0) {
-        json(res, 400, { ok: false, error: "Invalid amount" });
+      if (!productId) {
+        json(res, 400, { ok: false, error: "product_id is required" });
+        return;
+      }
+      const picked = publicProducts().find((item) => String(item.id ?? "") === String(productId));
+      if (!picked) {
+        json(res, 400, { ok: false, error: "Unknown product_id" });
+        return;
+      }
+      const amount = Number(picked.price);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        json(res, 400, { ok: false, error: "Product price is not configured" });
         return;
       }
 
-      const currency = normalizeCurrency(picked?.currency ?? body.currency, String(process.env.PAYPAL_CURRENCY ?? "USD"));
-      const description = String(picked?.name ?? body.description ?? "").trim() || null;
+      const currency = normalizeCurrency(picked.currency, String(process.env.PAYPAL_CURRENCY ?? "USD"));
+      const description = String(picked.name || "").trim() || null;
       const customId = String(body.reference ?? body.custom_id ?? body.customId ?? `acp_${Date.now()}`).slice(0, 120);
       const returnUrl = String(body.return_url ?? body.returnUrl ?? process.env.PAYPAL_RETURN_URL ?? "").trim();
       const cancelUrl = String(body.cancel_url ?? body.cancelUrl ?? process.env.PAYPAL_CANCEL_URL ?? "").trim();
@@ -1273,7 +1581,15 @@ if (args.check === true || args["config-check"] === true) {
         return;
       }
 
-      const order = await createPayPalCheckoutOrder({ amount, currency, description, customId, returnUrl, cancelUrl });
+      const order = await createPayPalCheckoutOrder({
+        amount,
+        currency,
+        description,
+        customId,
+        productId: picked.id,
+        returnUrl,
+        cancelUrl
+      });
       const approvalUrl = pickApprovalUrl(order);
       json(res, 200, {
         ok: true,

@@ -9,6 +9,11 @@
   },
   "rewrites": [
     { "source": "/health", "destination": "/api/index" },
+    { "source": "/data/store-prices.json", "destination": "/api/index" },
+    { "source": "/buy", "destination": "/api/index" },
+    { "source": "/buy/success", "destination": "/api/index" },
+    { "source": "/buy/cancel", "destination": "/api/index" },
+    { "source": "/access/(.*)", "destination": "/api/index" },
     { "source": "/all-good", "destination": "/api/index" },
     { "source": "/revenue/(.*)", "destination": "/api/index" },
     { "source": "/acp/(.*)", "destination": "/api/index" },

@@ -12,8 +12,9 @@ This repository now contains the pieces needed to run
 
 The server owns these paths:
 
-`/health`, `/all-good`, `/revenue/*`, `/acp/*`, `/x402/*`, `/rails/*`,
-`/ilp/*`, `/paypal/webhook`, plus the `/api/webhooks/paypal` alias.
+`/health`, `/all-good`, `/revenue/*`, `/buy`, `/buy/success`, `/buy/cancel`,
+`/data/store-prices.json`, `/acp/*`, `/x402/*`, `/rails/*`, `/ilp/*`,
+`/paypal/webhook`, plus the `/api/webhooks/paypal` alias.
 
 It does **not** serve static files. A catch-all rewrite would send `/` to the
 server, which answers 404, and the storefront would disappear. The marketing
@@ -40,10 +41,91 @@ Environment variables (Production, at minimum):
 - `PAYPAL_WEBHOOK_ID`
 - `SWARM_LIVE=true` only when the account and wallet checks are satisfied
 - `PAYPAL_MODE=live`
+- `NO_PLATFORM_WALLET=true` (required by the live authority check)
+- `OWNER_PAYPAL_EMAIL` (or another owner declaration such as `OWNER_BANK_ACCOUNT`)
+- `PAYPAL_ENABLE_ORDER_CREATE=true` after the checkout is verified
+- `FULFILLMENT_ACCESS_SECRET`, `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
+- `SETTLEMENT_LEDGER_PATH`, `FULFILLMENT_QUEUE_FILE` (durable writable paths)
 
 The webhook must be registered in the PayPal dashboard for
 `https://<domain>/api/webhooks/paypal` (or `/paypal/webhook`), using the same
 webhook id that is in `PAYPAL_WEBHOOK_ID`.
+
+## Working checkout
+
+`/buy` is a self-contained checkout page served by the same function. It reads
+the explicit prices in `config/course-prices.json`, creates a PayPal order
+through `/acp/v1/transactions`, and sends the buyer to PayPal. `/buy/success`
+captures the approved order through `POST /acp/v1/transactions/:id/capture`; a
+payment is not considered complete until that capture succeeds and the order
+status is `COMPLETED`.
+
+The price file is the only product source. Its schema is minimal:
+
+```json
+{
+  "currency": "USD",
+  "fulfillment_cost_cents": 200,
+  "prices": {
+    "rwc-cbe-2025": { "name": "Certified Blockchain Expert (CBE) 2025", "price": 19 }
+  }
+}
+```
+
+The ACP create endpoint requires a known `product_id`; it ignores any posted
+`amount`, so a browser cannot choose the charge.
+
+## Prepaid fulfillment and access delivery
+
+After a successful capture, the handler calls `fulfillPaidOrder`:
+
+1. The captured amount is credited to `data/financial/settlement_ledger.json` as
+   `REVENUE_PAYPAL`.
+2. The product's fulfillment cost is reserved from **available swarm revenue**
+   and recorded as a `FULFILLMENT` debit. The ledger entry records `prepaid_by: "swarm"` and
+   `funding_source: "swarm_revenue"`.
+3. If available revenue does not cover the cost, access is not released. The
+   order is queued as `BLOCKED_PREPAYMENT` and the success page reports that
+   fulfillment needs support.
+4. Otherwise a signed `/access/<token>` link is generated and emailed through
+   Resend (`RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`). A provider failure is
+   queued as `PENDING_EMAIL`, never reported as delivered.
+
+The settlement ledger is also the email idempotency key: retrying a capture for
+an order already marked `email_status: sent` does not send a second email.
+
+Required fulfillment variables:
+
+- `FULFILLMENT_ENABLED=true` (set `false` only for a dry deployment)
+- `FULFILLMENT_ACCESS_SECRET` — random secret for signed access links; this is
+  distinct from the data encryption key
+- `APP_ORIGIN=https://www.realworldcerts.com`
+- `RESEND_API_KEY` and a verified `FULFILLMENT_FROM_EMAIL`
+- `SETTLEMENT_LEDGER_PATH` and `FULFILLMENT_QUEUE_FILE` pointing at durable,
+  writable storage
+
+**Persistence warning:** Vercel’s local filesystem is ephemeral. A ledger or
+queue written under the deployment directory disappears between invocations.
+Mount durable storage or move these two paths to a persistent volume before
+relying on production fulfillment. The code still fails closed: without a
+writable ledger, delivery is queued/blocked rather than silently given away.
+
+`/access/<token>` verifies the HMAC and expiry, then links to the configured
+product URL or catalog slug. `FULFILLMENT_QUEUE_FILE` is an append-only audit
+trail; `BLOCKED_PREPAYMENT`, `PENDING_EMAIL`, `PENDING_ACCESS_SECRET`, and
+`DELIVERED` are the delivery states.
+
+Required for live checkout: `PAYPAL_ENABLE_ORDER_CREATE=true`, `SWARM_LIVE=true`,
+`NO_PLATFORM_WALLET=true`, `PAYPAL_MODE=live`, and real PayPal credentials. The
+return URL is derived from the request origin, so `https://www.realworldcerts.com`
+must be the origin buyers use. Register `https://www.realworldcerts.com/buy/success`
+as the PayPal return URL only if using a static PayPal button; the `/buy` flow
+sets its own return and cancel URLs.
+
+`/buy` links use the catalog slug, for example
+`https://www.realworldcerts.com/buy?product_id=certified-blockchain-expert-cbe-preptest-2025`.
+Point course and campaign buttons at these links. The old checkout pages are
+manual-instructions pages and must not be used for live sales.
 
 ## Deployment warning
 

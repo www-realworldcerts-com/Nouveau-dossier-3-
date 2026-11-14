@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { threatMonitor } from '../src/security/threat-monitor.mjs';
+import { readEncryptedJson } from '../src/security/data-at-rest.mjs';
 
 function print(k, v) {
   const t = new Date();
@@ -18,7 +19,7 @@ function getLedger() {
   const p = path.join(process.cwd(), 'data', 'financial', 'settlement_ledger.json');
   if (!fs.existsSync(p)) return { transactions: [], queued: [] };
   try {
-    return JSON.parse(fs.readFileSync(p, 'utf8'));
+    return readEncryptedJson(p);
   } catch {
     return { transactions: [], queued: [] };
   }

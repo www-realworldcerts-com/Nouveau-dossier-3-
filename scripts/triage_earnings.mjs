@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { readEncryptedJson } from '../src/security/data-at-rest.mjs';
 
 const LEDGER_DIR = path.resolve('data/autonomous/ledger');
 const EXPORTS_DIR = path.resolve('exports');
@@ -29,8 +30,7 @@ function scanLedger() {
 
   for (const file of files) {
     try {
-      const content = fs.readFileSync(path.join(LEDGER_DIR, file), 'utf8');
-      const json = JSON.parse(content);
+      const json = readEncryptedJson(path.join(LEDGER_DIR, file));
       
       if (json.type === 'batch' && json.data) {
         batches.push(json.data);

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { writeJsonAtomic } from '../src/security/data-at-rest.mjs';
 
 // Load system components
 import { AutonomousSettlementEngine } from '../data/full_autonomous_system.js';
@@ -60,7 +61,7 @@ async function executeLiveSettlement() {
     }
   };
   
-  fs.writeFileSync(batchFile, JSON.stringify(batchData, null, 2));
+  writeJsonAtomic(batchFile, batchData);
   
   console.log(`✅ LIVE BATCH GENERATED AND RECORDED`);
   console.log(`   Ledger: ${batchFile}`);

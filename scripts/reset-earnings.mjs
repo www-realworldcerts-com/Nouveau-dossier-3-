@@ -1,6 +1,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { readEncryptedJson, writeJsonAtomic } from '../src/security/data-at-rest.mjs';
 
 const LEDGER_DIR = './data/autonomous/ledger';
 
@@ -11,7 +12,7 @@ function resetEarnings() {
   
   files.forEach(file => {
     const filepath = path.join(LEDGER_DIR, file);
-    const content = JSON.parse(fs.readFileSync(filepath, 'utf8'));
+    const content = readEncryptedJson(filepath);
     
     // Check if it's wrapped or unwrapped
     const data = content.data || content;
@@ -25,7 +26,7 @@ function resetEarnings() {
        delete data.payout_date;
        
        // Save back (preserving wrapper if existed)
-       fs.writeFileSync(filepath, JSON.stringify(content, null, 2));
+       writeJsonAtomic(filepath, content);
        count++;
     }
   });

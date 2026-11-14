@@ -2,6 +2,7 @@
 import fs from 'fs';
 import path from 'path';
 import { MutexLock } from '../utils/MutexLock.mjs';
+import { readEncryptedJson, writeJsonAtomic } from '../security/data-at-rest.mjs';
 
 const LEDGER_PATH = path.join(process.cwd(), 'data', 'financial', 'settlement_ledger.json');
 
@@ -17,24 +18,23 @@ export class SettlementLedger {
       fs.mkdirSync(dir, { recursive: true });
     }
     if (!fs.existsSync(LEDGER_PATH)) {
-      fs.writeFileSync(LEDGER_PATH, JSON.stringify({
+      writeJsonAtomic(LEDGER_PATH, {
         daily_usage: {}, // { "YYYY-MM-DD": { "BANK_WIRE": 0, ... } }
         transactions: [], // History of all transactions
         queued: [] // Transactions waiting for limits/resources
-      }, null, 2));
+      });
     }
   }
 
   getLedger() {
-    try {
-      return JSON.parse(fs.readFileSync(LEDGER_PATH, 'utf8'));
-    } catch (e) {
+    if (!fs.existsSync(LEDGER_PATH)) {
       return { daily_usage: {}, transactions: [], queued: [] };
     }
+    return readEncryptedJson(LEDGER_PATH);
   }
 
   saveLedger(data) {
-    fs.writeFileSync(LEDGER_PATH, JSON.stringify(data, null, 2));
+    writeJsonAtomic(LEDGER_PATH, data);
   }
 
   async getDailyUsage(channel) {

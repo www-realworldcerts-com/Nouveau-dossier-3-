@@ -1,12 +1,13 @@
 import fs from 'fs';
 import path from 'path';
+import { readEncryptedJson } from '../../security/data-at-rest.mjs';
 
 const historyPath = path.join(process.cwd(), 'src', 'real', 'ledger', 'execution_history.json');
 
 function loadHistory() {
     if (!fs.existsSync(historyPath)) return [];
     try {
-        return JSON.parse(fs.readFileSync(historyPath, 'utf8'));
+        return readEncryptedJson(historyPath);
     } catch (e) {
         return [];
     }

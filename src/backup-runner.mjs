@@ -2,6 +2,7 @@ import './load-env.mjs';
 import fs from 'fs';
 import path from 'path';
 import { buildBase44Client } from './base44-client.mjs';
+import { encryptBuffer, requireEncryptionKey } from './security/data-at-rest.mjs';
 
 function getEntityName(envKey, defaultName) {
   return process.env[envKey] ?? defaultName;
@@ -34,6 +35,7 @@ async function fetchAll(client, entityName) {
 
 export async function runFullBackup() {
   console.log('💾 STARTING FULL BACKUP...');
+  requireEncryptionKey();
   
   const client = buildBase44Client();
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -63,8 +65,9 @@ export async function runFullBackup() {
     const records = await fetchAll(client, name);
     
     fs.writeFileSync(
-      path.join(backupDir, `${name}.json`), 
-      JSON.stringify(records, null, 2)
+      path.join(backupDir, `${name}.json.enc`),
+      encryptBuffer(Buffer.from(JSON.stringify(records, null, 2), 'utf8')),
+      { mode: 0o600 }
     );
     
     summary.counts[name] = records.length;
@@ -73,12 +76,13 @@ export async function runFullBackup() {
 
   // Also save a summary file
   fs.writeFileSync(
-    path.join(backupDir, 'backup-summary.json'),
-    JSON.stringify(summary, null, 2)
+    path.join(backupDir, 'backup-summary.json.enc'),
+    encryptBuffer(Buffer.from(JSON.stringify(summary, null, 2), 'utf8')),
+    { mode: 0o600 }
   );
 
-  console.log(`✅ Full backup completed at ${backupDir}`);
-  return summary;
+  console.log(`✅ Encrypted full backup completed at ${backupDir}`);
+  return { ...summary, encrypted: true };
 }
 
 if (process.argv[1].endsWith('backup-runner.mjs')) {

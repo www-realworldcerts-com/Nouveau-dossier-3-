@@ -42,9 +42,16 @@ npm test
 
 ### Disaster Recovery Backup
 ```bash
-npm run backup
+DATA_ENCRYPTION_KEY='...' npm run backup
 ```
-*Creates a snapshot of critical data.*
+*Creates an encrypted snapshot of critical data. Restore with `npm run restore:backup`.*
+
+## 🔐 Encryption at rest
+
+Financial stores and backups are encrypted with AES-256-GCM when
+`DATA_ENCRYPTION_KEY` (or `DATA_ENCRYPTION_KEY_FILE`) is set. The read-only audit
+and the dry-run-first migration/rotation/rollback commands are documented in
+[docs/DATA_AT_REST.md](docs/DATA_AT_REST.md). Never commit the key.
 
 ## 🛡️ Core Principles
 1. **No Simulation**: All actions must be real.

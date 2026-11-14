@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { decryptSensitiveFields, writeJsonAtomic } from '../security/data-at-rest.mjs';
 
 /**
  * Persistent payout ledger.
@@ -59,7 +60,7 @@ export function loadPayoutLedger(file) {
     const resolved = path.resolve(file);
     if (!fs.existsSync(resolved)) return emptyLedger();
     const parsed = JSON.parse(fs.readFileSync(resolved, 'utf8'));
-    return normalizeLedger(parsed);
+    return normalizeLedger(decryptSensitiveFields(parsed));
 }
 
 /** Write through a temp file so a crash cannot leave a half-written ledger. */
@@ -72,9 +73,7 @@ export function savePayoutLedger(file, ledger) {
         items: ledger.items,
         statement_imports: ledger.statement_imports || {}
     };
-    const tmp = `${resolved}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`);
-    fs.renameSync(tmp, resolved);
+    writeJsonAtomic(resolved, payload);
     return normalizeLedger(payload);
 }
 
@@ -106,8 +105,11 @@ export function readPayoutHistory(directory = DEFAULT_HISTORY_DIR, { excludeBatc
         const file = path.join(resolved, name);
         let parsed;
         try {
-            parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-        } catch {
+            parsed = decryptSensitiveFields(JSON.parse(fs.readFileSync(file, 'utf8')));
+        } catch (error) {
+            // A missing/incorrect key must stop the export; silently treating an
+            // encrypted batch as absent would allow a duplicate payout.
+            if (String(error?.code ?? '').startsWith('DATA_AT_REST')) throw error;
             continue;
         }
         const batch = parsed?.data && Array.isArray(parsed.data.items) ? parsed.data : parsed;

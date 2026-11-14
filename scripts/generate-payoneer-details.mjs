@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { writeJsonAtomic } from '../src/security/data-at-rest.mjs';
 
 // Configuration
 const BATCH_ID = 'BATCH_PAYONEER_X_1767529200';
@@ -75,7 +76,7 @@ const ledgerData = {
     }
   }
 };
-fs.writeFileSync(ledgerPath, JSON.stringify(ledgerData, null, 2));
+writeJsonAtomic(ledgerPath, ledgerData);
 
 console.log(`✅ DOCUMENTATION GENERATED: ${docPath}`);
 console.log(`✅ LEDGER ENTRY CREATED: ${ledgerPath}`);

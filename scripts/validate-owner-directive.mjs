@@ -1,11 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import { OwnerSettlementEnforcer } from '../src/policy/owner-settlement.mjs';
+import { readEncryptedJson } from '../src/security/data-at-rest.mjs';
 
 function readLedger() {
   const p = path.join(process.cwd(), 'data', 'financial', 'settlement_ledger.json');
   if (!fs.existsSync(p)) return null;
-  return JSON.parse(fs.readFileSync(p, 'utf8'));
+  return readEncryptedJson(p);
 }
 
 function run() {

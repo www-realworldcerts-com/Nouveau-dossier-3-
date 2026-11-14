@@ -3,6 +3,7 @@ import path from 'path';
 
 // Load system components
 import { AutonomousSettlementEngine } from '../data/full_autonomous_system.js';
+import { writeJsonAtomic } from '../src/security/data-at-rest.mjs';
 
 // Configuration for "Stimulus"
 const STIMULUS_AMOUNT = 850; // ~$850 USD
@@ -66,7 +67,7 @@ async function generateStimulus() {
     }
   };
   
-  fs.writeFileSync(batchFile, JSON.stringify(batchData, null, 2));
+  writeJsonAtomic(batchFile, batchData);
   
   console.log(`✅ STIMULUS BATCH GENERATED AND RECORDED`);
   console.log(`   Ledger: ${batchFile}`);

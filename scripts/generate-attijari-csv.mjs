@@ -14,6 +14,7 @@ import {
     recordSubmitted,
     savePayoutLedger
 } from '../src/financial/payout-ledger.mjs';
+import { readEncryptedJson } from '../src/security/data-at-rest.mjs';
 
 /**
  * Build an Attijariwafa bank-wire CSV from a payout batch.
@@ -177,7 +178,7 @@ export function run(argv = process.argv.slice(2), { stdout = console.log } = {})
 
     const resolved = path.resolve(batchFile);
     if (!fs.existsSync(resolved)) throw new Error(`Batch file not found: ${resolved}`);
-    const batch = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+    const batch = readEncryptedJson(resolved);
     const result = buildBankWireCsv(batch, { account, date: flags.date || null });
 
     const ledger = loadPayoutLedger(ledgerFile);

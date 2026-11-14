@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { readEncryptedJson } from '../src/security/data-at-rest.mjs';
 
 // Generate a detailed report on "Overboard" Quotas vs "Safe" Liquidity
 const LEDGER_DIR = path.resolve('data/autonomous/ledger');
@@ -11,7 +12,7 @@ function scanLedger() {
     .filter(f => f.startsWith('batch_') && f.endsWith('.json'))
     .map(f => {
       try {
-        return JSON.parse(fs.readFileSync(path.join(LEDGER_DIR, f), 'utf8')).data;
+        return readEncryptedJson(path.join(LEDGER_DIR, f)).data;
       } catch (e) { return null; }
     })
     .filter(Boolean);

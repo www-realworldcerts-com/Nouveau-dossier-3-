@@ -14,11 +14,20 @@ This document outlines the procedures for recovering the Swarm Financial System 
   - `exports/`: Generated settlement artifacts.
 
 ### Execution
-To trigger an immediate backup:
+Backups contain bank details and payout records and are encrypted at rest.
+Set `DATA_ENCRYPTION_KEY` (or `DATA_ENCRYPTION_KEY_FILE`) first:
 ```bash
-npm run backup
+DATA_ENCRYPTION_KEY='...' npm run backup
 ```
-*Creates a timestamped snapshot in `backups/YYYY-MM-DD-HH-mm-ss/`*
+*Creates a timestamped directory of AES-256-GCM encrypted `.enc` files in
+`backups/YYYY-MM-DD-HH-mm-ss/`; the key is never included.*
+
+Restore with:
+```bash
+DATA_ENCRYPTION_KEY='...' npm run restore:backup -- \
+  --backup backups/2026-01-04-12-00-00 --out /tmp/swarm-restore
+```
+See [DATA_AT_REST.md](DATA_AT_REST.md) for migration, rotation and key handling.
 
 ## Recovery Procedures
 
@@ -27,7 +36,9 @@ npm run backup
 2. **Locate Backup**: Find the most recent valid snapshot in `backups/`.
 3. **Restore**:
    ```bash
-   cp -r backups/2026-01-04-12-00-00/data/financial/settlement_ledger.json data/financial/
+   DATA_ENCRYPTION_KEY='...' npm run restore:backup -- \
+     --backup backups/2026-01-04-12-00-00 --out /tmp/restore
+   cp /tmp/restore/data/financial/settlement_ledger.json data/financial/
    ```
 4. **Verify**: Run `scripts/check-settlement-status.mjs` to ensure integrity.
 5. **Restart**: `npm start`.
@@ -35,7 +46,7 @@ npm run backup
 ### Scenario 2: Total System Loss
 1. **Clone Repository**: `git clone <repo_url>`
 2. **Restore Environment**: Re-create `.env` from secure storage (LastPass/1Password).
-3. **Restore Data**: Copy the contents of the latest backup into the project root.
+3. **Restore Data**: Decrypt the latest backup with `npm run restore:backup` and copy the verified output into the project root.
 4. **Install Dependencies**: `npm install`
 5. **Run Integrity Check**: `npm test`
 

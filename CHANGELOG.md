@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-14
+- Added AES-256-GCM encryption at rest for financial JSON fields (IBANs, RIBs,
+  bank/account numbers, recipient identities, emails, phones) and encrypted
+  backup directories/manifests. Keys come only from
+  `DATA_ENCRYPTION_KEY`/`DATA_ENCRYPTION_KEY_FILE`; rotation is supported with
+  a previous-key ring.
+- Payout and settlement ledgers now encrypt on write and decrypt on read. A
+  missing/wrong key on encrypted history fails closed instead of making payout
+  history look empty.
+- Added dry-run-first migration, rollback and rotation commands in
+  `scripts/encrypt-sensitive-data.mjs`, plus encrypted backup/restore tooling.
+  Existing committed plaintext still requires an operator-run migration and
+  rotation of exposed account details; see `docs/DATA_AT_REST.md`.
+
 ## 2026-11-13
 - JARVIS chat is now local-first: set `JARVIS_LOCAL_BASE_URL` to use a Strata or
   other OpenAI-compatible endpoint. Cloud use is an explicit opt-in fallback, not

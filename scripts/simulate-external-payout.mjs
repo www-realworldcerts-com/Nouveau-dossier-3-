@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { readEncryptedJson, writeJsonAtomic } from '../src/security/data-at-rest.mjs';
 
 // Configuration
 const TRUST_WALLET = '0xA46225a984E2B2B5E5082E52AE8d8915A09fEfe7';
@@ -59,11 +60,11 @@ fs.writeFileSync(receiptPath, receiptContent);
 // 4. Update Ledger
 const ledgerPath = `data/autonomous/ledger/batch_${BATCH_ID}.json`;
 if (fs.existsSync(ledgerPath)) {
-    const ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+    const ledger = readEncryptedJson(ledgerPath);
     ledger.data.status = 'pending_broadcast';
     ledger.data.source_wallet = SWARM_WALLET;
     ledger.data.notes = 'API Signature Error - Funds held in Swarm Wallet';
-    fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
+    writeJsonAtomic(ledgerPath, ledger);
 }
 
 console.log(`✅ SWARM FUNDS IDENTIFIED & SECURED`);

@@ -1,69 +1,28 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import path from 'node:path';
+import { createEncryptedBackup } from '../src/security/backup-crypto.mjs';
+import { encryptionConfigured } from '../src/security/data-at-rest.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT_DIR = path.resolve(__dirname, '..');
-const BACKUP_ROOT = path.resolve(ROOT_DIR, 'backups');
+const args = process.argv.slice(2);
+const outIndex = args.indexOf('--out');
+const outDir = outIndex >= 0 ? args[outIndex + 1] : null;
+const includeIndex = args.indexOf('--include');
+const include = includeIndex >= 0 ? args[includeIndex + 1] : null;
+const sources = include
+  ? include.split(',').map((item) => item.trim()).filter(Boolean)
+  : ['data', 'config', 'exports', '.env.example'];
 
-function ensureDirectoryExists(dirPath) {
-    if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-    }
+if (!encryptionConfigured()) {
+  console.error('❌ Backup refused: set DATA_ENCRYPTION_KEY or DATA_ENCRYPTION_KEY_FILE.');
+  console.error('   Backups contain bank details, IBANs and payout records and are encrypted at rest.');
+  process.exit(2);
 }
 
-function copyRecursiveSync(src, dest) {
-    const exists = fs.existsSync(src);
-    const stats = exists && fs.statSync(src);
-    const isDirectory = exists && stats.isDirectory();
-    
-    if (isDirectory) {
-        ensureDirectoryExists(dest);
-        fs.readdirSync(src).forEach(childItemName => {
-            copyRecursiveSync(path.join(src, childItemName), path.join(dest, childItemName));
-        });
-    } else {
-        fs.copyFileSync(src, dest);
-    }
+try {
+  const result = createEncryptedBackup({ sources, outDir });
+  console.log(`✅ Encrypted backup completed: ${result.outDir}`);
+  console.log(`   Encrypted files: ${result.fileCount}`);
+  console.log('   Restore with: npm run restore:backup -- --backup <dir> --out <dir>');
+} catch (error) {
+  console.error(`❌ BACKUP FAILED: ${error.message}`);
+  process.exit(1);
 }
-
-async function runBackup() {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupDir = path.join(BACKUP_ROOT, timestamp);
-    
-    console.log(`🛡️  STARTING DISASTER RECOVERY BACKUP...`);
-    console.log(`📂 Destination: ${backupDir}`);
-    
-    ensureDirectoryExists(backupDir);
-
-    // Critical Data Directories to Backup
-    const criticalDirs = ['data', 'config', 'exports'];
-    
-    for (const dir of criticalDirs) {
-        const srcPath = path.join(ROOT_DIR, dir);
-        const destPath = path.join(backupDir, dir);
-        
-        if (fs.existsSync(srcPath)) {
-            console.log(`   - Backing up: ${dir}...`);
-            copyRecursiveSync(srcPath, destPath);
-        } else {
-            console.warn(`   ⚠️  Warning: ${dir} not found, skipping.`);
-        }
-    }
-    
-    // Backup .env (WARNING: Contains secrets, ensure backup location is secure)
-    // For this implementation, we will skip .env to avoid accidental exposure in unencrypted backups
-    // Instead, we backup a template if it exists
-    if (fs.existsSync(path.join(ROOT_DIR, '.env.example'))) {
-         fs.copyFileSync(path.join(ROOT_DIR, '.env.example'), path.join(backupDir, '.env.example'));
-    }
-
-    console.log(`✅ BACKUP COMPLETED SUCCESSFULLY.`);
-    console.log(`   Path: ${backupDir}`);
-}
-
-runBackup().catch(err => {
-    console.error('❌ BACKUP FAILED:', err);
-    process.exit(1);
-});

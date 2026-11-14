@@ -1,6 +1,16 @@
 # Changelog
 
 ## 2026-11-13
+- JARVIS now follows evidence guardrails inspired by Bonsai: prompts distinguish
+  observed/search/user-supplied/unknown data, generated documents are marked
+  `DRAFT` with no authorization or payment-confirmation codes, and the chat no
+  longer claims actions that no tool performed.
+- `/api/jarvis/status` derives real runtime state from heartbeat, findings,
+  contentieux, procurement and payout files instead of reporting hardcoded
+  "online"; missing or stale evidence is `unknown`/`blocked`. The status bar
+  consumes it.
+- Fixed the standalone build root so `bun run build` and `bun run start` produce
+  and serve `.next/standalone/server.js` (Docker also expects this path).
 - Added a dry-run-first procurement bootstrap importer for existing orders and
   AMANA scan files (`npm run procurement:import`). It backdates creation and
   placement, matches evidence by PO/tracking, and leaves invalid or missing

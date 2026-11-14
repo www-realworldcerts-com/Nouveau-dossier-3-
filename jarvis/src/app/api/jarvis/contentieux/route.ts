@@ -1,25 +1,16 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import { NextResponse } from 'next/server';
+import { findSwarmFile } from '@/lib/swarm-files';
 
 /**
  * Contentieux report produced by the silent-failure audit on every tick.
  * JARVIS only reads the report; it never mutates a PO or records evidence.
  */
 
-function reportCandidates() {
-  const roots = [
-    process.env.SWARM_ROOT,
-    process.env.SWARM_DATA_ROOT,
-    path.resolve(process.cwd(), '..'),
-    process.cwd(),
-  ].filter((root): root is string => typeof root === 'string' && root.length > 0);
-  return [...new Set(roots.map(root => path.join(root, 'data', 'resilience', 'contentieux.json')))];
-}
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  const candidates = reportCandidates();
-  const file = candidates.find(candidate => fs.existsSync(candidate));
+  const file = findSwarmFile('data/resilience/contentieux.json');
 
   if (!file) {
     return NextResponse.json({

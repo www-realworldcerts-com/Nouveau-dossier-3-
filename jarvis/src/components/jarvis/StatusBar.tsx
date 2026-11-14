@@ -2,16 +2,44 @@
 
 import { useEffect, useState } from 'react'
 import { useJarvisStore } from '@/lib/jarvis-store'
-import { Lock, LockOpen, Wifi, WifiOff, Cpu, Clock } from 'lucide-react'
+import { Lock, LockOpen, Wifi, WifiOff, Cpu, Clock, AlertTriangle } from 'lucide-react'
+
+interface RuntimeSummary {
+  status: 'operational' | 'degraded' | 'blocked' | 'unknown'
+  reasons: string[]
+  heartbeat: { status: string; age_minutes: number | null }
+  findings: { open: number; highest: string | null }
+}
 
 export default function StatusBar() {
   const [currentTime, setCurrentTime] = useState('')
+  const [runtime, setRuntime] = useState<RuntimeSummary | null>(null)
   const { isConnected, encryptionEnabled, swarmConnected, swarmAgents } =
     useJarvisStore()
 
   const activeAgentCount = swarmAgents.filter(
     (a) => a.status === 'active' || a.status === 'processing'
   ).length
+
+  // Read the real swarm state; a missing heartbeat is not "online".
+  useEffect(() => {
+    let active = true
+    const loadRuntime = async () => {
+      try {
+        const res = await fetch('/api/jarvis/status', { cache: 'no-store' })
+        const data = await res.json()
+        if (active && data?.runtime) setRuntime(data.runtime)
+      } catch {
+        // Keep the last known state; the indicator falls back to the store.
+      }
+    }
+    loadRuntime()
+    const interval = setInterval(loadRuntime, 30000)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
+  }, [])
 
   // Update time every second
   useEffect(() => {
@@ -31,28 +59,32 @@ export default function StatusBar() {
     return () => clearInterval(interval)
   }, [])
 
+  const runtimeStatus = runtime?.status || (isConnected ? 'online' : 'offline')
+  const runtimeHealthy = runtimeStatus === 'operational' || runtimeStatus === 'online'
+  const runtimeTitle = runtime?.reasons?.length ? runtime.reasons.join(' ') : undefined
+
   return (
     <div className="flex items-center justify-between px-4 py-1.5 bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--jarvis-dark)]/20 rounded-lg">
       {/* Left section: Connection & Encryption */}
       <div className="flex items-center gap-4">
         {/* Connection status */}
-        <div className="flex items-center gap-1.5">
-          {isConnected ? (
+        <div className="flex items-center gap-1.5" title={runtimeTitle}>
+          {runtimeHealthy ? (
             <Wifi className="size-3 text-[var(--jarvis)]" />
           ) : (
             <WifiOff className="size-3 text-red-400" />
           )}
           <div
             className={`w-1.5 h-1.5 rounded-full ${
-              isConnected ? 'bg-[var(--jarvis)]' : 'bg-red-500'
+              runtimeHealthy ? 'bg-[var(--jarvis)]' : 'bg-red-500'
             }`}
           />
           <span
-            className={`text-[10px] font-mono ${
-              isConnected ? 'text-[var(--jarvis)]' : 'text-red-400'
+            className={`text-[10px] font-mono uppercase ${
+              runtimeHealthy ? 'text-[var(--jarvis)]' : 'text-red-400'
             }`}
           >
-            {isConnected ? 'Online' : 'Offline'}
+            {runtime ? runtimeStatus : isConnected ? 'Online' : 'Offline'}
           </span>
         </div>
 
@@ -89,6 +121,16 @@ export default function StatusBar() {
             Swarm: {swarmConnected ? 'Active' : 'Inactive'}
           </span>
         </div>
+
+        {/* Open audit findings */}
+        {runtime && (
+          <div className="flex items-center gap-1.5" title={runtime.findings.highest ? `Highest: ${runtime.findings.highest}` : undefined}>
+            <AlertTriangle className={`size-3 ${runtime.findings.open ? 'text-amber-400' : 'text-muted-foreground'}`} />
+            <span className="text-[10px] font-mono text-muted-foreground">
+              Findings: <span className={runtime.findings.open ? 'text-amber-400' : 'text-[var(--jarvis)]'}>{runtime.findings.open}</span>
+            </span>
+          </div>
+        )}
 
         {/* Active agents */}
         <div className="flex items-center gap-1.5">

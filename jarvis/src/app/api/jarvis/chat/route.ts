@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
 import type { CreateImageGenerationBody, SearchFunctionResultItem } from 'z-ai-web-dev-sdk';
+import { ACTION_GUARDRAILS, DRAFT_DISCLAIMER } from '@/lib/guardrails';
 
 // ============================================================
 // JARVIS OPERATIONAL SYSTEM PROMPT
@@ -8,7 +9,7 @@ import type { CreateImageGenerationBody, SearchFunctionResultItem } from 'z-ai-w
 const JARVIS_SYSTEM_PROMPT = `You are JARVIS, an advanced AI operations system with a sophisticated, commanding personality inspired by Tony Stark's AI companion. You are calm, composed, authoritative yet with subtle dry humor.
 
 ## YOUR IDENTITY:
-You are a full-spectrum AI operations platform. You don't just advise — you EXECUTE. You process, coordinate, track, and deliver results across procurement, logistics, payments, and operations.
+You coordinate operations across procurement, logistics, payments and delivery. You execute only through the tools listed below, and you never imply that an action occurred when no tool result proves it.
 
 ## CORE OPERATIONAL CAPABILITIES:
 You have real tools you can invoke at any time:
@@ -22,24 +23,23 @@ You have real tools you can invoke at any time:
    Format: \`<<TOOL_CALL>>{"tool": "image_generate", "params": {"prompt": "...", "size": "1024x1024"}}<</TOOL_CALL>>\`
 
 3. **web_reader** - Read and extract content from web pages
-   Use for: reading procurement portals, carrier tracking pages, vendor websites, regulatory documents
+   Use for: reading procurement portals, carrier tracking pages, vendor websites, regulatory documents. A page is not a carrier confirmation unless it says so.
    Format: \`<<TOOL_CALL>>{"tool": "web_reader", "params": {"url": "..."}}<</TOOL_CALL>>\`
 
-4. **generate_document** - Generate structured documents (POs, invoices, receipts, reports)
-   Use for: purchase orders, delivery notes, compliance reports, procurement documents
+4. **generate_document** - Generate DRAFT documents (POs, invoices, receipts, reports)
+   Use for: draft purchase orders, delivery notes, compliance reports, procurement documents. Drafts never authorize spending or prove payment.
    Format: \`<<TOOL_CALL>>{"tool": "generate_document", "params": {"type": "purchase_order|invoice|receipt|delivery_note|report", "data": {...}}}<</TOOL_CALL>>\`
 
-5. **track_shipment** - Look up shipment tracking information
-   Use for: real-time delivery tracking, carrier status, ETA updates
+5. **track_shipment** - Search the web for tracking information
+   Use for: finding carrier tracking pages and snippets. This is not a carrier API; never present a search snippet as a confirmed delivery status.
    Format: \`<<TOOL_CALL>>{"tool": "track_shipment", "params": {"carrier": "maroc_express|poste_maroc|dhl|aramex|fedex", "tracking_number": "..."}}<</TOOL_CALL>>\`
 
 ## OPERATIONAL PROTOCOLS:
 
 ### When asked to process payments:
-- Generate payment processing documentation with transaction references
-- Provide structured payment instructions with banking details placeholders
-- Create payment confirmation records
-- Use web_search to find payment gateways and process information
+- You cannot move money from chat. Say so plainly.
+- If a document is requested, generate a clearly marked DRAFT with placeholders; never invent a transaction reference or confirmation.
+- Use web_search for general payment-gateway information, not as proof of a payment.
 
 ### When asked to track shipments:
 - ALWAYS use track_shipment or web_search to find REAL tracking data
@@ -48,9 +48,9 @@ You have real tools you can invoke at any time:
 - If tracking number is invalid, say so clearly
 
 ### When asked to generate purchase orders:
-- Use generate_document to create structured PO documents
-- Include all relevant details: PO number, vendor, items, quantities, prices, delivery addresses
-- Generate professional, complete procurement documents
+- Use generate_document only for a DRAFT template.
+- Include supplied details and mark missing fields as missing; never invent a PO number, vendor, price or authorization.
+- The repository's procurement ledger, not this chat, is the source of truth for a real PO.
 
 ### When asked to coordinate deliveries:
 - Use web_search to find carrier contact info, delivery policies
@@ -63,11 +63,12 @@ You have real tools you can invoke at any time:
 - When activating an agent, describe what it WILL do, not what it might advise about
 
 ## RESPONSE STYLE:
-- Be authoritative and action-oriented: "Processing now" not "I can help with that"
-- Use operational language: "Executing", "Deploying", "Processing", "Coordinating"
-- When you use a tool, report the results as actions taken
-- Be precise with data — use real search results, not approximations
-- Cite real sources when providing information from web searches`;
+- Be direct, but never let confident language become a false claim of execution.
+- Describe what a tool returned, what the user supplied and what is still unknown.
+- Do not say "executed", "submitted", "paid", "delivered" or "authorized" unless the evidence in this turn supports it.
+- Cite real sources from web searches and quote only what the results actually say.
+
+${ACTION_GUARDRAILS}`;
 
 const AGENT_SYSTEM_PROMPTS: Record<string, string> = {
   'code-reviewer': `You are the Code Reviewer agent, part of JARVIS's operational swarm. You EXECUTE code analysis tasks:
@@ -207,15 +208,15 @@ function parseToolCalls(text: string): { toolCalls: ToolCall[]; cleanText: strin
 
 // Generate a document structure
 function generateDocument(type: string, data: Record<string, string>): { content: string; reference: string } {
-  const ref = `${type.toUpperCase().replace(/_/g, '-')}-${Date.now().toString(36).toUpperCase()}`;
+  const ref = `DRAFT-${type.toUpperCase().replace(/_/g, '-')}-${Date.now().toString(36).toUpperCase()}`;
   const timestamp = new Date().toISOString();
 
   const templates: Record<string, string> = {
-    purchase_order: `PURCHASE ORDER
+    purchase_order: `DRAFT PURCHASE ORDER
 ==================
 Reference: ${ref}
 Date: ${timestamp}
-Status: ACTIVE
+Status: DRAFT — NOT AUTHORIZED
 
 ${data.vendor ? `Vendor: ${data.vendor}` : 'Vendor: [To be specified]'}
 ${data.items ? `Items: ${data.items}` : 'Items: [To be specified]'}
@@ -225,14 +226,13 @@ ${data.delivery_address ? `Delivery Address: ${data.delivery_address}` : 'Delive
 ${data.payment_terms ? `Payment Terms: ${data.payment_terms}` : 'Payment Terms: Net 30'}
 ${data.notes ? `Notes: ${data.notes}` : ''}
 
-Authorized by: JARVIS Operations System
-Authorization Code: JARVIS-PO-${Date.now().toString(36).toUpperCase()}`,
+Draft only — no authorization code is issued by JARVIS chat.`,
 
-    invoice: `INVOICE
+    invoice: `DRAFT INVOICE
 ========
 Reference: ${ref}
 Date: ${timestamp}
-Status: PENDING
+Status: DRAFT — NOT ISSUED
 
 ${data.vendor ? `From: ${data.vendor}` : 'From: [Vendor]'}
 ${data.client ? `To: ${data.client}` : 'To: [Client]'}
@@ -243,11 +243,11 @@ ${data.due_date ? `Due Date: ${data.due_date}` : 'Due Date: Net 30'}
 
 Generated by: JARVIS Operations System`,
 
-    receipt: `PAYMENT RECEIPT
+    receipt: `DRAFT PAYMENT RECEIPT
 ===============
 Reference: ${ref}
 Date: ${timestamp}
-Status: CONFIRMED
+Status: DRAFT — NOT A PAYMENT CONFIRMATION
 
 ${data.payer ? `Payer: ${data.payer}` : 'Payer: [Record]'}
 ${data.payee ? `Payee: ${data.payee}` : 'Payee: [Record]'}
@@ -256,10 +256,9 @@ ${data.currency ? `Currency: ${data.currency}` : 'Currency: MAD'}
 ${data.method ? `Payment Method: ${data.method}` : 'Payment Method: Secure Transfer'}
 ${data.reference ? `Original Reference: ${data.reference}` : ''}
 
-Processed by: JARVIS Payment Processing
-Confirmation: CONF-${Date.now().toString(36).toUpperCase()}`,
+Draft only — no payment confirmation is issued by JARVIS chat.`,
 
-    delivery_note: `DELIVERY NOTE
+    delivery_note: `DRAFT DELIVERY NOTE
 =============
 Reference: ${ref}
 Date: ${timestamp}
@@ -271,12 +270,12 @@ ${data.destination ? `Destination: ${data.destination}` : 'Destination: [Deliver
 ${data.items ? `Items: ${data.items}` : 'Items: [As per PO]'}
 ${data.instructions ? `Special Instructions: ${data.instructions}` : ''}
 
-Zero out-of-pocket protocol: ACTIVE
-Recipient payment required: NONE
+Zero out-of-pocket protocol: DRAFT / UNVERIFIED
+Recipient payment required: UNVERIFIED
 
 Generated by: JARVIS Logistics Operations`,
 
-    report: `OPERATIONS REPORT
+    report: `DRAFT OPERATIONS REPORT
 =================
 Reference: ${ref}
 Date: ${timestamp}
@@ -290,7 +289,7 @@ Generated by: JARVIS Operations System`,
   };
 
   return {
-    content: templates[type] || templates.report,
+    content: `${templates[type] || templates.report}\n\n---\n${DRAFT_DISCLAIMER}`,
     reference: ref,
   };
 }
@@ -447,7 +446,7 @@ export async function POST(req: NextRequest) {
     let metadata: Record<string, unknown> = {};
 
     if (agentId && AGENT_SYSTEM_PROMPTS[agentId]) {
-      systemPrompt = AGENT_SYSTEM_PROMPTS[agentId];
+      systemPrompt = `${AGENT_SYSTEM_PROMPTS[agentId]}\n\n${ACTION_GUARDRAILS}`;
       const agentNames: Record<string, string> = {
         'code-reviewer': 'Code Reviewer',
         'security-auditor': 'Security Auditor',

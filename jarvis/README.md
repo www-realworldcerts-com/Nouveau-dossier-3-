@@ -57,6 +57,27 @@ All three are expected to pass. `next build` now enforces types (the previous
 `ignoreBuildErrors` flag was removed), so a type regression fails the build
 instead of shipping.
 
+## Operating guardrails
+
+Inspired by Bonsai's governed-agent model, JARVIS is not allowed to turn
+confidence into claims of execution:
+
+- Chat and agent prompts share `src/lib/guardrails.ts`. A web search is reported
+  as search output, not as a carrier API result or payment confirmation.
+- `generate_document` produces `DRAFT` purchase orders, invoices, receipts and
+  delivery notes with a visible disclaimer. It never issues an authorization or
+  payment-confirmation code.
+- `/api/jarvis/status` derives state from `data/swarm-heartbeat.json`,
+  `data/resilience/silent-state.json`, the contentieux report, the procurement
+  store and the payout ledger. Missing or stale evidence is `unknown`/`blocked`,
+  never `online`.
+- The status bar reads this endpoint and shows the real runtime state plus the
+  open finding count.
+
+The API routes still have **no authentication** (`authRequired: false` is
+reported by `/api/jarvis/status`). Do not expose this app publicly until the
+routes are protected.
+
 ## Layout
 
 | Path | Contents |
@@ -65,6 +86,8 @@ instead of shipping.
 | `src/app/api/jarvis/` | chat, voice, swarm, upload, image, search routes |
 | `src/components/jarvis/` | Chat, Voice, Swarm, FileUpload, Status, Visualizer |
 | `src/lib/jarvis-store.ts` | Zustand store and client types |
+| `src/lib/guardrails.ts` | evidence and draft-document rules |
+| `src/lib/swarm-state.ts` | real heartbeat/findings/procurement/payout status |
 | `prisma/schema.prisma` | SQLite schema (`User`, `Post`) |
 | `db/custom.db` | local database, created by `db:push` (ignored) |
 | `jarvis-package/` | distribution copy: Docker, Kubernetes, Python agent, docs |

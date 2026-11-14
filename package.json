@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node ./scripts/auto-restart-loop.js",
+    "test": "node --test \"test/*.test.mjs\"",
+    "backup": "node scripts/system-backup.mjs",
     "swarm:tick": "node scripts/swarm-tick.mjs",
     "swarm:tick:check": "node scripts/swarm-tick.mjs --check-only",
     "swarm:doctor": "node scripts/swarm-doctor.mjs",

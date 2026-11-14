@@ -1,7 +1,15 @@
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { getPayPalOrderDetails, verifyPayPalWebhookSignature } from "../src/paypal-api.mjs";
+import {
+  clearPayPalTokenCache,
+  getPayPalOrderDetails,
+  verifyPayPalWebhookSignature
+} from "../src/paypal-api.mjs";
+
+beforeEach(() => {
+  clearPayPalTokenCache();
+});
 
 test("verifyPayPalWebhookSignature uses webhookEvent without parsing rawBody", async () => {
   const prevFetch = globalThis.fetch;

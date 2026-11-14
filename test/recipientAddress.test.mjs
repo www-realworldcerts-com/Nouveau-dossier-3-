@@ -70,12 +70,21 @@ test("payment routing optimization prefers bank wire when PayPal payouts disable
   }
 });
 
-test("createPayoutBatchesFromEarnings skips paypal batch when recipient not in allowlist", async () => {
+test("createPayoutBatchesFromEarnings skips paypal batch when no owner sink is configured", async () => {
   const prev = process.env.AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS;
-  const prevOwner = process.env.OWNER_PAYPAL_EMAIL;
+  const ownerKeys = [
+    "OWNER_PAYPAL_EMAIL",
+    "OWNER_PAYONEER_ID",
+    "OWNER_BANK_ACCOUNT",
+    "OWNER_BANK_RIB",
+    "BANK_ACCOUNT",
+    "BANK_RIB",
+    "BANK_IBAN"
+  ];
+  const prevOwner = Object.fromEntries(ownerKeys.map((key) => [key, process.env[key]]));
   try {
     process.env.AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS = "owner@example.com";
-    process.env.OWNER_PAYPAL_EMAIL = "owner@example.com";
+    for (const key of ownerKeys) delete process.env[key];
 
     const base44 = {
       asServiceRole: {
@@ -116,8 +125,10 @@ test("createPayoutBatchesFromEarnings skips paypal batch when recipient not in a
   } finally {
     if (prev == null) delete process.env.AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS;
     else process.env.AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS = prev;
-    if (prevOwner == null) delete process.env.OWNER_PAYPAL_EMAIL;
-    else process.env.OWNER_PAYPAL_EMAIL = prevOwner;
+    for (const key of ownerKeys) {
+      if (prevOwner[key] == null) delete process.env[key];
+      else process.env[key] = prevOwner[key];
+    }
   }
 });
 

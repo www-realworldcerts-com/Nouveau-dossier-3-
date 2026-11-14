@@ -1,6 +1,9 @@
 
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { CircuitBreaker } from '../src/swarm/circuit-breakers.mjs';
 import { AgentHealthMonitor } from '../src/swarm/health-monitor.mjs';
 import { SwarmMemory } from '../src/swarm/shared-memory.mjs';
@@ -72,9 +75,15 @@ describe('Swarm Resilience Components', () => {
 
   describe('SwarmMemory', () => {
     it('should store and retrieve values', async () => {
-      const memory = new SwarmMemory();
-      await memory.update('key1', 'value1', 'agent-1', 'test');
-      assert.strictEqual(memory.state.get('key1'), 'value1');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-memory-'));
+      const storePath = path.join(dir, 'memory.json');
+      try {
+        const memory = new SwarmMemory({ storePath });
+        await memory.update('key1', 'value1', 'agent-1', 'test');
+        assert.strictEqual(memory.state.get('key1'), 'value1');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 

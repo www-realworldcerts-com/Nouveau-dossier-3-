@@ -1,0 +1,15 @@
+# Keep the deployment to the API, its source, config, and the public price file.
+# Everything else is repository/runtime material and must not become static output.
+*
+!api
+!api/**
+!src
+!src/**
+!config
+!config/**
+!data
+data/*
+!data/store-prices.json
+!package.json
+!package-lock.json
+!vercel.json

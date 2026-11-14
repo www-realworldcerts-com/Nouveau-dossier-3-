@@ -1,6 +1,9 @@
 {
   "name": "payment-scripts",
   "version": "1.0.0",
+  "engines": {
+    "node": "22.x"
+  },
   "type": "module",
   "scripts": {
     "start": "node ./scripts/auto-restart-loop.js",

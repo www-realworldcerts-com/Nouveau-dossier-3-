@@ -52,3 +52,4 @@ data/swarm-loop.lock
 
 # payout ledger (runtime financial state)
 data/financial/payout_ledger.json
+.vercel

@@ -44,6 +44,12 @@ Environment variables (Production, at minimum):
 - `NO_PLATFORM_WALLET=true` (required by the live authority check)
 - `OWNER_PAYPAL_EMAIL` (or another owner declaration such as `OWNER_BANK_ACCOUNT`)
 - `PAYPAL_ENABLE_ORDER_CREATE=true` after the checkout is verified
+
+The deployment is pinned to Node 22 by `package.json` (`engines.node`).
+`.vercelignore` ships only `api`, `src`, `config`, the public price payload and
+the package/config files. `vercel.json` excludes `data/**` and
+`doomsday-vault/**` from the function bundle; without that exclusion the
+function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
 - `FULFILLMENT_ACCESS_SECRET`, `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
 - `SETTLEMENT_LEDGER_PATH`, `FULFILLMENT_QUEUE_FILE` (durable writable paths)
 

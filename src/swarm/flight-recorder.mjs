@@ -8,11 +8,6 @@ export class FlightRecorder {
     this.logBuffer = [];
     this.dumpDir = options.dumpDir || path.join(process.cwd(), 'logs', 'dumps');
     this.startTime = new Date().toISOString();
-    
-    // Ensure dump directory exists
-    if (!fs.existsSync(this.dumpDir)) {
-      fs.mkdirSync(this.dumpDir, { recursive: true });
-    }
   }
 
   log(level, message, meta = {}) {
@@ -60,6 +55,7 @@ export class FlightRecorder {
     };
 
     try {
+      fs.mkdirSync(this.dumpDir, { recursive: true });
       fs.writeFileSync(dumpPath, JSON.stringify(dumpData, null, 2));
       console.error(`🔥 FLIGHT RECORDER DUMP SAVED: ${dumpPath}`);
       return dumpPath;

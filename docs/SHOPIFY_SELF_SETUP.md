@@ -32,7 +32,8 @@ links instead of pretending they were automated.
 3. Configuration → Admin API integration → enable scopes `read_products`,
    `write_products`, `read_orders`.
 4. Add the redirect URL `http://127.0.0.1:3456/callback`.
-5. Put the credentials in `.env` (gitignored):
+5. Put the credentials in `.env` (gitignored). Start from
+   [`env.shopify.template`](../env.shopify.template):
 
 ```
 SHOPIFY_API_KEY=...

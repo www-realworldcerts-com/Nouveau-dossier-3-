@@ -12,8 +12,8 @@ envContent.split('\n').forEach(line => {
   if (key) env[key.trim()] = value.trim();
 });
 
-const API_KEY = '303Y3Do3L5EdG8gQeBbKir3WOSV4zSkc2fD78D7L85H7BZUH5rySb9Xo7vLayZHZ';
-const API_SECRET = 'I3vpUWrJ1LXbNqZ6K5PRbOrS9Nk8PJ7Uk4YOv6bFg1p67WtBbYKFZgvGOHI9eGy1';
+const API_KEY = '[REDACTED]';
+const API_SECRET = '[REDACTED]';
 
 console.log('API Key Length:', API_KEY.length);
 console.log('API Secret Length:', API_SECRET.length);

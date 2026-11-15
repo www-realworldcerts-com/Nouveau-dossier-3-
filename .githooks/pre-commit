@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Scan only staged additions/modifications, so the hook is fast and does not
+# block a commit for something that is not part of it.
+node scripts/scan-secrets.mjs --staged

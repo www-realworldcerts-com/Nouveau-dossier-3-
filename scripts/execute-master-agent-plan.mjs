@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { SwarmOrchestrator } from '../src/orchestration/SwarmOrchestrator.mjs'
+import { writeSanitizedJson } from '../src/security/export-sanitizer.mjs'
 
 class MasterAgent {
   async execute(task) {
@@ -15,7 +16,7 @@ class MasterAgent {
       agent: 'MASTER_AGENT',
       status: 'submitted'
     }
-    fs.writeFileSync(file, JSON.stringify(payload, null, 2))
+    writeSanitizedJson(file, payload)
     return { ok: true, file }
   }
 }
@@ -96,13 +97,13 @@ async function main() {
   const runOutDir = path.join('exports', 'missions', 'executions')
   if (!fs.existsSync(runOutDir)) fs.mkdirSync(runOutDir, { recursive: true })
   const summaryFile = path.join(runOutDir, `master_agent_run_${Date.now()}.json`)
-  fs.writeFileSync(summaryFile, JSON.stringify({
+  writeSanitizedJson(summaryFile, {
     ok: true,
     planPath,
     missionsPath,
     phases: allResults,
     finished_at: new Date().toISOString()
-  }, null, 2))
+  })
 
   process.stdout.write(JSON.stringify({ ok: true, run_summary: summaryFile }) + '\n')
 }

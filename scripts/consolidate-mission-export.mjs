@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { IntelligentMissionConsolidator } from '../src/swarm/mission-consolidator.mjs'
+import { writeSanitizedJson, writeSanitizedText } from '../src/security/export-sanitizer.mjs'
 
 function parseCsvLine(line) {
   const result = []
@@ -96,8 +97,8 @@ function writeOutputs(baseName, report, consolidatedMissions, scheduleItems) {
   const planPath = path.join(outDir, `master_agent_plan_${baseName}_${ts}.json`)
   const scheduleCsv = path.join(outDir, `master_agent_schedule_${baseName}_${ts}.csv`)
 
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
-  fs.writeFileSync(missionsPath, JSON.stringify(consolidatedMissions, null, 2))
+  writeSanitizedJson(reportPath, report)
+  writeSanitizedJson(missionsPath, consolidatedMissions)
 
   const plan = {
     generated_at: new Date().toISOString(),
@@ -108,14 +109,14 @@ function writeOutputs(baseName, report, consolidatedMissions, scheduleItems) {
     ],
     items: scheduleItems
   }
-  fs.writeFileSync(planPath, JSON.stringify(plan, null, 2))
+  writeSanitizedJson(planPath, plan)
 
   const header = ['id', 'title', 'priority', 'est_hours', 'action', 'agents_count']
   const lines = [header.join(',')]
   for (const it of scheduleItems) {
     lines.push([it.id, it.title.replace(/,/g, ' '), it.priority, String(it.est_hours), it.action, String(it.agents_count)].join(','))
   }
-  fs.writeFileSync(scheduleCsv, `${lines.join('\n')}\n`)
+  writeSanitizedText(scheduleCsv, `${lines.join('\n')}\n`)
 
   return { reportPath, missionsPath, planPath, scheduleCsv }
 }

@@ -486,7 +486,7 @@
     },
     "paypal": {
       "clientId": "AblIB7rHWR7h899Za9v5yYgli8Y2453ySCCMrjb76d48yOPaBToqOLuif-57O9EWHlPMfZuEKjdY0MmU",
-      "clientSecret": "EG1um0gCOJ36wGDiCQL-DkkKN2LVfe4_cGzzJbmDTFn9Uy8RnPnjyM344cbg7AU0x5JF3-7T6UmaHn4_",
+      "clientSecret": "[REDACTED]",
       "mode": "live"
     },
     "execution": {

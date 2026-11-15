@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { containsSecrets, writeSanitizedText } from '../src/security/export-sanitizer.mjs';
+
 function parseCSV(text) {
   const rows = [];
   let row = [];
@@ -280,9 +282,13 @@ function main() {
   // Backup and write
   const backup = `${target}.bak`;
   try {
-    if (!fs.existsSync(backup)) fs.writeFileSync(backup, raw, 'utf8');
+    if (!fs.existsSync(backup)) {
+      writeSanitizedText(backup, raw);
+    } else if (containsSecrets(fs.readFileSync(backup, 'utf8'))) {
+      writeSanitizedText(backup, fs.readFileSync(backup, 'utf8'));
+    }
   } catch {}
-  fs.writeFileSync(target, outCsv, 'utf8');
+  writeSanitizedText(target, outCsv);
 
   console.log(JSON.stringify({ ok: true, input_rows: rows.length - 1, output_rows: cleaned.length }, null, 2));
 }

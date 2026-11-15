@@ -128,12 +128,12 @@
     },
     "credentials": {
       "binance": {
-        "api_key": "303Y3Do3L5EdG8gQeBbKir3WOSV4zSkc2fD78D7L85H7BZUH5rySb9Xo7vLayZHZ",
+        "api_key": "[REDACTED]",
         "api_secret": "***SECURE***",
         "has_secret": true
       },
       "paypal": {
-        "client_id": "AblIB7rHWR7h899Za9v5yYgli8Y2453ySCCMrjb76d48yOPaBToqOLuif-57O9EWHlPMfZuEKjdY0MmU",
+        "client_id": "[REDACTED]",
         "has_secret": true
       },
       "payoneer": {

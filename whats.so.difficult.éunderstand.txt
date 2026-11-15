@@ -418,7 +418,7 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
-      - SWARM_API_KEY=bd7f9e6a4adc45d48666cb399067637c
+      - SWARM_API_KEY=[REDACTED]
       - OWNER_PAYPAL_EMAIL=younestsouli2019@gmail.com
       - OWNER_BANK_RIB=007810000448500030594182
       - PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID}
@@ -439,7 +439,7 @@ services:
     container_name: revenue-monitor
     restart: unless-stopped
     environment:
-      - BASE44_API_KEY=bd7f9e6a4adc45d48666cb399067637c
+      - BASE44_API_KEY=[REDACTED]
       - ALERT_EMAIL=younesdgc@gmail.com
       - CHECK_INTERVAL=300
     volumes:
@@ -462,7 +462,7 @@ const axios = require('axios');
 const cron = require('node-cron');
 
 const SWARM_API = 'https://api.base44.com/v1/swarm';
-const API_KEY = process.env.SWARM_API_KEY;
+const API_KEY = [REDACTED];
 const OWNER_ACCOUNTS = {
   paypal: process.env.OWNER_PAYPAL_EMAIL,
   bank: process.env.OWNER_BANK_RIB
@@ -579,7 +579,7 @@ distributor.checkAvailableRevenue().then(revenue => {
 # Immediate owner payout script
 
 BASE_URL="https://api.base44.com/v1/swarm"
-API_KEY="bd7f9e6a4adc45d48666cb399067637c"
+API_KEY="[REDACTED]"
 OWNER_EMAIL="younestsouli2019@gmail.com"
 
 # Step 1: Freeze suspicious accounts
@@ -654,7 +654,7 @@ cp agent_commands_v1.json /opt/swarm/revenue-system/config/
 
 # 3. Create environment file
 cat > /opt/swarm/revenue-system/.env << EOF
-SWARM_API_KEY=bd7f9e6a4adc45d48666cb399067637c
+SWARM_API_KEY=[REDACTED]
 OWNER_PAYPAL_EMAIL=younestsouli2019@gmail.com
 OWNER_BANK_RIB=007810000448500030594182
 PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID}
@@ -689,7 +689,7 @@ import json
 from datetime import datetime
 
 BASE_URL = "https://api.base44.com/v1/swarm"
-API_KEY = "bd7f9e6a4adc45d48666cb399067637c"
+API_KEY = "[REDACTED]"
 
 class RevenueMonitor:
     def __init__(self):

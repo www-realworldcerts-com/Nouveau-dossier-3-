@@ -21,8 +21,8 @@ Wallet
 Bind IP addresses (optional, up to 30 per key)
 Seperate multiple IP addresses with commas.
 View
-BITGET_API_KEY=bg_f8b755e5a11606a812b4111b7bebcb19
-BITGET_API_SECRET=57e5532fb7d0a535c8d85588ec04be9d02632c3ec3a24b039528140dae3e7467
+BITGET_API_KEY=[REDACTED]
+BITGET_API_SECRET=[REDACTED]
 
 Bind IP addresses
 No record
@@ -31,7 +31,7 @@ Futures|OrdersFutures|HoldingsSpot|TradeMargin|TradeCopy trading|TradeTaxation|S
 QR Code image available
 
 
-BITGET_API_KEY=bg_f8b755e5a11606a812b4111b7bebcb19
-BITGET_API_SECRET=57e5532fb7d0a535c8d85588ec04be9d02632c3ec3a24b039528140dae3e7467
-BITGET_PASSPHRASE=0x67e694f7b4ce878d664c4b18e22c55
+BITGET_API_KEY=[REDACTED]
+BITGET_API_SECRET=[REDACTED]
+BITGET_PASSPHRASE=[REDACTED]
 CRYPTO_WITHDRAW_ENABLE=true

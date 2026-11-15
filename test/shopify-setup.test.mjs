@@ -22,6 +22,7 @@ import {
     writeTokenToEnv
 } from '../src/sales/shopify-oauth.mjs';
 import { DEFAULT_PRICING_CONFIG, storePriceFor } from '../src/sales/pricing.mjs';
+import { shopifySettingsFromEnv } from '../src/sales/shopify.mjs';
 
 const SHOP = 'realworldcerts-test.myshopify.com';
 const TOKEN = 'shpat_testtoken123';
@@ -67,6 +68,17 @@ describe('shop domain and links', () => {
         assert.equal(normalizeShopDomain('realworldcerts.com'), null, 'custom domains cannot use the Admin API');
         assert.equal(normalizeShopDomain(''), null);
         assert.match(adminLinks(SHOP).payments, /admin\.shopify\.com\/store\/realworldcerts-test\/settings\/payments/);
+    });
+
+    it('does not invent a store domain when the environment is unset', () => {
+        const previous = process.env.SHOPIFY_STORE_DOMAIN;
+        delete process.env.SHOPIFY_STORE_DOMAIN;
+        try {
+            assert.equal(shopifySettingsFromEnv().domain, '');
+        } finally {
+            if (previous == null) delete process.env.SHOPIFY_STORE_DOMAIN;
+            else process.env.SHOPIFY_STORE_DOMAIN = previous;
+        }
     });
 });
 
@@ -179,6 +191,10 @@ describe('setupShop audit', () => {
         const report = await setupShop({ domain: 'https://realworldcerts.com', token: TOKEN }, { fetchImpl: shopFetch() });
         assert.equal(report.ready, false);
         assert.deepEqual(report.blockers, ['invalid_shop_domain']);
+        assert.equal(report.domain, null);
+        assert.equal(report.links, null);
+        assert.deepEqual(report.manual_actions, []);
+        assert.match(report.next_step, /SHOPIFY_STORE_DOMAIN/);
     });
 
     it('audits a healthy shop and optionally ensures the collection', async () => {

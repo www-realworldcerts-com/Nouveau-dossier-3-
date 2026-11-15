@@ -10,7 +10,7 @@ import { slugify } from './catalog.mjs';
 
 export function shopifySettingsFromEnv() {
     return {
-        domain: process.env.SHOPIFY_STORE_DOMAIN || 'realworldcerts.myshopify.com',
+        domain: process.env.SHOPIFY_STORE_DOMAIN || '',
         token: process.env.SHOPIFY_ADMIN_TOKEN || process.env.SHOPIFY_SHpat_TOKEN || '',
         apiVersion: process.env.SHOPIFY_API_VERSION || '2024-10',
         storefrontUrl: process.env.SHOPIFY_STOREFRONT_URL || 'https://www.realworldcerts.com'

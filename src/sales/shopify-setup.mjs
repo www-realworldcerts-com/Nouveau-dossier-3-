@@ -178,8 +178,8 @@ export async function setupShop(settings, {
     const base = {
         generated_at: new Date().toISOString(),
         requested_domain: settings.domain || null,
-        domain: domain || settings.domain || null,
-        links: adminLinks(domain || settings.domain),
+        domain,
+        links: domain ? adminLinks(domain) : null,
         shop: null,
         scopes: null,
         storefront: null,
@@ -188,11 +188,15 @@ export async function setupShop(settings, {
         ready: false,
         blockers: [],
         warnings: [],
-        manual_actions: manualActions(domain || settings.domain)
+        manual_actions: domain ? manualActions(domain) : []
     };
 
     if (!domain) {
-        return { ...base, blockers: ['invalid_shop_domain'], manual_actions: manualActions(settings.domain) };
+        return {
+            ...base,
+            blockers: ['invalid_shop_domain'],
+            next_step: 'Set SHOPIFY_STORE_DOMAIN to the real <store>.myshopify.com domain from Shopify admin.'
+        };
     }
     if (!settings.token) {
         return {

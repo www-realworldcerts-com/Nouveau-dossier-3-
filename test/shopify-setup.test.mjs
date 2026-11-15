@@ -21,7 +21,7 @@ import {
     verifyOAuthHmac,
     writeTokenToEnv
 } from '../src/sales/shopify-oauth.mjs';
-import { DEFAULT_PRICING_CONFIG, storePriceFor } from '../src/sales/pricing.mjs';
+import { loadCourseCatalog, priceInCurrency } from '../src/sales/course-catalog.mjs';
 import { shopifySettingsFromEnv } from '../src/sales/shopify.mjs';
 
 const SHOP = 'realworldcerts-test.myshopify.com';
@@ -83,43 +83,49 @@ describe('shop domain and links', () => {
 });
 
 describe('store currency conversion', () => {
-    it('publishes MAD prices unchanged into a MAD store', () => {
-        assert.deepEqual(storePriceFor(1500, 'MAD'), { amount: 1500, currency: 'MAD', converted: false, rate: 1 });
+    const FX = { USD: 1, MAD: 10, EUR: 0.92 };
+    const course = { slug: 'course', price_cents: 1900 };
+
+    it('leaves the canonical USD price unchanged in a USD store', () => {
+        assert.deepEqual(priceInCurrency(course, 'USD', FX), { amount: 19, currency: 'USD', converted: false, rate: 1 });
     });
 
-    it('converts into EUR and USD stores instead of writing MAD as USD', () => {
-        assert.equal(storePriceFor(1500, 'EUR').amount, 138);
-        assert.equal(storePriceFor(1500, 'usd').amount, 150);
-        assert.equal(storePriceFor(1500, 'USD').converted, true);
+    it('converts the canonical USD price into MAD and EUR stores', () => {
+        assert.equal(priceInCurrency(course, 'MAD', FX).amount, 190);
+        assert.equal(priceInCurrency(course, 'EUR', FX).amount, 17.48);
+        assert.equal(priceInCurrency(course, 'MAD', FX).converted, true);
     });
 
     it('throws rather than guessing an unsupported currency', () => {
-        assert.throws(() => storePriceFor(1500, 'GBP'), /No FX rate for GBP/);
-        assert.throws(() => storePriceFor(0, 'MAD'), /invalid price/);
+        assert.throws(() => priceInCurrency(course, 'GBP', FX), /No FX rate for GBP/);
+        assert.throws(() => priceInCurrency({ slug: 'bad', price_cents: 0 }, 'USD', FX), /invalid price_cents/);
     });
 });
 
 describe('shop readiness assessment', () => {
+    const FX = { USD: 1, MAD: 10, EUR: 0.92 };
     const readyInputs = {
-        shop: { currency: 'MAD' },
+        shop: { currency: 'USD' },
         scopes: ['read_products', 'write_products'],
         storefront: { password_gate: 'off' },
-        productCount: 3
+        productCount: 3,
+        catalogCurrency: 'USD',
+        fx: FX
     };
 
-    it('passes a configured MAD shop with products and no gate', () => {
+    it('passes a configured USD shop with products and no gate', () => {
         const result = assessShop(readyInputs);
         assert.equal(result.ready, true);
         assert.deepEqual(result.blockers, []);
         assert.deepEqual(result.warnings, []);
-        assert.equal(result.currency.store, 'MAD');
+        assert.equal(result.currency.store, 'USD');
     });
 
     it('warns instead of blocking when the store currency is convertible', () => {
-        const result = assessShop({ ...readyInputs, shop: { currency: 'USD' } });
+        const result = assessShop({ ...readyInputs, shop: { currency: 'MAD' } });
         assert.equal(result.ready, true);
-        assert.ok(result.warnings.includes('currency_conversion:MAD->USD@0.1'));
-        assert.equal(result.currency.conversion.amount, 100);
+        assert.ok(result.warnings.includes('currency_conversion:USD->MAD@10'));
+        assert.equal(result.currency.conversion.amount, 190);
     });
 
     it('blocks on an unsupported store currency or missing scopes', () => {
@@ -208,8 +214,10 @@ describe('setupShop audit', () => {
         assert.equal(report.product_count, 1);
         assert.equal(report.storefront.password_gate, 'off');
         assert.equal(report.collection.action, 'created');
-        assert.equal(report.currency.catalog, 'MAD');
-        assert.equal(report.assessment.currency.conversion, null);
+        assert.equal(report.currency.catalog, 'USD');
+        assert.equal(report.currency.store, 'MAD');
+        assert.equal(report.assessment.currency.conversion.amount, 190);
+        assert.ok(report.warnings.includes('currency_conversion:USD->MAD@10'));
     });
 
     it('turns API failures into warnings and keeps the checklist', async () => {
@@ -304,8 +312,11 @@ describe('OAuth bootstrap', () => {
     });
 });
 
-describe('pricing config', () => {
-    it('ships the USD rate the publisher needs', () => {
-        assert.equal(DEFAULT_PRICING_CONFIG.fx.usd_per_mad, 0.1);
+describe('canonical pricing config', () => {
+    it('ships the FX table the publisher needs', () => {
+        const catalog = loadCourseCatalog();
+        assert.equal(catalog.currency, 'USD');
+        assert.equal(catalog.fx.MAD, 10);
+        assert.equal(catalog.fx.EUR, 0.92);
     });
 });

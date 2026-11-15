@@ -60,21 +60,22 @@ webhook id that is in `PAYPAL_WEBHOOK_ID`.
 ## Working checkout
 
 `/buy` is a self-contained checkout page served by the same function. It reads
-the explicit prices in `config/course-prices.json`, creates a PayPal order
+the canonical catalog in `config/course-catalog.json`, creates a PayPal order
 through `/acp/v1/transactions`, and sends the buyer to PayPal. `/buy/success`
 captures the approved order through `POST /acp/v1/transactions/:id/capture`; a
 payment is not considered complete until that capture succeeds and the order
 status is `COMPLETED`.
 
-The price file is the only product source. Its schema is minimal:
+The catalog is the only product source for checkout and Shopify:
 
 ```json
 {
   "currency": "USD",
   "fulfillment_cost_cents": 200,
-  "prices": {
-    "rwc-cbe-2025": { "name": "Certified Blockchain Expert (CBE) 2025", "price": 19 }
-  }
+  "fx": { "USD": 1, "MAD": 10, "EUR": 0.92 },
+  "courses": [
+    { "slug": "rwc-cbe-2025", "title": "Certified Blockchain Expert (CBE) 2025", "price_cents": 1900 }
+  ]
 }
 ```
 

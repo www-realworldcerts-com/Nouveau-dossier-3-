@@ -14,7 +14,7 @@ not let an app configure.
 | Verify API scopes | Yes | `GET /access_scopes.json` |
 | Detect the storefront password gate | Yes | Storefront fetch |
 | Create the "Courses" collection | Yes | `custom_collections.json` (REST) |
-| Publish products with prices | Yes | `npm run sales -- run --catalog …` |
+| Publish products with prices | Yes | `npm run shopify:publish` |
 | Turn off password protection | **No API** | Shopify admin → Online Store → Preferences |
 | Choose a payment provider | **No API** | Shopify admin → Settings → Payments |
 | Configure payouts / bank account | **No API** | Shopify admin → Settings → Payments → Payouts |
@@ -75,27 +75,29 @@ The report covers:
 
 ## Currency correctness
 
-Catalog prices are in **MAD**. The publisher writes variant prices in the
-**store currency**. Publishing 1500 MAD into a USD store would create a
-1500.00 USD course, so the publisher converts explicitly:
+Catalog prices are in **USD cents**. The publisher writes variant prices in the
+**store currency**, derived from the catalog's single FX table:
 
-- store currency `MAD` → price unchanged;
-- `EUR` → `fx.eur_per_mad` (0.092);
-- `USD` → `fx.usd_per_mad` (0.10);
+- `USD` → 19.00 USD (no conversion);
+- `MAD` → 190.00 MAD at `fx.MAD: 10`;
+- `EUR` → 17.48 EUR at `fx.EUR: 0.92`;
 - anything else → refused with `unsupported_store_currency`, never guessed.
 
-Rates live in `config/pricing.json` under `fx`. Set `SHOPIFY_STORE_CURRENCY` only
-to override what `/shop.json` reports (for example in a mock run). The publish
-report records the store currency it used.
+The FX table lives in `config/course-catalog.json`; there is no MAD tier price
+on the publishing path. Set `SHOPIFY_STORE_CURRENCY` only to override what
+`/shop.json` reports (for example in a dry run). The publish report records the
+store currency it used.
 
 ## Step 4 — publish and finish the manual steps
 
 ```bash
-npm run sales -- run --catalog catalog.ndjson --ensure-collection
+npm run shopify:setup -- --ensure-collection
+npm run shopify:publish -- --dry-run   # inspect 298 converted prices, no writes
+npm run shopify:publish                # upsert products
 ```
 
-Rules-priced courses auto-approve; LLM-priced exceptions wait for
-`approve` → `resume`. Then complete the manual steps from the report:
+The publisher refuses any course that is not in the canonical catalog. Then
+complete the manual steps from the report:
 
 1. **Password protection off** — a buyer must not hit a password page.
 2. **Payment provider active** — without it, even a checkout intent cannot complete.
@@ -115,7 +117,7 @@ Re-run `npm run shopify:setup` afterwards; `ready: YES`, `password gate: off` an
 | `HTTP 401` | Token revoked or wrong store; rotate via OAuth again |
 | `HTTP 403` on products | Missing `read_products`/`write_products` scope |
 | `collection_endpoint_unsupported` | REST collection endpoint unavailable on this API version; create the collection in the admin |
-| `currency_conversion` warning | Expected when the store is not MAD; verify the rate in `config/pricing.json` |
+| `currency_conversion` warning | Expected when the store is not USD; verify the rate in `config/course-catalog.json` |
 | `password_gate_on` | Manual: Online Store → Preferences → disable password protection |
 
 ## Security notes

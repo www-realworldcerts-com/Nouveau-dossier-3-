@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import '../src/load-env.mjs';
+
 import fs from 'node:fs';
 import path from 'node:path';
 

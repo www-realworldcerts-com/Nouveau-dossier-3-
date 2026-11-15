@@ -1,5 +1,5 @@
 import { adminRequest, checkStorefrontGate, listProducts, redactToken } from './shopify.mjs';
-import { storePriceFor } from './pricing.mjs';
+import { loadCourseCatalog, priceInCurrency } from './course-catalog.mjs';
 
 /**
  * Shopify self-setup for the RealWorldCerts shop.
@@ -97,9 +97,9 @@ export function assessShop({
     storefront = null,
     productCount = 0,
     requiredScopes = REQUIRED_SCOPES,
-    catalogCurrency = 'MAD',
+    catalogCurrency = 'USD',
     storeCurrency = null,
-    config
+    fx = null
 } = {}) {
     const blockers = [];
     const warnings = [];
@@ -110,7 +110,7 @@ export function assessShop({
     let conversion = null;
     if (store && store !== catalogCurrency) {
         try {
-            conversion = storePriceFor(1000, store, config);
+            conversion = priceInCurrency({ slug: 'reference', price_cents: 1900 }, store, fx);
             warnings.push(`currency_conversion:${catalogCurrency}->${store}@${conversion.rate}`);
         } catch (error) {
             blockers.push(`unsupported_store_currency:${store}`);
@@ -235,13 +235,15 @@ export async function setupShop(settings, {
         storefront = await checkStorefrontGate(scopedSettings, { fetchImpl });
     }
 
+    const catalog = loadCourseCatalog();
     const assessment = assessShop({
         shop,
         scopes,
         storefront,
         productCount: products.length,
         storeCurrency: shop?.currency || null,
-        config
+        catalogCurrency: catalog.currency,
+        fx: catalog.fx
     });
 
     let collection = null;

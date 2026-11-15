@@ -14,43 +14,60 @@ var amtNum = amount ? Number(amount) : (19 + fpn / 10000);
 
 The result is a hash artifact, not a price: `certified-blockchain-expert-cbe-preptest-2025` shows `$19.2536`, `financial-risk-manager-test-bank` shows `$19.9965`, and the browser can replace it with `?amount=`. The crypto page separately displayed `(19 + fp / 10000).toFixed(4) + " USDT"`.
 
-## One explicit price source
+## One canonical catalog and price source
 
-`config/course-prices.json` is canonical:
+`config/course-catalog.json` is the only product source for checkout and
+Shopify. It contains every course once, with explicit **USD cents** and one FX
+table. There is no separate price book and no MAD tier price on the publishing
+path.
 
 ```json
 {
   "currency": "USD",
   "fulfillment_cost_cents": 200,
-  "prices": {
-    "certified-blockchain-expert-cbe-preptest-2025": {
-      "name": "Certified Blockchain Expert (CBE) preptest 2025",
-      "price": 19
+  "fx": { "USD": 1, "MAD": 10, "EUR": 0.92 },
+  "courses": [
+    {
+      "slug": "certified-blockchain-expert-cbe-preptest-2025",
+      "title": "Certified Blockchain Expert (CBE) preptest 2025",
+      "price_cents": 1900,
+      "description": "…",
+      "image": "/assets/courses/certified-blockchain-expert-cbe-preptest-2025.svg"
     }
-  }
+  ]
 }
 ```
 
-`data/store-prices.json` is the generated public payload:
+`data/store-prices.json` is a generated public projection:
 
 ```json
 { "currency": "USD", "prices": { "certified-blockchain-expert-cbe-preptest-2025": 19 } }
 ```
 
-- `src/sales/store-prices.mjs` validates the file and serves products/prices.
+- `src/sales/course-catalog.mjs` validates the catalog and derives checkout
+  products, storefront prices and Shopify store-currency amounts.
+- `src/sales/store-prices.mjs` is the checkout compatibility facade; it points
+  at the same catalog.
 - `/data/store-prices.json` is the server route for static pages.
-- `scripts/generate-course-prices.mjs` regenerates both files.
+- `scripts/generate-course-catalog.mjs` imports `data/catalog.json` into the
+  canonical file and regenerates the public payload.
 - `scripts/audit-storefront-pricing.mjs` repeats the live audit.
 
-Current assumption: **USD 19.00 per course**, with a **USD 2.00** fulfillment cost. This is explicit and editable. The old formula ranged `$19.0000–$19.9999`, so `$19.00` is a reduction of up to `$0.9999` per sale.
+Current assumption: **USD 19.00 per course**, with a **USD 2.00** fulfillment
+cost. A MAD store receives **190.00 MAD**; a EUR store receives **17.48 EUR**.
+Those amounts come from the catalog FX table, not from the retired MAD tier
+engine and not from a browser-supplied amount.
 
 Regenerate after a catalog or price change:
 
 ```bash
-node scripts/generate-course-prices.mjs
+node scripts/generate-course-catalog.mjs
 ```
 
-Optional flags: `--catalog`, `--price`, `--currency`, `--fulfillment-cost-cents`.
+Optional flags: `--catalog`, `--out`, `--public`, `--price`, `--currency`,
+`--fulfillment-cost-cents`. Existing `price_cents` values are preserved when a
+canonical file already exists, so a deliberate price change is not overwritten
+by a metadata refresh.
 
 ## Deployed source changes
 
@@ -130,7 +147,7 @@ On the crypto page display `price.toFixed(2) + ' USDT'`. The submit handler must
 
 The page lookup only fixes what the customer sees. The payment-intent endpoint must resolve the slug through the price map and ignore any posted amount. In this repository:
 
-- `src/paypal-webhook-server.mjs` reads `config/course-prices.json`.
+- `src/paypal-webhook-server.mjs` reads `config/course-catalog.json`.
 - `/buy` renders server-owned products.
 - `/acp/v1/transactions` requires a known `product_id` and charges `product.price`; posted `amount` and `currency` are ignored.
 - `/acp/v1/transactions/:id/capture` captures the server-created order.
@@ -151,5 +168,5 @@ Deploy the static site and `/data/store-prices.json` together, then purge `/cata
 ## Known limitations
 
 - No live PayPal/Resend credentials or deployment access were available, so no live payment or email was tested.
-- The four duplicate catalog rows need catalog cleanup; the price map contains each unique slug once.
+- The source snapshot has four duplicate rows; the canonical catalog contains each of the 298 unique slugs once.
 - `SETTLEMENT_LEDGER_PATH` and `FULFILLMENT_QUEUE_FILE` need durable writable storage; a Vercel function's local filesystem is ephemeral.

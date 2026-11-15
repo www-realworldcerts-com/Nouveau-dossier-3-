@@ -246,13 +246,21 @@ describe('checkout intent observability', () => {
 
 describe('shopify publisher', () => {
     const settings = { domain: 'shop.myshopify.com', token: 'shpat_secret123', apiVersion: '2024-10' };
-    const course = { course_id: 'crs_1', title: 'Test Course', description: 'A course.' };
+    const course = {
+        slug: 'test-course',
+        title: 'Test Course',
+        description: '<p>A course.</p>',
+        image: '/assets/courses/test-course.svg',
+        price_cents: 1900
+    };
 
-    it('builds a MAD-priced product payload with the tier handle', () => {
-        const payload = productPayloadFor(course, 1500);
-        assert.equal(payload.product.variants[0].price, '1500.00');
-        assert.equal(payload.product.variants[0].sku, 'RWC-crs_1');
-        assert.equal(payload.product.handle, 'test-course-crs-1');
+    it('builds a canonical-priced product payload with the catalog handle', () => {
+        const payload = productPayloadFor(course, 19);
+        assert.equal(payload.product.variants[0].price, '19.00');
+        assert.equal(payload.product.variants[0].sku, 'RWC-test-course');
+        assert.equal(payload.product.handle, 'test-course');
+        assert.equal(payload.product.body_html, '<p>A course.</p>');
+        assert.equal(payload.product.images[0].src, 'https://www.realworldcerts.com/assets/courses/test-course.svg');
     });
 
     it('creates, then leaves unchanged, then updates a product', async () => {
@@ -262,22 +270,22 @@ describe('shopify publisher', () => {
             if (options?.method === 'POST') return fakeResponse({ product: { id: 42 } });
             return fakeResponse({ variant: { id: 7 } });
         };
-        const created = await upsertProduct(course, 1500, { settings, existing: [], fetchImpl });
+        const created = await upsertProduct(course, 19, { settings, existing: [], fetchImpl });
         assert.equal(created.action, 'created');
         assert.equal(created.product_id, 42);
 
         calls = 0;
-        const unchanged = await upsertProduct(course, 1500, {
+        const unchanged = await upsertProduct(course, 19, {
             settings,
-            existing: [{ id: 42, handle: 'test-course-crs-1', variants: [{ id: 7, price: '1500.00' }] }],
+            existing: [{ id: 42, handle: 'test-course', variants: [{ id: 7, price: '19.00' }] }],
             fetchImpl
         });
         assert.equal(unchanged.action, 'unchanged');
         assert.equal(calls, 0, 'unchanged products must not hit the API');
 
-        const updated = await upsertProduct(course, 1800, {
+        const updated = await upsertProduct(course, 24, {
             settings,
-            existing: [{ id: 42, handle: 'test-course-crs-1', variants: [{ id: 7, price: '1500.00' }] }],
+            existing: [{ id: 42, handle: 'test-course', variants: [{ id: 7, price: '19.00' }] }],
             fetchImpl
         });
         assert.equal(updated.action, 'updated');

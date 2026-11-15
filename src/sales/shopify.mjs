@@ -51,6 +51,13 @@ export async function adminRequest(settings, method, endpoint, { body, fetchImpl
     return text ? JSON.parse(text) : {};
 }
 
+export async function getShopCurrency(settings, { fetchImpl } = {}) {
+    const payload = await adminRequest(settings, 'GET', 'shop.json', { fetchImpl });
+    const currency = String(payload?.shop?.currency || '').toUpperCase();
+    if (!currency) throw new Error('Shopify /shop.json did not return a currency');
+    return currency;
+}
+
 export async function listProducts(settings, { fetchImpl } = {}) {
     const products = [];
     let sinceId = null;
@@ -65,22 +72,26 @@ export async function listProducts(settings, { fetchImpl } = {}) {
     return products;
 }
 
-export function productPayloadFor(course, priceMad, { currency = 'MAD' } = {}) {
-    const handle = course.shopify_handle || slugify(`${course.title}-${course.course_id}`);
+export function productPayloadFor(course, price, { currency = 'USD' } = {}) {
+    const identifier = String(course.slug || course.course_id || course.id || '').trim();
+    if (!identifier) throw new Error('Shopify product requires a course slug');
+    const handle = course.shopify_handle || course.slug || slugify(`${course.title}-${identifier}`);
+    const description = String(course.description || '').trim();
+    const image = String(course.image || '').trim();
+    const imageUrl = image.startsWith('/') ? `https://www.realworldcerts.com${image}` : image;
     return {
         product: {
             title: course.title,
             handle,
-            body_html: course.description
-                ? `<p>${String(course.description).replace(/</g, '&lt;')}</p>`
-                : `<p>${course.title} — RealWorldCerts course.</p>`,
+            body_html: description || `<p>${course.title} — RealWorldCerts course.</p>`,
             vendor: course.vendor || 'RealWorldCerts',
             product_type: course.category || 'Course',
-            tags: ['course', course.tier || 'default', course.exam_board || ''].filter(Boolean).join(', '),
-            status: 'active',
+            tags: ['course', course.category, course.language].filter(Boolean).join(', '),
+            status: course.status || 'active',
+            ...(imageUrl ? { images: [{ src: imageUrl }] } : {}),
             variants: [{
-                price: Number(priceMad).toFixed(2),
-                sku: `RWC-${course.course_id}`,
+                price: Number(price).toFixed(2),
+                sku: `RWC-${identifier}`,
                 inventory_management: null,
                 requires_shipping: false,
                 taxable: true
@@ -93,8 +104,8 @@ export function productPayloadFor(course, priceMad, { currency = 'MAD' } = {}) {
  * Create or update one product. Returns {action, product_id, handle}.
  * `existing` is the product list already fetched once per publish run.
  */
-export async function upsertProduct(course, priceMad, { settings, existing = [], fetchImpl, currency = 'MAD' } = {}) {
-    const payload = productPayloadFor(course, priceMad, { currency });
+export async function upsertProduct(course, price, { settings, existing = [], fetchImpl, currency = 'USD' } = {}) {
+    const payload = productPayloadFor(course, price, { currency });
     const handle = payload.product.handle;
     const match = existing.find(product => product.handle === handle);
     const variantPrice = payload.product.variants[0].price;

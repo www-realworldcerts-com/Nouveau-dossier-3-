@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import '../src/load-env.mjs';
+
 import { DEFAULT_PORT, redirectUriFor, runLocalOAuth, scopesFromEnv, writeTokenToEnv } from '../src/sales/shopify-oauth.mjs';
 import { normalizeShopDomain } from '../src/sales/shopify-setup.mjs';
 

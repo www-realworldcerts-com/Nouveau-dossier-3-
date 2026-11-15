@@ -18,11 +18,17 @@ changing the node contracts.
 | `triage` | Tier bounds, MAD rounding, duplicates, reasoning-trace presence | `TriageReport.ndjson` |
 | `assemble` | Merges passing prices into the publishable matrix | `FinalPriceMatrix.ndjson` |
 | `approval_gate` | Writes `REQUEST.json`; rules-priced courses auto-approve, LLM/self-improve prices wait for `decision.json` | `REQUEST.json` / `decision.json` |
-| `publish` | Appends prices to `prices.ndjson`, upserts Shopify products idempotently, checks the password gate | `PublishReport.ndjson` |
+| `publish` | Appends analysis prices to `prices.ndjson`, upserts canonical catalog products idempotently, checks the password gate | `PublishReport.ndjson` |
 | `self_improve` | Joins intents + views + orders, flags repricing candidates for the next run | `RepricingCandidates.ndjson` |
 
 State lives in `data/sales/jobs/<job_id>/`. Re-running with `--job <id>`
 resumes from the files on disk; nothing is held in memory between runs.
+
+**Publishing authority:** Shopify products always come from
+`config/course-catalog.json` via `npm run shopify:publish`. The MAD tier engine
+below is an offline analysis and repricing tool; it cannot set a Shopify price.
+If a `run` job contains a course id that is absent from the canonical catalog,
+the publisher reports it as failed rather than creating a tier-priced product.
 
 ## Quick start
 
@@ -30,7 +36,7 @@ resumes from the files on disk; nothing is held in memory between runs.
 # 1. Price the catalog and see the proposed matrix (no writes to Shopify)
 node scripts/sales-agent.mjs price --catalog catalog.ndjson --mock
 
-# 2. Run the loop: rules prices publish, exceptions wait for review
+# 2. Run the analysis loop (Shopify prices still come from the canonical catalog)
 node scripts/sales-agent.mjs run --catalog catalog.ndjson
 
 # 3. Review and approve the exceptions
@@ -62,7 +68,11 @@ One course per ndjson line (or a JSON array / `{ "courses": [...] }`):
 tiers, bounds, exception patterns, rounding and self-improve thresholds live in
 [`config/pricing.json`](../config/pricing.json).
 
-## Pricing decision engine
+## Pricing decision engine (analysis only)
+
+These tiers do not publish to Shopify. The canonical USD catalog is the only
+price authority; tier output is useful for margin analysis and future market
+planning.
 
 * Rules: tier baseline, clamped to the tier's min/max, rounded per blueprint
   Appendix C (nearest 50 MAD below 2000, nearest 100 MAD at or above).

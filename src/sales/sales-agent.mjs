@@ -20,16 +20,11 @@ import {
     priceToEur,
     resolveConfigPath,
     resolveTier,
-    roundMad,
-    storePriceFor
+    roundMad
 } from './pricing.mjs';
 import { valuateCourse } from './llm-valuation.mjs';
-import {
-    checkStorefrontGate,
-    listProducts,
-    shopifySettingsFromEnv,
-    upsertProduct
-} from './shopify.mjs';
+import { checkStorefrontGate, shopifySettingsFromEnv } from './shopify.mjs';
+import { publishCatalogToShopify } from './catalog-publisher.mjs';
 import { funnelSummary, loadIntents } from './intent-tracker.mjs';
 
 /**
@@ -499,36 +494,25 @@ export class SalesAgent {
             report.shopify.reason = 'no SHOPIFY_ADMIN_TOKEN; prices written locally only';
             report.warnings.push(report.shopify.reason);
         } else if (writes.length || skipped.length) {
-            const storeCurrency = String(process.env.SHOPIFY_STORE_CURRENCY || this.config.currency).toUpperCase();
             try {
-                storePriceFor(1000, storeCurrency, this.config);
-            } catch (error) {
-                report.shopify.status = 'error';
-                report.shopify.reason = error.message;
-                report.warnings.push(error.message);
-            }
-            try {
-                const products = await listProducts(this.shopify, { fetchImpl: this.fetchImpl });
-                const byId = new Map(approved.map(row => [row.course_id, row]));
-                for (const courseId of [...writes.map(w => w.course_id), ...skipped]) {
-                    const row = byId.get(courseId);
-                    if (!row) continue;
-                    try {
-                        const storePrice = storePriceFor(row.price_mad, storeCurrency, this.config);
-                        const result = await upsertProduct({ course_id: row.course_id, title: row.title, description: '' }, storePrice.amount, {
-                            settings: this.shopify,
-                            existing: products,
-                            fetchImpl: this.fetchImpl,
-                            currency: storePrice.currency
-                        });
-                        if (result.action === 'created') report.shopify.created += 1;
-                        else if (result.action === 'updated') report.shopify.updated += 1;
-                        else report.shopify.unchanged += 1;
-                    } catch (error) {
-                        report.shopify.failed.push({ course_id: courseId, error: error.message });
-                    }
+                const result = await publishCatalogToShopify({
+                    courseIds: [...new Set([...writes.map(w => w.course_id), ...skipped])],
+                    settings: this.shopify,
+                    fetchImpl: this.fetchImpl,
+                    storeCurrency: process.env.SHOPIFY_STORE_CURRENCY || null
+                });
+                report.shopify = {
+                    ...report.shopify,
+                    ...result,
+                    store_currency: result.store_currency || report.shopify.store_currency
+                };
+                if (result.reason) report.warnings.push(`Shopify publish ${result.status}: ${result.reason}`);
+                if (result.failed?.length) {
+                    report.warnings.push(`Shopify publish failed for ${result.failed.length} course(s)`);
                 }
-                report.shopify.status = report.shopify.failed.length ? 'partial' : 'ok';
+                if (result.missing?.length) {
+                    report.warnings.push(`Shopify publish blocked for ${result.missing.length} course(s) absent from the canonical catalog`);
+                }
             } catch (error) {
                 report.shopify.status = 'error';
                 report.shopify.reason = error.message;

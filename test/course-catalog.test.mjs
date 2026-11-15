@@ -6,7 +6,6 @@ import test from 'node:test';
 
 import {
     loadCourseCatalog,
-    loadCoursePrices,
     priceInCurrency,
     productsFromCatalog,
     storefrontPricePayload
@@ -35,10 +34,6 @@ test('checkout products and the public payload are projections of the same catal
         fulfillment_cost_cents: 200
     });
     assert.deepEqual(JSON.parse(fs.readFileSync('data/store-prices.json', 'utf8')), storefrontPricePayload());
-    assert.deepEqual(loadCoursePrices().prices['financial-risk-manager-test-bank'], {
-        name: 'Financial Risk Manager Test Bank',
-        price: 19
-    });
     assert.equal(catalog.bySlug['financial-risk-manager-test-bank'].price_cents, 1900);
 });
 

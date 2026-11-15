@@ -24,7 +24,7 @@ import { createDedupeStore } from "./dedupe-store.mjs";
 import { enforceAuthorityProtocol } from "./authority.mjs";
 import { addSecurityHeaders, validateRequest, validateAuth } from "./security-middleware.mjs";
 import { escapeHtml, fulfillPaidOrder, verifyAccessToken } from "./financial/fulfillment-service.mjs";
-import { productsFromCoursePrices, storefrontPricePayload } from "./sales/store-prices.mjs";
+import { productsFromCatalog, storefrontPricePayload } from "./sales/course-catalog.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -262,9 +262,9 @@ async function capturePayPalCheckoutOrder(orderId) {
 
 function publicProducts() {
   try {
-    return productsFromCoursePrices();
+    return productsFromCatalog();
   } catch (error) {
-    console.warn(`[store-prices] ${error.message}`);
+    console.warn(`[course-catalog] ${error.message}`);
     return [];
   }
 }

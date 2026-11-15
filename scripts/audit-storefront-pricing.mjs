@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { loadCoursePrices } from '../src/sales/store-prices.mjs';
+import { loadCourseCatalog } from '../src/sales/course-catalog.mjs';
 
 function args(argv) {
   const out = {};
@@ -35,8 +35,8 @@ for (const item of items) {
 }
 const slugs = [...bySlug.keys()].slice(0, limit);
 
-const prices = loadCoursePrices(cli.prices);
-const priceSlugs = new Set(Object.keys(prices.prices));
+const canonical = loadCourseCatalog(cli.prices);
+const priceSlugs = new Set(canonical.courses.map(course => course.slug));
 
 async function fetchText(url) {
   const response = await fetch(url, {

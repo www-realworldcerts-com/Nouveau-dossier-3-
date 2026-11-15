@@ -46,8 +46,7 @@ path.
 
 - `src/sales/course-catalog.mjs` validates the catalog and derives checkout
   products, storefront prices and Shopify store-currency amounts.
-- `src/sales/store-prices.mjs` is the checkout compatibility facade; it points
-  at the same catalog.
+- `src/sales/course-catalog.mjs` is imported directly by checkout and Shopify.
 - `/data/store-prices.json` is the server route for static pages.
 - `scripts/generate-course-catalog.mjs` imports `data/catalog.json` into the
   canonical file and regenerates the public payload.

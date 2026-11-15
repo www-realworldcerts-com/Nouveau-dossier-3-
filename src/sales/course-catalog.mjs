@@ -120,16 +120,3 @@ export function storefrontPricePayload(file) {
         prices: Object.fromEntries(catalog.courses.map(course => [course.slug, course.price_cents / 100]))
     };
 }
-
-/** Backward-compatible shape used by the original price loader. */
-export function loadCoursePrices(file) {
-    const catalog = loadCourseCatalog(file);
-    return {
-        currency: catalog.currency,
-        fulfillmentCostCents: catalog.fulfillmentCostCents,
-        prices: Object.fromEntries(catalog.courses.map(course => [
-            course.slug,
-            { name: course.title, price: course.price_cents / 100 }
-        ]))
-    };
-}

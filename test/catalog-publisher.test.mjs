@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { publishCatalogToShopify } from '../src/sales/catalog-publisher.mjs';
+import { loadCourseCatalog, storefrontPricePayload } from '../src/sales/course-catalog.mjs';
 
 const settings = { domain: 'shop.myshopify.com', token: 'shpat_test', apiVersion: '2024-10' };
 const catalog = {
@@ -110,6 +111,26 @@ test('an unsupported store currency blocks every write before the first product'
     assert.equal(result.status, 'blocked');
     assert.equal(result.reason, 'invalid_catalog_prices');
     assert.match(result.failed[0].error, /No FX rate for GBP/);
+});
+
+test('checkout and Shopify resolve the same canonical course and price', async () => {
+    const canonical = loadCourseCatalog();
+    const slug = 'financial-risk-manager-test-bank';
+    let sent = null;
+    const result = await publishCatalogToShopify({
+        catalog: canonical,
+        courseIds: [slug],
+        settings,
+        storeCurrency: 'USD',
+        fetchImpl: shopifyFetch({ onCreate: body => { sent = body; } })
+    });
+
+    assert.equal(result.status, 'ok');
+    assert.equal(storefrontPricePayload().prices[slug], 19);
+    assert.equal(sent.product.handle, slug);
+    assert.equal(sent.product.variants[0].price, '19.00');
+    assert.equal(sent.product.variants[0].sku, `RWC-${slug}`);
+    assert.equal(sent.product.body_html, canonical.bySlug[slug].description);
 });
 
 test('an existing product at the canonical price is unchanged', async () => {

@@ -15,7 +15,14 @@ import { normalizeShopDomain } from './shopify-setup.mjs';
  * never printed, logged or returned to a browser response.
  */
 
-export const DEFAULT_SCOPES = ['read_products', 'write_products', 'read_orders'];
+export const DEFAULT_SCOPES = [
+    'read_products',
+    'write_products',
+    'read_publications',
+    'write_publications',
+    'read_payment_gateways',
+    'read_shopify_payments_accounts'
+];
 export const DEFAULT_PORT = 3456;
 
 export function scopesFromEnv(env = process.env) {

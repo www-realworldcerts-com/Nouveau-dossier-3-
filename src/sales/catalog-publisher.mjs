@@ -8,7 +8,8 @@ import { getShopCurrency, listProducts, upsertProduct } from './shopify.mjs';
  * supply a price: the store-currency amount is derived from the course's
  * explicit USD price and the catalog FX table. All selected courses are
  * validated before the first Shopify write, so a bad currency or missing course
- * cannot leave a half-published catalog.
+ * cannot leave a half-published catalog. Products are written as drafts; use
+ * shopify-activation.mjs to run the gate and activate them.
  */
 export async function publishCatalogToShopify({
     catalog = loadCourseCatalog(),
@@ -102,6 +103,7 @@ export async function publishCatalogToShopify({
         status: 'ok',
         reason: null,
         published: true,
+        draft: true,
         dry_run: false,
         store_currency: currency,
         catalog_currency: catalog.currency,

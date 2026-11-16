@@ -8,12 +8,17 @@ import { slugify } from './catalog.mjs';
  * Tokens come from the environment and are redacted from every error we surface.
  */
 
-export function shopifySettingsFromEnv() {
+export function shopifySettingsFromEnv(env = process.env) {
     return {
-        domain: process.env.SHOPIFY_STORE_DOMAIN || '',
-        token: process.env.SHOPIFY_ADMIN_TOKEN || process.env.SHOPIFY_SHpat_TOKEN || '',
-        apiVersion: process.env.SHOPIFY_API_VERSION || '2024-10',
-        storefrontUrl: process.env.SHOPIFY_STOREFRONT_URL || 'https://www.realworldcerts.com'
+        domain: env.SHOPIFY_STORE_DOMAIN || '',
+        token: env.SHOPIFY_ADMIN_TOKEN || env.SHOPIFY_SHpat_TOKEN || '',
+        apiVersion: env.SHOPIFY_API_VERSION || '2024-10',
+        storefrontUrl: env.SHOPIFY_STOREFRONT_URL || 'https://www.realworldcerts.com',
+        storefrontToken: env.SHOPIFY_STOREFRONT_ACCESS_TOKEN || '',
+        expectedDomain: env.SHOPIFY_PRIMARY_DOMAIN || '',
+        canaryCourse: env.SHOPIFY_CANARY_COURSE || '',
+        canaryCountryCode: env.SHOPIFY_CANARY_COUNTRY_CODE || 'US',
+        payoutAttestationFile: env.SHOPIFY_PAYOUT_ATTESTATION_FILE || ''
     };
 }
 
@@ -51,6 +56,43 @@ export async function adminRequest(settings, method, endpoint, { body, fetchImpl
     return text ? JSON.parse(text) : {};
 }
 
+export async function adminGraphql(settings, query, { variables, fetchImpl = globalThis.fetch } = {}) {
+    const payload = await adminRequest(settings, 'POST', 'graphql.json', {
+        body: { query, variables },
+        fetchImpl
+    });
+    if (Array.isArray(payload.errors) && payload.errors.length) {
+        throw new Error(`Shopify GraphQL: ${redactToken(payload.errors.map(error => error.message).join('; '), settings.token)}`);
+    }
+    return payload.data || {};
+}
+
+/** Storefront calls use a public/private Storefront token, never the Admin token. */
+export async function storefrontGraphql(settings, query, { variables, fetchImpl = globalThis.fetch } = {}) {
+    if (!settings.storefrontToken) throw new Error('Shopify Storefront access token missing (SHOPIFY_STOREFRONT_ACCESS_TOKEN)');
+    let response;
+    try {
+        response = await fetchImpl(`https://${settings.domain}/api/${settings.apiVersion}/graphql.json`, {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                'x-shopify-storefront-access-token': settings.storefrontToken
+            },
+            body: JSON.stringify({ query, variables }),
+            signal: AbortSignal.timeout(30000)
+        });
+    } catch (error) {
+        throw new Error(`Shopify Storefront request failed: ${redactToken(error.message, settings.storefrontToken)}`);
+    }
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Shopify Storefront HTTP ${response.status}`);
+    const payload = JSON.parse(text);
+    if (Array.isArray(payload.errors) && payload.errors.length) {
+        throw new Error(`Shopify Storefront GraphQL: ${payload.errors.map(error => error.message).join('; ')}`);
+    }
+    return payload.data || {};
+}
+
 export async function getShopCurrency(settings, { fetchImpl } = {}) {
     const payload = await adminRequest(settings, 'GET', 'shop.json', { fetchImpl });
     const currency = String(payload?.shop?.currency || '').toUpperCase();
@@ -72,7 +114,7 @@ export async function listProducts(settings, { fetchImpl } = {}) {
     return products;
 }
 
-export function productPayloadFor(course, price, { currency = 'USD' } = {}) {
+export function productPayloadFor(course, price, { currency = 'USD', status = 'draft' } = {}) {
     const identifier = String(course.slug || course.course_id || course.id || '').trim();
     if (!identifier) throw new Error('Shopify product requires a course slug');
     const handle = course.shopify_handle || course.slug || slugify(`${course.title}-${identifier}`);
@@ -87,7 +129,7 @@ export function productPayloadFor(course, price, { currency = 'USD' } = {}) {
             vendor: course.vendor || 'RealWorldCerts',
             product_type: course.category || 'Course',
             tags: ['course', course.category, course.language].filter(Boolean).join(', '),
-            status: course.status || 'active',
+            status,
             ...(imageUrl ? { images: [{ src: imageUrl }] } : {}),
             variants: [{
                 price: Number(price).toFixed(2),
@@ -130,6 +172,29 @@ export async function upsertProduct(course, price, { settings, existing = [], fe
     return { action: 'updated', product_id: match.id, handle };
 }
 
+/** Change a product's publication status without touching its price. */
+export async function setProductStatus(settings, productId, status, { fetchImpl } = {}) {
+    if (!['active', 'draft'].includes(status)) throw new Error(`Unsupported product status: ${status}`);
+    await adminRequest(settings, 'PUT', `products/${productId}.json`, {
+        body: { product: { id: productId, status } },
+        fetchImpl
+    });
+    return { product_id: productId, status };
+}
+
+/** Add products to a custom collection; the caller filters out existing members. */
+export async function addProductsToCollection(settings, collectionId, productIds, { fetchImpl } = {}) {
+    const added = [];
+    for (const productId of productIds) {
+        await adminRequest(settings, 'POST', 'collects.json', {
+            body: { collect: { collection_id: collectionId, product_id: productId } },
+            fetchImpl
+        });
+        added.push(productId);
+    }
+    return added;
+}
+
 /**
  * Detect the Shopify password gate. Any of these markers in the storefront HTML
  * means a buyer hits a password page instead of the catalog.
@@ -152,12 +217,14 @@ export async function checkStorefrontGate(settings, { fetchImpl = globalThis.fet
         const gated = response.status === 401 || response.status === 403 || isPasswordGate(html);
         return {
             url: settings.storefrontUrl,
+            final_url: response.url || settings.storefrontUrl,
             status: response.status,
             password_gate: gated ? 'on' : 'off'
         };
     } catch (error) {
         return {
             url: settings.storefrontUrl,
+            final_url: null,
             status: 0,
             password_gate: 'unknown',
             error: redactToken(error.message, settings.token)

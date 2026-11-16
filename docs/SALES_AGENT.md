@@ -18,7 +18,7 @@ changing the node contracts.
 | `triage` | Tier bounds, MAD rounding, duplicates, reasoning-trace presence | `TriageReport.ndjson` |
 | `assemble` | Merges passing prices into the publishable matrix | `FinalPriceMatrix.ndjson` |
 | `approval_gate` | Writes `REQUEST.json`; rules-priced courses auto-approve, LLM/self-improve prices wait for `decision.json` | `REQUEST.json` / `decision.json` |
-| `publish` | Appends analysis prices to `prices.ndjson`, upserts canonical catalog products idempotently, checks the password gate | `PublishReport.ndjson` |
+| `publish` | Appends analysis prices to `prices.ndjson`, upserts canonical catalog products as drafts idempotently | `PublishReport.ndjson` |
 | `self_improve` | Joins intents + views + orders, flags repricing candidates for the next run | `RepricingCandidates.ndjson` |
 
 State lives in `data/sales/jobs/<job_id>/`. Re-running with `--job <id>`
@@ -125,12 +125,32 @@ from `data/sales/course-views.ndjson` (`{course_id, views}`); paid orders from
 | `OPENAI_API_KEY` | LLM valuation key (never logged; falls back deterministically when absent) |
 | `SALES_LLM_BASE_URL`, `SALES_LLM_MODEL` | OpenAI-compatible endpoint and model |
 | `SHOPIFY_STORE_DOMAIN`, `SHOPIFY_ADMIN_TOKEN` | Shopify Admin API publishing. Token is redacted from every error and report |
+| `SHOPIFY_STOREFRONT_ACCESS_TOKEN` | Storefront API token used for the launch gate's canary cart/checkout |
+| `SHOPIFY_PRIMARY_DOMAIN`, `SHOPIFY_CANARY_COURSE`, `SHOPIFY_CANARY_COUNTRY_CODE` | Expected storefront domain, optional canary course, and country for shipping/tax estimates (default US) |
+| `SHOPIFY_API_VERSION` | Shopify API version (default `2024-10`) |
 
 Until `SHOPIFY_ADMIN_TOKEN` is present, `publish` writes prices to
 `data/sales/prices.ndjson` and records `shopify.status = skipped` with a warning,
-so the catalog is priced before the storefront exists. If the Shopify password
-gate is detected, `PublishReport` carries a loud warning: a buyer would hit a
-password page, not the catalog.
+so the catalog is priced before the storefront exists. Live publishing creates
+or updates **drafts**; it never activates a product. Run
+`npm run shopify:activate -- --dry-run` first for a read-only plan of the
+selected products, price checks, publication and collection changes, and
+readiness blockers. `npm run shopify:activate` afterward: it takes an exclusive activation lock,
+snapshots every selected product's status and Online Store publication state,
+validates every selected variant against the canonical price and currency,
+publishes selected products to the Online Store channel, activates one canary,
+runs the launch gate, and activates the remaining selected products only when
+the gate passes. The gate checks variant availability/inventory, a
+country-aware cart's shipping, tax, currency and totals, and the checkout URL.
+Any failure restores the snapshot exactly. Interrupted runs
+can be continued with `--resume <run-id>` or `--resume latest`; reports live in
+`data/sales/ShopifyActivationRuns/`. The gate verifies Shopify Payments
+directly; for PayPal or another external payout provider it requires an owner
+attestation via `SHOPIFY_PAYOUT_ATTESTATION_FILE` with owner-only `0600`
+permissions, or a secrets-store-injected `payoutAttestation` object. When
+PayPal API credentials are available, the gate also verifies the attested
+destination against the authenticated PayPal account and fails closed on a
+mismatch or lookup failure.
 
 ## Tests
 

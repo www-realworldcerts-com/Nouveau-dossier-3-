@@ -59,6 +59,7 @@ test('publishes the canonical USD price into a USD store', async () => {
     assert.equal(sent.product.variants[0].price, '19.00');
     assert.equal(sent.product.variants[0].sku, 'RWC-test-course');
     assert.equal(sent.product.handle, 'test-course');
+    assert.equal(sent.product.status, 'draft');
 });
 
 test('converts the same canonical price into a MAD store', async () => {

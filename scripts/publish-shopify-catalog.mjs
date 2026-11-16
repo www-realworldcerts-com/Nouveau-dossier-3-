@@ -37,7 +37,8 @@ Options:
   --json                  Machine-readable output
 
 Prices always come from the catalog. The store-currency amount is derived from
-the catalog FX table; there is no CLI price override.
+the catalog FX table; there is no CLI price override. Products are written as
+drafts; use 'npm run shopify:activate' to run the gate and activate them.
 `);
 }
 

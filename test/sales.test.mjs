@@ -259,6 +259,7 @@ describe('shopify publisher', () => {
         assert.equal(payload.product.variants[0].price, '19.00');
         assert.equal(payload.product.variants[0].sku, 'RWC-test-course');
         assert.equal(payload.product.handle, 'test-course');
+        assert.equal(payload.product.status, 'draft');
         assert.equal(payload.product.body_html, '<p>A course.</p>');
         assert.equal(payload.product.images[0].src, 'https://www.realworldcerts.com/assets/courses/test-course.svg');
     });

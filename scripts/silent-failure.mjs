@@ -13,6 +13,7 @@ import { ACTION_IDS, PROMPT_GENESIS, RedressEngine } from '../src/resilience/red
 import { probePaymentWebhook } from '../src/resilience/webhook-probe.mjs';
 import { reconcilePayPalOrders } from '../src/real/fulfillment/paypal-reconciliation.mjs';
 import { probeStorefront, resolveStorefrontUrl } from '../src/resilience/storefront-probe.mjs';
+import { auditShopifyPriceDrift } from '../src/sales/shopify-price-drift.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") CLI: detect, record redress, and
@@ -105,6 +106,10 @@ Options:
   --reconcile-paypal         Dry-run PayPal reconciliation and report paid-but-unfulfilled orders
   --storefront-url <url>     Probe the storefront for an application runtime (default production domain;
                              also STOREFRONT_URL)
+  --shopify-price-drift      Read-only audit of catalog, checkout and live Shopify prices
+  --catalog <file>           Catalog for the price audit (default config/course-catalog.json)
+  --checkout-url <url>       Checkout price payload for the price audit (default
+                             <storefront>/data/store-prices.json)
   --root <dir>               Repository root (default cwd)
   --file <path>              Redress state file (default data/resilience/redress.json)
 
@@ -196,6 +201,27 @@ async function main() {
         }
         const storefrontUrl = resolveStorefrontUrl({ flag: flags['storefront-url'] });
         const storefrontProbe = await probeStorefront(storefrontUrl);
+        if (flags['checkout-url'] === true) {
+            throw new Error('--checkout-url requires a value (an absolute http(s) URL)');
+        }
+        let shopifyPriceDrift = null;
+        if (flags['shopify-price-drift']) {
+            try {
+                shopifyPriceDrift = await auditShopifyPriceDrift({
+                    catalogFile: typeof flags.catalog === 'string' ? flags.catalog : undefined,
+                    checkoutUrl: typeof flags['checkout-url'] === 'string' ? flags['checkout-url'] : undefined
+                });
+            } catch (error) {
+                shopifyPriceDrift = {
+                    status: 'unavailable',
+                    checked_at: new Date().toISOString(),
+                    checkout: { url: flags['checkout-url'] || null },
+                    checked: null,
+                    drift: [],
+                    unavailable: [error.message]
+                };
+            }
+        }
         let paypalReconciliation = null;
         if (flags['reconcile-paypal']) {
             const missing = ['PAYPAL_CLIENT_ID', 'PAYPAL_CLIENT_SECRET'].filter(name => !process.env[name]);
@@ -219,7 +245,8 @@ async function main() {
             write: command === 'redress' || Boolean(flags.write),
             webhookProbes,
             paypalReconciliation,
-            storefrontProbe
+            storefrontProbe,
+            shopifyPriceDrift
         });
         printPlan(result, json);
         if (failOn !== 'none' && result.findings.some(finding => SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[failOn])) {

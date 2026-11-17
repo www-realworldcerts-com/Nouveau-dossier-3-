@@ -242,6 +242,32 @@ export const FINDING_CATALOG = {
         verification: 'POST not-json to the public webhook URL returns 400, and a signed PayPal sandbox notification is fulfilled idempotently.',
         owner_action: 'Fix the deployment surface (route deployed, protection bypass or preview-only SSO) and verify with the P8 acceptance probe.',
         sla_hours: 4
+    },
+    SHOPIFY_PRICE_DRIFT: {
+        domain: 'revenue',
+        severity: 'high',
+        title: 'Catalog, checkout and Shopify prices diverge',
+        impact: 'A buyer can be shown one price at checkout and charged another on Shopify, or a course can be missing a live price entirely. That creates lost sales, refund exposure and broken price promises.',
+        containment: 'Do not change prices while the drift is open; treat checkout and Shopify as inconsistent until every row is reconciled.',
+        obligation: 'Reconcile the canonical catalog, the served checkout payload and every live Shopify variant to the same price.',
+        remedy: 'Run `npm run shopify:price-audit -- --json` to identify each drift, fix stale checkout data or use shopify:reprice for active prices, then rerun the audit until it reports ok.',
+        mitigation: 'The audit is read-only and compares three independent projections; it never writes prices itself.',
+        verification: 'The audit returns status ok with checkout and Shopify prices matching the canonical catalog.',
+        owner_action: 'Review the drift rows and authorize a checkout refresh or shopify:reprice for the affected courses.',
+        sla_hours: 4
+    },
+    SHOPIFY_PRICE_DRIFT_UNCHECKED: {
+        domain: 'revenue',
+        severity: 'medium',
+        title: 'Price drift could not be verified',
+        impact: 'Without both the checkout payload and live Shopify reads, a price divergence can go unnoticed while checkout and the store continue selling.',
+        containment: 'Do not report price consistency as verified while the audit is unavailable.',
+        obligation: 'Restore read access to the checkout payload and Shopify Admin API.',
+        remedy: 'Set the Shopify Admin credentials and confirm the storefront checkout payload URL responds, then rerun the price audit.',
+        mitigation: 'Missing credentials or a failed read is reported explicitly instead of producing a clean audit.',
+        verification: 'The audit returns status ok or drift with no unavailable reasons.',
+        owner_action: 'Check SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_TOKEN and the storefront /data/store-prices.json route.',
+        sla_hours: 24
     }
 };
 
@@ -427,7 +453,8 @@ export function detectSilentFailures({
     tickMonotony,
     webhookProbes,
     paypalReconciliation,
-    storefrontProbe
+    storefrontProbe,
+    shopifyPriceDrift
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -585,6 +612,37 @@ export function detectSilentFailures({
         }
     }
 
+    if (shopifyPriceDrift && typeof shopifyPriceDrift === 'object') {
+        if (shopifyPriceDrift.status === 'drift') {
+            add(
+                'SHOPIFY_PRICE_DRIFT',
+                `${shopifyPriceDrift.drift.length} price divergence(s) between the catalog, checkout and Shopify.`,
+                {
+                    checked_at: shopifyPriceDrift.checked_at,
+                    catalog_file: shopifyPriceDrift.catalog_file,
+                    store_currency: shopifyPriceDrift.store_currency,
+                    checkout_url: shopifyPriceDrift.checkout?.url || null,
+                    checked: shopifyPriceDrift.checked,
+                    drift_count: shopifyPriceDrift.drift.length,
+                    drift: shopifyPriceDrift.drift,
+                    unavailable: shopifyPriceDrift.unavailable || []
+                }
+            );
+        } else if (shopifyPriceDrift.status === 'unavailable') {
+            add(
+                'SHOPIFY_PRICE_DRIFT_UNCHECKED',
+                (shopifyPriceDrift.unavailable || []).join('; ') || 'Price audit did not complete.',
+                {
+                    checked_at: shopifyPriceDrift.checked_at,
+                    catalog_file: shopifyPriceDrift.catalog_file,
+                    checkout_url: shopifyPriceDrift.checkout?.url || null,
+                    checked: shopifyPriceDrift.checked,
+                    unavailable: shopifyPriceDrift.unavailable || []
+                }
+            );
+        }
+    }
+
     if (storefrontProbe && typeof storefrontProbe === 'object' && !storefrontProbe.ok) {
         const verdict = storefrontProbe.verdict;
         const code = verdict === 'unreachable'
@@ -648,6 +706,7 @@ export function detectSilentFailures({
             webhook_probes: probes,
             paypal_reconciliation: paypalReconciliation || null,
             storefront_probe: storefrontProbe || null,
+            shopify_price_drift: shopifyPriceDrift || null,
             monotony,
             duplicates: { count: duplicates.reduce((sum, row) => sum + (row.count - 1), 0), cycles: duplicates, cycle_id: duplicates.length ? 'procurement' : null }
         }
@@ -745,10 +804,11 @@ export function runSilentFailureAudit({
     engine = null,
     webhookProbes = [],
     paypalReconciliation = null,
-    storefrontProbe = null
+    storefrontProbe = null,
+    shopifyPriceDrift = null
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

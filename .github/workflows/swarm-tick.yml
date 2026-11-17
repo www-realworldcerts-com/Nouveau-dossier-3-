@@ -66,6 +66,9 @@ jobs:
         # incident, redress plan and mitigations. Set the repository variable
         # PAYMENT_WEBHOOK_URL (comma-separated for several hosts) to include
         # the P8 public reachability probe; an empty value skips the probe.
+        # Price drift runs automatically once both Shopify Admin credentials
+        # are configured, because the read-only audit would otherwise only
+        # report an unavailable source on every scheduled tick.
         env:
           SWARM_LIVE: ${{ secrets.SWARM_LIVE }}
           BASE44_APP_ID: ${{ secrets.BASE44_APP_ID }}
@@ -76,7 +79,19 @@ jobs:
           AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS: ${{ secrets.AUTONOMOUS_ALLOWED_PAYPAL_RECIPIENTS }}
           PAYMENT_WEBHOOK_URL: ${{ vars.PAYMENT_WEBHOOK_URL }}
           STOREFRONT_URL: ${{ vars.STOREFRONT_URL }}
-        run: node scripts/silent-failure.mjs audit --write --stall-days 7 --fail-on high --webhook-url "$PAYMENT_WEBHOOK_URL" --reconcile-paypal
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_TOKEN: ${{ secrets.SHOPIFY_ADMIN_TOKEN }}
+          SHOPIFY_shpat_TOKEN: ${{ secrets.SHOPIFY_shpat_TOKEN }}
+        run: |
+          args=(
+            audit --write --stall-days 7 --fail-on high
+            --webhook-url "$PAYMENT_WEBHOOK_URL"
+            --reconcile-paypal
+          )
+          if [ -n "$SHOPIFY_STORE_DOMAIN" ] && { [ -n "$SHOPIFY_ADMIN_TOKEN" ] || [ -n "$SHOPIFY_shpat_TOKEN" ]; }; then
+            args+=(--shopify-price-drift)
+          fi
+          node scripts/silent-failure.mjs "${args[@]}"
 
       - name: Upload tick state
         if: always()

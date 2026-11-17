@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { buildTickAuditArgs, runTickAudit } from '../src/swarm/tick-audit.mjs';
+import { buildTickAuditArgs, hasShopifyAdminCredentials, runTickAudit } from '../src/swarm/tick-audit.mjs';
 
 function tempRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'tick-audit-'));
@@ -21,7 +21,25 @@ test('the tick audit always reconciles PayPal in dry-run mode', () => {
     assert.ok(args.includes('--reconcile-paypal'));
     assert.ok(args.includes('--write'));
     assert.ok(!args.includes('--apply'), 'the audit must never apply reconciliation');
+    assert.ok(!args.includes('--shopify-price-drift'), 'price drift requires explicit enablement or credentials');
     assert.deepEqual(args.slice(0, 1), ['audit']);
+});
+
+test('Shopify price drift is enabled only for a complete admin credential pair', () => {
+    assert.equal(hasShopifyAdminCredentials({}), false);
+    assert.equal(hasShopifyAdminCredentials({ SHOPIFY_STORE_DOMAIN: 'shop.myshopify.com' }), false);
+    assert.equal(hasShopifyAdminCredentials({ SHOPIFY_ADMIN_TOKEN: 'shpat_test' }), false);
+    assert.equal(hasShopifyAdminCredentials({
+        SHOPIFY_STORE_DOMAIN: 'shop.myshopify.com',
+        SHOPIFY_ADMIN_TOKEN: 'shpat_test'
+    }), true);
+    assert.equal(hasShopifyAdminCredentials({
+        SHOPIFY_STORE_DOMAIN: 'shop.myshopify.com',
+        SHOPIFY_shpat_TOKEN: 'shpat_test'
+    }), true);
+
+    const args = buildTickAuditArgs({ shopifyPriceDrift: true });
+    assert.ok(args.includes('--shopify-price-drift'));
 });
 
 test('the tick audit forwards the webhook URL when configured', () => {
@@ -38,6 +56,31 @@ test('runTickAudit reports the audit exit code and output', async () => {
     assert.equal(result.code, 0);
     assert.match(result.stdout, /audit ran/);
     assert.ok(result.duration_ms >= 0);
+});
+
+test('runTickAudit enables price drift when Shopify credentials are present', async () => {
+    const root = tempRoot();
+    const script = fixtureScript(root, 'console.log(JSON.stringify(process.argv.slice(2)));\n');
+    const env = {
+        ...process.env,
+        SHOPIFY_STORE_DOMAIN: 'shop.myshopify.com',
+        SHOPIFY_ADMIN_TOKEN: 'shpat_test'
+    };
+    const result = await runTickAudit({ root, script, stdio: 'pipe', env });
+    assert.equal(result.code, 0);
+    assert.ok(JSON.parse(result.stdout).includes('--shopify-price-drift'));
+});
+
+test('runTickAudit leaves price drift off without Shopify credentials', async () => {
+    const root = tempRoot();
+    const script = fixtureScript(root, 'console.log(JSON.stringify(process.argv.slice(2)));\n');
+    const env = { ...process.env };
+    delete env.SHOPIFY_STORE_DOMAIN;
+    delete env.SHOPIFY_ADMIN_TOKEN;
+    delete env.SHOPIFY_shpat_TOKEN;
+    const result = await runTickAudit({ root, script, stdio: 'pipe', env });
+    assert.equal(result.code, 0);
+    assert.ok(!JSON.parse(result.stdout).includes('--shopify-price-drift'));
 });
 
 test('a finding exit code (2) is returned, not thrown', async () => {

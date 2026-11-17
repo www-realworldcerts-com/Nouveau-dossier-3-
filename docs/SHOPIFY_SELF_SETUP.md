@@ -206,6 +206,34 @@ run. After restoring, it re-reads every snapshotted variant and reports any
 `rollback_price_mismatch` instead of treating a successful PUT as proof of
 rollback. Draft products still use `shopify:publish` and `shopify:activate`.
 
+## Audit price drift (read-only)
+
+Compare the canonical catalog, the public checkout payload and live Shopify
+prices without changing anything:
+
+```bash
+npm run shopify:price-audit
+npm run shopify:price-audit -- --json
+npm run shopify:price-audit -- --checkout-url https://www.realworldcerts.com/data/store-prices.json
+```
+
+The audit only issues GET requests. It fails closed with a finding when:
+
+- a catalog course is missing from checkout or Shopify;
+- a checkout price differs from the catalog or contains an unknown course;
+- a Shopify variant or presentment price differs in the store currency;
+- checkout or Shopify cannot be read, so consistency is unverified.
+
+Exit code 2 means drift was found, 1 means a source was unavailable, and 0
+means all three views agree. The post-tick silent-failure run enables the audit
+automatically when both `SHOPIFY_STORE_DOMAIN` and `SHOPIFY_ADMIN_TOKEN` (or
+`SHOPIFY_shpat_TOKEN`) are set, so drift becomes a finding without a separate
+command. The manual form remains available for a one-off check:
+
+```bash
+npm run resilience -- audit --shopify-price-drift
+```
+
 ## Step 5 — run the gate and activate
 
 ```bash

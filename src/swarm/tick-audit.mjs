@@ -9,11 +9,22 @@ import path from 'node:path';
  * the missing-fulfilment finding never fired there. This helper runs the same
  * dry-run audit after every supervisor tick.
  *
+ * When Shopify Admin credentials are present, the same run also performs the
+ * read-only price-drift audit. Missing credentials leave it disabled instead
+ * of raising an unavailable-source finding on every tick.
+ *
  * A finding (exit code 2) is not a supervisor failure: the audit records the
  * incident and the loop keeps its normal cadence.
  */
 
-export function buildTickAuditArgs({ webhookUrl = null, storefrontUrl = null, stallDays = 7, failOn = 'high' } = {}) {
+export function hasShopifyAdminCredentials(env = process.env) {
+    return Boolean(
+        String(env.SHOPIFY_STORE_DOMAIN || '').trim()
+        && String(env.SHOPIFY_ADMIN_TOKEN || env.SHOPIFY_shpat_TOKEN || '').trim()
+    );
+}
+
+export function buildTickAuditArgs({ webhookUrl = null, storefrontUrl = null, stallDays = 7, failOn = 'high', shopifyPriceDrift = false } = {}) {
     const args = [
         'audit',
         '--write',
@@ -23,6 +34,7 @@ export function buildTickAuditArgs({ webhookUrl = null, storefrontUrl = null, st
     ];
     if (webhookUrl) args.push('--webhook-url', String(webhookUrl));
     if (storefrontUrl) args.push('--storefront-url', String(storefrontUrl));
+    if (shopifyPriceDrift) args.push('--shopify-price-drift');
     return args;
 }
 
@@ -34,10 +46,14 @@ export function runTickAudit({
     storefrontUrl = env.STOREFRONT_URL || null,
     stallDays = 7,
     failOn = 'high',
+    shopifyPriceDrift = null,
     timeoutMs = 180000,
     stdio = 'inherit'
 } = {}) {
-    const args = buildTickAuditArgs({ webhookUrl, storefrontUrl, stallDays, failOn });
+    const includePriceDrift = shopifyPriceDrift === null
+        ? hasShopifyAdminCredentials(env)
+        : Boolean(shopifyPriceDrift);
+    const args = buildTickAuditArgs({ webhookUrl, storefrontUrl, stallDays, failOn, shopifyPriceDrift: includePriceDrift });
     const scriptPath = path.isAbsolute(script) ? script : path.join(root, script);
     return new Promise(resolve => {
         const startedAt = Date.now();

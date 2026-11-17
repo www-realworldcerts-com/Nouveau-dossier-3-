@@ -303,6 +303,36 @@ test('a clean reconciliation adds no finding', () => {
     assert.deepEqual(findings, []);
 });
 
+test('price drift between catalog, checkout and Shopify is a high finding', () => {
+    const shopifyPriceDrift = {
+        status: 'drift',
+        checked_at: NOW.toISOString(),
+        checked: { catalog_courses: 2, checkout_prices: 2, shopify_products: 2, shopify_variants: 2 },
+        drift: [{ source: 'checkout', course_id: 'course-one', reason: 'price_mismatch' }],
+        unavailable: []
+    };
+    const { findings, evidence } = detectSilentFailures({ now: NOW, ...cleanOptions({ shopifyPriceDrift }) });
+    const finding = findings.find(item => item.code === 'SHOPIFY_PRICE_DRIFT');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'high');
+    assert.equal(finding.evidence.drift_count, 1);
+    assert.equal(evidence.shopify_price_drift.status, 'drift');
+});
+
+test('an unavailable price audit is reported instead of a clean result', () => {
+    const shopifyPriceDrift = {
+        status: 'unavailable',
+        checked_at: NOW.toISOString(),
+        drift: [],
+        unavailable: ['missing_shopify_admin_credentials']
+    };
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ shopifyPriceDrift }) });
+    const finding = findings.find(item => item.code === 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'medium');
+    assert.match(finding.detail, /missing_shopify_admin_credentials/);
+});
+
 test('a failed reconciliation is a medium finding, never a silent zero', () => {
     const { findings } = detectSilentFailures({
         now: NOW,

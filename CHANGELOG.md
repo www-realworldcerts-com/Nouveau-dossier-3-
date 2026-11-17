@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-17
+- Added a read-only Shopify price-drift audit (`shopify:price-audit`) that
+  compares the canonical catalog, the public checkout payload and live Shopify
+  variant/presentment prices. It raises `SHOPIFY_PRICE_DRIFT` through the
+  silent-failure protocol when they diverge and
+  `SHOPIFY_PRICE_DRIFT_UNCHECKED` when a source cannot be read; it never writes
+  to Shopify or changes a price. The post-tick silent-failure run enables it
+  automatically when a Shopify store domain and Admin token are configured,
+  including the scheduled GitHub Actions audit.
+
 ## 2026-11-16
 - `shopify:publish` now fails closed before any write when a selected active
   product's price differs from the canonical catalog. `--dry-run` evaluates the

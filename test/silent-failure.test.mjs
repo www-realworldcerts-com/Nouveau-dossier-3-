@@ -297,6 +297,30 @@ test('paid orders missing from the fulfilment queue are a critical finding', () 
     assert.equal(evidence.paypal_reconciliation.report.missing_count, 2);
 });
 
+test('a captured order priced below the catalog is a high finding', () => {
+    const paypalReconciliation = {
+        report: {
+            missing_count: 0,
+            price_mismatch_count: 1,
+            price_mismatches: [{
+                order_id: 'ORD-PRICE',
+                product_id: 'course-one',
+                currency: 'USD',
+                expected: 19,
+                actual: 18,
+                delta: -1
+            }],
+            price_unchecked: []
+        }
+    };
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
+    const finding = findings.find(item => item.code === 'PAYPAL_ORDER_PRICE_DRIFT');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'high');
+    assert.deepEqual(finding.evidence.order_ids, ['ORD-PRICE']);
+    assert.equal(finding.evidence.mismatches[0].actual, 18);
+});
+
 test('a clean reconciliation adds no finding', () => {
     const paypalReconciliation = { report: { missing_count: 0, missing: [] } };
     const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
@@ -308,14 +332,15 @@ test('price drift between catalog, checkout and Shopify is a high finding', () =
         status: 'drift',
         checked_at: NOW.toISOString(),
         checked: { catalog_courses: 2, checkout_prices: 2, shopify_products: 2, shopify_variants: 2 },
-        drift: [{ source: 'checkout', course_id: 'course-one', reason: 'price_mismatch' }],
+        affected_courses: 1,
+        drift: [{ course_id: 'course-one', sources: ['checkout'], reasons: ['checkout:price_mismatch'], observations: [] }],
         unavailable: []
     };
     const { findings, evidence } = detectSilentFailures({ now: NOW, ...cleanOptions({ shopifyPriceDrift }) });
     const finding = findings.find(item => item.code === 'SHOPIFY_PRICE_DRIFT');
     assert.ok(finding);
     assert.equal(finding.severity, 'high');
-    assert.equal(finding.evidence.drift_count, 1);
+    assert.equal(finding.evidence.affected_courses, 1);
     assert.equal(evidence.shopify_price_drift.status, 'drift');
 });
 
@@ -324,6 +349,7 @@ test('an unavailable price audit is reported instead of a clean result', () => {
         status: 'unavailable',
         checked_at: NOW.toISOString(),
         drift: [],
+        unchecked: [{ source: 'shopify', course_id: 'course-one', reason: 'price_unavailable' }],
         unavailable: ['missing_shopify_admin_credentials']
     };
     const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ shopifyPriceDrift }) });
@@ -331,6 +357,7 @@ test('an unavailable price audit is reported instead of a clean result', () => {
     assert.ok(finding);
     assert.equal(finding.severity, 'medium');
     assert.match(finding.detail, /missing_shopify_admin_credentials/);
+    assert.match(finding.detail, /price_unavailable/);
 });
 
 test('a failed reconciliation is a medium finding, never a silent zero', () => {
@@ -342,6 +369,145 @@ test('a failed reconciliation is a medium finding, never a silent zero', () => {
     assert.ok(finding);
     assert.equal(finding.severity, 'medium');
     assert.match(finding.detail, /reporting API unavailable/);
+});
+
+function driftReport(courseIds, overrides = {}) {
+    return {
+        status: 'drift',
+        checked_at: NOW.toISOString(),
+        checked: { catalog_courses: 2, checkout_prices: 2, shopify_products: 2, shopify_variants: 2 },
+        affected_courses: courseIds.length,
+        drift: courseIds.map(courseId => ({
+            course_id: courseId,
+            sources: ['checkout'],
+            reasons: ['checkout:price_mismatch'],
+            observations: []
+        })),
+        unchecked: [],
+        unavailable: [],
+        ...overrides
+    };
+}
+
+function auditAt(root, now, shopifyPriceDrift) {
+    return runSilentFailureAudit({
+        root,
+        now,
+        heartbeat: { status: 'ok', at: new Date(now.getTime() - 60000).toISOString(), ok: true },
+        shopifyPriceDrift,
+        write: true
+    });
+}
+
+test('drift fingerprints are stable when the report order changes', () => {
+    const first = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ shopifyPriceDrift: driftReport(['course-one', 'course-two']) })
+    });
+    const second = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ shopifyPriceDrift: driftReport(['course-two', 'course-one']) })
+    });
+    const firstFinding = first.findings.find(item => item.code === 'SHOPIFY_PRICE_DRIFT');
+    const secondFinding = second.findings.find(item => item.code === 'SHOPIFY_PRICE_DRIFT');
+    assert.equal(firstFinding.drift_fingerprints.length, 2);
+    assert.deepEqual(
+        [...firstFinding.drift_fingerprints].sort(),
+        [...secondFinding.drift_fingerprints].sort()
+    );
+});
+
+test('captured order price drifts get a stable per-order fingerprint', () => {
+    const paypalReconciliation = {
+        report: {
+            missing_count: 0,
+            missing: [],
+            price_mismatch_count: 1,
+            price_mismatches: [{
+                order_id: 'ORDER-1',
+                product_id: 'course-one',
+                expected: 19,
+                actual: 18,
+                currency: 'USD'
+            }],
+            price_unchecked: [],
+            price_catalog_error: null,
+            window: { from: '2026-11-01T00:00:00Z', to: '2026-11-11T00:00:00Z' }
+        }
+    };
+    const first = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
+    const second = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
+    const firstFinding = first.findings.find(item => item.code === 'PAYPAL_ORDER_PRICE_DRIFT');
+    const secondFinding = second.findings.find(item => item.code === 'PAYPAL_ORDER_PRICE_DRIFT');
+    assert.equal(firstFinding.drift_fingerprints.length, 1);
+    assert.equal(firstFinding.drifts[0].subject, 'ORDER-1');
+    assert.equal(firstFinding.drift_fingerprints[0], secondFinding.drift_fingerprints[0]);
+});
+
+test('a new drift does not inherit an already-escalated drift state', () => {
+    const root = tempRoot();
+    const first = auditAt(root, NOW, driftReport(['course-one']));
+    assert.equal(first.findings[0].drifts.length, 1);
+    assert.equal(first.findings[0].new_drifts.length, 1);
+
+    const later = new Date(NOW.getTime() + 30 * 3600000);
+    const second = auditAt(root, later, driftReport(['course-one', 'course-two']));
+    const finding = second.findings.find(item => item.code === 'SHOPIFY_PRICE_DRIFT');
+    assert.equal(finding.escalated, true);
+    assert.equal(finding.new_drifts.length, 1);
+
+    const oldDrift = finding.drifts.find(drift => drift.subject === 'course-one');
+    const newDrift = finding.drifts.find(drift => drift.subject === 'course-two');
+    assert.equal(oldDrift.escalated, true);
+    assert.equal(newDrift.escalated, false);
+    assert.equal(newDrift.severity, 'high');
+    assert.equal(finding.new_drifts[0], newDrift.fingerprint);
+    assert.deepEqual(finding.newly_escalated_drifts, [oldDrift.fingerprint]);
+    assert.ok(!finding.newly_escalated_drifts.includes(newDrift.fingerprint));
+
+    const state = JSON.parse(fs.readFileSync(second.written.state, 'utf8'));
+    assert.equal(Object.keys(state.drifts).length, 2);
+    assert.equal(state.drifts[oldDrift.fingerprint].escalated, true);
+    assert.equal(state.drifts[newDrift.fingerprint].escalated, false);
+    assert.equal(state.findings.SHOPIFY_PRICE_DRIFT.new_drift_fingerprints.length, 1);
+});
+
+test('a resolved drift is moved from open state into resolution history', () => {
+    const root = tempRoot();
+    const first = auditAt(root, NOW, driftReport(['course-one', 'course-two']));
+    const open = first.findings[0].drifts.map(drift => drift.fingerprint);
+
+    const later = new Date(NOW.getTime() + 2 * 3600000);
+    const clean = { ...driftReport([]), status: 'ok' };
+    const second = auditAt(root, later, clean);
+    assert.equal(second.findings.length, 0);
+    assert.equal(second.resolved_drifts.length, 2);
+    assert.equal(second.state.drifts && Object.keys(second.state.drifts).length, 0);
+    assert.equal(second.state.resolved_drifts.length, 2);
+    assert.deepEqual(second.resolved_drifts.map(drift => drift.fingerprint).sort(), [...open].sort());
+    assert.equal(second.resolved_drifts.every(drift => drift.status === 'resolved' && drift.resolved_at), true);
+    assert.equal(second.plan.resolved_drifts.length, 2);
+});
+
+test('an unavailable price audit keeps prior drifts open instead of resolving them', () => {
+    const root = tempRoot();
+    const first = auditAt(root, NOW, driftReport(['course-one']));
+    const fingerprint = first.findings[0].drifts[0].fingerprint;
+
+    const later = new Date(NOW.getTime() + 2 * 3600000);
+    const unavailable = {
+        status: 'unavailable',
+        checked_at: later.toISOString(),
+        drift: [],
+        unchecked: [],
+        unavailable: ['checkout_origin_unavailable: CHECKOUT_PRICE_ORIGIN_URL is not configured']
+    };
+    const second = auditAt(root, later, unavailable);
+    assert.equal(second.resolved_drifts.length, 0);
+    assert.equal(second.state.drifts[fingerprint].status, 'open');
+    assert.ok(second.state.drifts[fingerprint].unchecked_at);
+    assert.equal(second.state.resolved_drifts.length, 0);
+    assert.ok(second.findings.some(finding => finding.code === 'SHOPIFY_PRICE_DRIFT_UNCHECKED'));
 });
 
 test('a skipped reconciliation without credentials adds no finding', () => {

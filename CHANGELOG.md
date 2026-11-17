@@ -6,9 +6,26 @@
   variant/presentment prices. It raises `SHOPIFY_PRICE_DRIFT` through the
   silent-failure protocol when they diverge and
   `SHOPIFY_PRICE_DRIFT_UNCHECKED` when a source cannot be read; it never writes
-  to Shopify or changes a price. The post-tick silent-failure run enables it
+  to Shopify or changes a price. High-severity drift now requires a comparable
+  amount to differ and is grouped by affected course instead of per variant or
+  presentment row; missing FX, missing listings, currency gaps and unreadable
+  sources are unchecked. The audit now reads the exact buyer-facing edge route
+  without a cache buster, the same edge route with a cache-busting nonce, and a
+  direct origin route configured by `CHECKOUT_PRICE_ORIGIN_URL`; it marks
+  `edge.stale_vs_fresh`, `edge.differs_from_origin` and
+  `origin.differs_from_fresh`, and fails closed when the origin   is missing or unreadable. The post-tick silent-failure run enables it
   automatically when a Shopify store domain and Admin token are configured,
-  including the scheduled GitHub Actions audit.
+  including the scheduled GitHub Actions audit. Silent-failure state now keeps a
+  stable fingerprint per drift with independent first-seen/escalation state,
+  reports newly added drifts separately, and records resolved drifts only after
+  a complete audit; an unavailable audit leaves prior drifts open.
+- Added a purchase-time price invariant: the checkout posts the amount and
+  currency it displayed, and `/acp/v1/transactions` rejects a stale value with
+  `409 PRICE_CHANGED` before creating a PayPal order. It still charges only the
+  canonical catalog price.
+- PayPal reconciliation now compares every captured order amount with the
+  canonical catalog and raises `PAYPAL_ORDER_PRICE_DRIFT` for a mismatch. It is
+  read-only and never changes catalog, Shopify or PayPal prices.
 
 ## 2026-11-16
 - `shopify:publish` now fails closed before any write when a selected active

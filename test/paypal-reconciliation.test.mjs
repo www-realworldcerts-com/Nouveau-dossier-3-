@@ -10,6 +10,7 @@ import {
     fulfilledOrderIds,
     isPaidOrder,
     orderToFulfillment,
+    reconcileOrderPrice,
     reconcilePayPalOrders
 } from '../src/real/fulfillment/paypal-reconciliation.mjs';
 
@@ -35,6 +36,36 @@ function paidOrder(overrides = {}) {
         ...overrides
     };
 }
+
+function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.00', currency = 'USD' } = {}) {
+    return {
+        id,
+        status: 'COMPLETED',
+        payer: { email_address: 'buyer@example.com' },
+        purchase_units: [{
+            custom_id: productId,
+            description: 'Course One',
+            amount: { value: amount, currency_code: currency },
+            payments: {
+                captures: [{
+                    id: 'CAP-PRICE',
+                    status: 'COMPLETED',
+                    amount: { value: amount, currency_code: currency },
+                    create_time: '2026-11-01T10:00:00Z'
+                }]
+            }
+        }]
+    };
+}
+
+const priceCatalog = {
+    currency: 'USD',
+    fx: { USD: 1, MAD: 10 },
+    bySlug: {
+        'course-one': { slug: 'course-one', title: 'Course One', price_cents: 1900 },
+        'course-two': { slug: 'course-two', title: 'Course Two', price_cents: 2900 }
+    }
+};
 
 function transactionsResponse() {
     return {
@@ -124,6 +155,46 @@ test('paid orders map onto the existing fulfillment contract', () => {
 test('an order without a completed capture is not paid', () => {
     assert.equal(isPaidOrder({ id: 'ORD-2', status: 'APPROVED', purchase_units: [{ amount: { value: '10.00' } }] }), false);
     assert.equal(isPaidOrder({ id: 'ORD-3', purchase_units: [{ payments: { captures: [{ status: 'PENDING' }] } }] }), false);
+});
+
+test('a captured amount is compared with the canonical catalog without changing prices', () => {
+    const mismatch = reconcileOrderPrice(pricedOrder(), { catalog: priceCatalog });
+    assert.equal(mismatch.status, 'mismatch');
+    assert.equal(mismatch.product_id, 'course-one');
+    assert.equal(mismatch.expected, 19);
+    assert.equal(mismatch.actual, 18);
+    assert.equal(mismatch.delta, -1);
+
+    const matching = reconcileOrderPrice(pricedOrder({ amount: '19.00' }), { catalog: priceCatalog });
+    assert.equal(matching.status, 'ok');
+    assert.equal(matching.expected, 19);
+    assert.equal(matching.actual, 19);
+
+    const noFx = reconcileOrderPrice(pricedOrder({ currency: 'EUR', amount: '17.48' }), { catalog: priceCatalog });
+    assert.equal(noFx.status, 'unchecked');
+    assert.equal(noFx.reason, 'price_unavailable');
+});
+
+test('captured price mismatches are reported by reconciliation and never auto-corrected', async () => {
+    const queueFile = tempQueue();
+    const { api } = fakePaypal({ orders: { 'ORD-PRICE': pricedOrder() } });
+    const report = await reconcilePayPalOrders({
+        paypal: api,
+        orderIds: ['ORD-PRICE'],
+        search: false,
+        now: NOW,
+        queueFile,
+        catalog: priceCatalog,
+        fulfill: queueFulfiller(queueFile)
+    });
+
+    assert.equal(report.price_checked, 1);
+    assert.equal(report.price_mismatch_count, 1);
+    assert.equal(report.price_mismatches[0].order_id, 'ORD-PRICE');
+    assert.equal(report.price_mismatches[0].expected, 19);
+    assert.equal(report.price_mismatches[0].actual, 18);
+    assert.equal(report.missing_count, 1);
+    assert.equal(fs.existsSync(queueFile), false);
 });
 
 test('dry run reports missing fulfilment and writes nothing', async () => {

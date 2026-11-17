@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { getPayPalOrderDetails, searchTransactions } from '../../paypal-api.mjs';
+import { loadCourseCatalog, priceInCurrency } from '../../sales/course-catalog.mjs';
 import { FulfillmentManager } from './FulfillmentManager.mjs';
 
 /**
@@ -79,6 +80,7 @@ export function orderToFulfillment(order) {
     const amount = capture?.amount?.value ?? unit?.amount?.value ?? null;
     return {
         id: order?.id ?? null,
+        product_id: unit?.custom_id ? String(unit.custom_id) : null,
         product: unit?.description || unit?.items?.[0]?.name || 'PayPal order',
         customer_email: order?.payer?.email_address || null,
         revenue: Number(amount),
@@ -86,6 +88,55 @@ export function orderToFulfillment(order) {
         capture_id: capture?.id || null,
         paid_at: capture?.create_time || order?.update_time || null
     };
+}
+
+/**
+ * Compare one captured order with the canonical catalog. This is deliberately
+ * read-only: it reports a mismatch for an owner to refund or resolve and never
+ * changes the catalog, Shopify or PayPal price.
+ */
+export function reconcileOrderPrice(order, { catalog = null, catalogError = null } = {}) {
+    const unit = Array.isArray(order?.purchase_units) ? order.purchase_units[0] || {} : {};
+    const captures = Array.isArray(unit?.payments?.captures) ? unit.payments.captures : [];
+    const capture = captures.find(item => String(item?.status || '').toUpperCase() === 'COMPLETED') || captures[0] || {};
+    const currency = String(capture?.amount?.currency_code || unit?.amount?.currency_code || '').trim().toUpperCase();
+    const actual = Number(capture?.amount?.value ?? unit?.amount?.value ?? NaN);
+    const productId = unit?.custom_id ? String(unit.custom_id) : null;
+    const base = {
+        order_id: order?.id ?? null,
+        product_id: productId,
+        product: unit?.description || unit?.items?.[0]?.name || null,
+        capture_id: capture?.id || null,
+        paid_at: capture?.create_time || order?.update_time || null,
+        currency: currency || null
+    };
+
+    if (!productId) return { ...base, status: 'unchecked', reason: 'missing_product_id' };
+    if (!catalog) return { ...base, status: 'unchecked', reason: catalogError || 'catalog_unavailable' };
+    const course = catalog.bySlug?.[productId];
+    if (!course) return { ...base, status: 'unchecked', reason: 'unknown_product' };
+    if (!Number.isFinite(actual) || actual <= 0) {
+        return { ...base, status: 'unchecked', reason: 'missing_captured_amount' };
+    }
+    if (!currency) return { ...base, status: 'unchecked', reason: 'missing_currency' };
+
+    let expected;
+    try {
+        expected = priceInCurrency(course, currency, catalog.fx);
+    } catch (error) {
+        return { ...base, status: 'unchecked', reason: 'price_unavailable', error: error.message };
+    }
+
+    if (Math.round(expected.amount * 100) !== Math.round(actual * 100)) {
+        return {
+            ...base,
+            status: 'mismatch',
+            expected: expected.amount,
+            actual,
+            delta: Math.round((actual - expected.amount) * 100) / 100
+        };
+    }
+    return { ...base, status: 'ok', expected: expected.amount, actual };
 }
 
 export async function reconcilePayPalOrders({
@@ -96,13 +147,29 @@ export async function reconcilePayPalOrders({
     apply = false,
     queueFile = DEFAULT_QUEUE_FILE,
     fulfill = order => FulfillmentManager.fulfillOrder(order),
-    search = true
+    search = true,
+    catalog = null,
+    catalogFile = undefined,
+    checkPrices = true
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const from = new Date(at.getTime() - Number(lookbackDays) * 86400000);
     const candidates = new Set(orderIds.map(String).filter(Boolean));
     const skipped = [];
+    const priceMismatches = [];
+    const priceUnchecked = [];
+    let priceChecked = 0;
+    let priceCatalogError = null;
     let searchError = null;
+
+    let priceCatalog = catalog;
+    if (checkPrices && !priceCatalog) {
+        try {
+            priceCatalog = loadCourseCatalog(catalogFile);
+        } catch (error) {
+            priceCatalogError = error.message;
+        }
+    }
 
     if (search) {
         try {
@@ -145,7 +212,25 @@ export async function reconcilePayPalOrders({
 
         const mapped = orderToFulfillment(order);
         if (!mapped.id) mapped.id = orderId;
-        paid.push({ order_id: mapped.id, revenue: mapped.revenue, currency: mapped.currency, paid_at: mapped.paid_at });
+        paid.push({
+            order_id: mapped.id,
+            product_id: mapped.product_id,
+            revenue: mapped.revenue,
+            currency: mapped.currency,
+            paid_at: mapped.paid_at
+        });
+
+        if (checkPrices) {
+            const price = reconcileOrderPrice(order, { catalog: priceCatalog, catalogError: priceCatalogError });
+            if (price.status === 'mismatch') {
+                priceMismatches.push(price);
+                priceChecked += 1;
+            } else if (price.status === 'unchecked') {
+                priceUnchecked.push(price);
+            } else {
+                priceChecked += 1;
+            }
+        }
 
         if (fulfilled.has(String(mapped.id))) continue;
         missing.push(mapped);
@@ -175,6 +260,7 @@ export async function reconcilePayPalOrders({
         missing_count: missing.length,
         missing: missing.map(order => ({
             order_id: order.id,
+            product_id: order.product_id,
             product: order.product,
             customer_email: order.customer_email,
             revenue: order.revenue,
@@ -182,6 +268,11 @@ export async function reconcilePayPalOrders({
             paid_at: order.paid_at,
             capture_id: order.capture_id
         })),
+        price_checked: priceChecked,
+        price_mismatch_count: priceMismatches.length,
+        price_mismatches: priceMismatches,
+        price_unchecked: priceUnchecked,
+        price_catalog_error: priceCatalogError,
         enqueued,
         failed,
         skipped,

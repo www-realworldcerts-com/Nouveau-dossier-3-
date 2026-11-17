@@ -93,6 +93,17 @@ async function main() {
         if (report.applied) console.log(`  enqueued: ${report.enqueued.join(', ') || 'none'}`);
         else console.log('  dry run: re-run with --apply to enqueue these orders.');
     }
+    if (report.price_catalog_error) console.log(`  price catalog unavailable: ${report.price_catalog_error}`);
+    if (report.price_mismatch_count) {
+        console.log(`  PRICE MISMATCH: ${report.price_mismatch_count} captured order(s)`);
+        for (const order of report.price_mismatches) {
+            console.log(`    ${order.order_id} — ${order.product_id} — expected ${order.currency} ${order.expected}, captured ${order.currency} ${order.actual} (delta ${order.delta})`);
+        }
+        console.log('  no prices were changed; review for refund or owner decision.');
+    }
+    for (const order of report.price_unchecked) {
+        console.log(`  PRICE UNCHECKED ${order.order_id}: ${order.reason}`);
+    }
     for (const warning of report.warnings) console.log(`  WARNING ${warning}`);
     if (report.failed.length) for (const failure of report.failed) console.log(`  FAILED ${failure.order_id}: ${failure.error}`);
     if (report.skipped.length) for (const skip of report.skipped) console.log(`  skipped ${skip.order_id}: ${skip.reason}`);

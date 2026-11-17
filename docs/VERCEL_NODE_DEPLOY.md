@@ -79,8 +79,11 @@ The catalog is the only product source for checkout and Shopify:
 }
 ```
 
-The ACP create endpoint requires a known `product_id`; it ignores any posted
-`amount`, so a browser cannot choose the charge.
+The ACP create endpoint requires a known `product_id` and uses the canonical
+catalog price for the charge. If the page posts the amount and currency it
+displayed, the endpoint requires them to match the catalog; a stale page gets
+`409 PRICE_CHANGED` and no PayPal order is created. Posted values never select
+the charge.
 
 ## Prepaid fulfillment and access delivery
 
@@ -125,7 +128,9 @@ trail; `BLOCKED_PREPAYMENT`, `PENDING_EMAIL`, `PENDING_ACCESS_SECRET`, and
 Required for live checkout: `PAYPAL_ENABLE_ORDER_CREATE=true`, `SWARM_LIVE=true`,
 `NO_PLATFORM_WALLET=true`, `PAYPAL_MODE=live`, and real PayPal credentials. The
 return URL is derived from the request origin, so `https://www.realworldcerts.com`
-must be the origin buyers use. Register `https://www.realworldcerts.com/buy/success`
+must be the origin buyers use. Set `CHECKOUT_PRICE_ORIGIN_URL` to the direct
+deployment origin (not the CDN hostname) so `shopify:price-audit` can compare the
+buyer-facing edge payload with a cache-busted edge and origin response. Register `https://www.realworldcerts.com/buy/success`
 as the PayPal return URL only if using a static PayPal button; the `/buy` flow
 sets its own return and cancel URLs.
 

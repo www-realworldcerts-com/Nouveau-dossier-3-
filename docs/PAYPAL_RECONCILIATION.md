@@ -46,6 +46,28 @@ uncaptured orders are skipped (`not_paid`), as are orders whose lookup fails
 (`lookup_failed`). A paid order with no payer email is still enqueued — visible
 and fixable — and listed in `warnings` as `missing_email:<order_id>`.
 
+## Captured price reconciliation
+
+Each paid order is also compared with the canonical catalog in
+`config/course-catalog.json`. The report adds:
+
+- `price_checked` — captured orders whose price could be compared;
+- `price_mismatch_count` / `price_mismatches` — captured amount differs from
+the catalog, with order, product, capture, expected, actual, currency and delta;
+- `price_unchecked` — orders that could not be compared because the product id,
+capture amount or currency is missing, the product is unknown or an FX rate is
+unavailable;
+- `price_catalog_error` — the catalog itself could not be read.
+
+This check is read-only. It does not change a catalog, Shopify or PayPal price,
+and `--apply` only enqueues missing fulfilment. A mismatch is a
+`PAYPAL_ORDER_PRICE_DRIFT` high finding for the owner to review for a refund,
+collection or acceptance decision.
+
+The purchase path has a separate assertion: `/acp/v1/transactions` charges the
+catalog price, and when the checkout posts the amount/currency it displayed, a
+stale value receives `409 PRICE_CHANGED` before PayPal is called.
+
 ## Idempotency
 
 1. The queue is read before any write; an order id already present is skipped.

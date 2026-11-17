@@ -299,6 +299,7 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
   var select = document.getElementById('product');
   var button = document.getElementById('pay');
   var error = document.getElementById('error');
+  var productsById = {};
   var requested = q.get('product_id') || '';
   function show(message){ error.textContent = message; error.style.display = 'block'; }
   function clear(){ error.textContent = ''; error.style.display = 'none'; }
@@ -317,6 +318,7 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
     }
     products.forEach(function(p){
       if (!p || !p.id) return;
+      productsById[String(p.id)] = p;
       var option = document.createElement('option');
       option.value = String(p.id);
       var price = p.price != null ? ' — ' + Number(p.price).toFixed(2) + ' ' + String(p.currency || 'USD') : '';
@@ -336,15 +338,21 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
     if (!productId) return show('Choose a course first.');
     button.disabled = true;
     button.textContent = 'Starting secure checkout…';
+    var selected = productsById[String(productId)] || null;
+    var requestBody = {
+      product_id: productId,
+      reference: reference(),
+      return_url: location.origin + '/buy/success',
+      cancel_url: location.origin + '/buy/cancel'
+    };
+    if (selected && selected.price != null) {
+      requestBody.amount = Number(selected.price);
+      requestBody.currency = String(selected.currency || 'USD');
+    }
     fetch('/acp/v1/transactions', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        product_id: productId,
-        reference: reference(),
-        return_url: location.origin + '/buy/success',
-        cancel_url: location.origin + '/buy/cancel'
-      })
+      body: JSON.stringify(requestBody)
     }).then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); }).then(function(result){
       var body = result.body || {};
       if (result.status >= 300 || body.ok !== true) throw new Error(body.error || ('Checkout failed (HTTP ' + result.status + ')'));
@@ -1572,6 +1580,38 @@ if (args.check === true || args["config-check"] === true) {
       }
 
       const currency = normalizeCurrency(picked.currency, String(process.env.PAYPAL_CURRENCY ?? "USD"));
+      const submittedAmountRaw = body.amount ?? body.total ?? body.price ?? null;
+      const hasSubmittedAmount = submittedAmountRaw !== null && submittedAmountRaw !== undefined && submittedAmountRaw !== "";
+      const submittedAmount = hasSubmittedAmount ? Number(submittedAmountRaw) : null;
+      const submittedCurrencyRaw = body.currency ?? body.currency_code ?? null;
+      const submittedCurrency = submittedCurrencyRaw
+        ? String(submittedCurrencyRaw).trim().toUpperCase()
+        : null;
+      if (hasSubmittedAmount && (!Number.isFinite(submittedAmount) || submittedAmount <= 0)) {
+        json(res, 400, { ok: false, error: "Invalid amount" });
+        return;
+      }
+      if (submittedCurrency && submittedCurrency.length !== 3) {
+        json(res, 400, { ok: false, error: "Invalid currency" });
+        return;
+      }
+      const submittedCents = hasSubmittedAmount ? Math.round(submittedAmount * 100) : null;
+      const expectedCents = Math.round(amount * 100);
+      if ((submittedCents !== null && submittedCents !== expectedCents)
+          || (submittedCurrency && submittedCurrency !== currency)) {
+        json(res, 409, {
+          ok: false,
+          code: "PRICE_CHANGED",
+          error: "The price changed. Refresh checkout and try again.",
+          product_id: String(picked.id),
+          expected: { value: amount.toFixed(2), currency },
+          submitted: {
+            value: hasSubmittedAmount ? Number(submittedAmount).toFixed(2) : null,
+            currency: submittedCurrency
+          }
+        });
+        return;
+      }
       const description = String(picked.name || "").trim() || null;
       const customId = String(body.reference ?? body.custom_id ?? body.customId ?? `acp_${Date.now()}`).slice(0, 120);
       const returnUrl = String(body.return_url ?? body.returnUrl ?? process.env.PAYPAL_RETURN_URL ?? "").trim();

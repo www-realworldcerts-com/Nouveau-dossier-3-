@@ -28,22 +28,32 @@ Usage:
   node scripts/shopify-price-drift.mjs [options]
 
 Options:
-  --catalog <file>      Canonical catalog (default config/course-catalog.json)
-  --checkout-url <url>  Checkout payload (default <storefront>/data/store-prices.json)
-  --json                Print the full report as JSON
-  --help                Show this help
+  --catalog <file>              Canonical catalog (default config/course-catalog.json)
+  --checkout-url <url>          Buyer-facing edge payload (default <storefront>/data/store-prices.json)
+  --checkout-origin-url <url>   Direct origin payload or origin base URL
+                                (default CHECKOUT_PRICE_ORIGIN_URL)
+  --json                        Print the full report as JSON
+  --help                        Show this help
 
-Exit codes: 0 prices agree, 1 audit unavailable, 2 drift found.`;
+Exit codes: 0 prices agree, 1 audit unchecked, 2 real price drift found.`;
+
+function formatAmount(value) {
+    if (value === null || value === undefined) return 'n/a';
+    if (typeof value !== 'object') return String(value);
+    return `${value.amount ?? 'n/a'} ${value.currency || ''}`.trim();
+}
 
 async function main() {
     const flags = parseArgs(process.argv.slice(2));
     if (flags.help) return console.log(HELP);
     if (flags['checkout-url'] === true) throw new Error('--checkout-url requires a value');
+    if (flags['checkout-origin-url'] === true) throw new Error('--checkout-origin-url requires a value');
     if (flags.catalog === true) throw new Error('--catalog requires a value');
 
     const report = await auditShopifyPriceDrift({
         catalogFile: typeof flags.catalog === 'string' ? flags.catalog : undefined,
-        checkoutUrl: typeof flags['checkout-url'] === 'string' ? flags['checkout-url'] : undefined
+        checkoutUrl: typeof flags['checkout-url'] === 'string' ? flags['checkout-url'] : undefined,
+        checkoutOriginUrl: typeof flags['checkout-origin-url'] === 'string' ? flags['checkout-origin-url'] : undefined
     });
 
     if (flags.json) {
@@ -52,19 +62,27 @@ async function main() {
         console.log(`Shopify price drift — ${report.status} (${report.checked_at})`);
         console.log(`  catalog: ${report.checked.catalog_courses} course(s) in ${report.catalog_currency}`);
         console.log(`  checkout: ${report.checked.checkout_prices} price(s) at ${report.checkout.url || 'not checked'}`);
+        for (const name of ['edge', 'edge_fresh', 'origin']) {
+            const view = report.checkout[name];
+            if (!view) continue;
+            const state = view.ok ? `${view.count} price(s)` : `unchecked (${view.error || 'unavailable'})`;
+            const stale = view.stale
+                ? ' — STALE against the cache-busted response'
+                : (view.differs_from_origin || view.differs_from_fresh
+                    ? ' — DIFFERS from the other route'
+                    : '');
+            console.log(`    ${name}${view.cache_bust ? ' (cache-busted)' : ''}: ${state} at ${view.url || 'not checked'}${stale}`);
+        }
         console.log(`  Shopify: ${report.checked.shopify_products} product(s), ${report.checked.shopify_variants} variant(s) in ${report.store_currency || 'unknown currency'}`);
         for (const row of report.drift) {
-            const expected = row.expected === null || row.expected === undefined
-                ? 'n/a'
-                : (typeof row.expected === 'object'
-                    ? `${row.expected.amount} ${row.expected.currency}`
-                    : String(row.expected));
-            const actual = row.actual === null || row.actual === undefined
-                ? 'n/a'
-                : (typeof row.actual === 'object'
-                    ? `${row.actual.amount ?? row.actual} ${row.actual.currency || ''}`.trim()
-                    : String(row.actual));
-            console.log(`  [${row.source}] ${row.course_id || 'catalog'} ${row.reason}: expected ${expected}, actual ${actual}`);
+            console.log(`  ${row.course_id || 'catalog'} [${row.sources.join(', ')}]: ${row.reasons.join(', ')}`);
+            for (const observation of row.observations) {
+                const source = observation.detail_source || observation.reason;
+                console.log(`      ${observation.source}/${source}: expected ${formatAmount(observation.expected)}, actual ${formatAmount(observation.actual)}`);
+            }
+        }
+        for (const row of report.unchecked) {
+            console.log(`  unchecked: ${row.source}:${row.course_id || 'catalog'} ${row.reason}`);
         }
         for (const reason of report.unavailable) console.log(`  unavailable: ${reason}`);
         if (report.finding) console.log(`  finding: ${report.finding.code} (${report.finding.severity})`);

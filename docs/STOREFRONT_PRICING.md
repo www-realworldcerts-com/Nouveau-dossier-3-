@@ -144,12 +144,13 @@ On the crypto page display `price.toFixed(2) + ' USDT'`. The submit handler must
 
 ### 4. Enforce the price on the server
 
-The page lookup only fixes what the customer sees. The payment-intent endpoint must resolve the slug through the price map and ignore any posted amount. In this repository:
+The page lookup only fixes what the customer sees. The payment-intent endpoint must resolve the slug through the price map and never use a posted amount as the charge. In this repository:
 
 - `src/paypal-webhook-server.mjs` reads `config/course-catalog.json`.
-- `/buy` renders server-owned products.
-- `/acp/v1/transactions` requires a known `product_id` and charges `product.price`; posted `amount` and `currency` are ignored.
+- `/buy` renders server-owned products and posts the amount/currency it displayed.
+- `/acp/v1/transactions` requires a known `product_id` and charges `product.price`; a posted `amount`/`currency` must match the catalog or the request is rejected with `409 PRICE_CHANGED` before PayPal is called.
 - `/acp/v1/transactions/:id/capture` captures the server-created order.
+- `npm run reconcile:paypal` compares captured orders with the catalog in a read-only report and never changes a price.
 
 The deployed static checkout must call an equivalent server-owned endpoint.
 
@@ -160,9 +161,10 @@ Deploy the static site and `/data/store-prices.json` together, then purge `/cata
 1. `/data/store-prices.json` returns 298 slugs and `USD`.
 2. A course page shows `$19.00`; its source has no `fpn` or `19 +`.
 3. All four checkout pages show the same amount for the same slug.
-4. `?amount=0.01` is ignored and the server creates a `$19.00` order.
+4. A stale displayed amount is rejected with `409 PRICE_CHANGED` before a PayPal order exists.
 5. An unknown slug shows “Price unavailable” and cannot submit.
 6. A capture creates a `$19.00` capture, credits revenue, prepays fulfillment, and sends the access email.
+7. `shopify:price-audit` reads the buyer edge route, a cache-busted edge route and `CHECKOUT_PRICE_ORIGIN_URL`; all agree and no edge/origin stale marker is reported.
 
 ## Known limitations
 

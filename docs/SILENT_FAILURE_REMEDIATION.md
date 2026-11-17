@@ -44,11 +44,35 @@ owner authorization and is never inferred by the swarm.
 | `STOREFRONT_UNREACHABLE` | warning | DNS/timeout/connection failure or persistent 502/503/504 after retries |
 | `STOREFRONT_HTTP_ERROR` | warning | The origin answered with an unexpected 4xx/5xx status |
 | `PAYPAL_UNFULFILLED_ORDERS` | critical | A dry-run reconciliation finds captured orders missing from the queue |
+| `PAYPAL_ORDER_PRICE_DRIFT` | high | A captured order amount differs from the canonical catalog price |
 | `PAYPAL_RECONCILIATION_UNAVAILABLE` | medium | The reconciliation itself failed, so drift is unknown |
+| `SHOPIFY_PRICE_DRIFT` | high | Edge, cache-busted edge, origin or Shopify price differs from the catalog |
+| `SHOPIFY_PRICE_DRIFT_UNCHECKED` | medium | A price source or the direct checkout origin could not be verified |
 
 Findings that stay unresolved past the **silence budget** (`--silence-budget-hours`,
 default 24) are escalated to `critical` with an audit trail. Silence is never
 treated as success a second time.
+
+### Drift identity and resolution
+
+Price-drift findings carry a stable fingerprint per affected course or captured
+order. `data/resilience/silent-state.json` keeps each open drift under `drifts`
+with its own `first_seen`, `last_seen`, `occurrences`, `escalated`,
+`escalated_at` and severity. A new course or order is therefore reported in the
+finding's `new_drifts` array and does not inherit an old drift's escalation.
+
+A drift moves to `resolved_drifts` only after a complete price audit confirms it
+is gone. If the audit is unavailable, unchecked, or was not run, the prior drift
+stays open with `unchecked_at` set; absence of evidence is never treated as
+resolution. Resolution history is capped at the most recent 200 entries.
+
+The Shopify audit compares the exact buyer-facing `/data/store-prices.json`
+route, a cache-busted request to that same edge route, and a cache-busted request
+to `CHECKOUT_PRICE_ORIGIN_URL`. It reports `edge.stale_vs_fresh` when the buyer
+edge differs from the cache-busted edge, `edge.differs_from_origin` when the two
+routes disagree, and `origin.differs_from_fresh` when the direct origin is not
+the cache-busted payload. A missing or unreadable origin is
+`SHOPIFY_PRICE_DRIFT_UNCHECKED`, not a clean result from the edge alone.
 
 ### Payment webhook (P8)
 
@@ -106,10 +130,15 @@ STOREFRONT_URL=https://staging.example npm run resilience -- audit --fail-on hig
 of the audit (and therefore in the tick workflow): it scans PayPal reporting
 transactions, verifies a `COMPLETED` capture, and compares each order id with
 `logs/fulfillment_queue.log`. Any captured order missing from the queue is
-`PAYPAL_UNFULFILLED_ORDERS` (critical). If the check itself cannot run, it is
-`PAYPAL_RECONCILIATION_UNAVAILABLE` (medium) — never a silent "0 missing".
-Without PayPal credentials the step prints a skip message and records the skip
-in evidence; the loop-blocked finding already covers that state.
+`PAYPAL_UNFULFILLED_ORDERS` (critical). The same read-only pass compares each
+captured amount with the canonical catalog; a difference is
+`PAYPAL_ORDER_PRICE_DRIFT` (high). The report lists the order, product, capture,
+expected amount, actual amount and delta. It never changes a catalog, Shopify or
+PayPal price; refunds or collections remain owner decisions. If the check itself
+cannot run, it is `PAYPAL_RECONCILIATION_UNAVAILABLE` (medium) — never a silent
+"0 missing". Without PayPal credentials the step prints a skip message and
+records the skip in evidence; the loop-blocked finding already covers that
+state.
 
 ```bash
 npm run resilience -- audit --reconcile-paypal --fail-on high

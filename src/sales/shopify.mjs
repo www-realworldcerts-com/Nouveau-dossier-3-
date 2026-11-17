@@ -14,6 +14,7 @@ export function shopifySettingsFromEnv(env = process.env) {
         token: env.SHOPIFY_ADMIN_TOKEN || env.SHOPIFY_SHpat_TOKEN || '',
         apiVersion: env.SHOPIFY_API_VERSION || '2024-10',
         storefrontUrl: env.SHOPIFY_STOREFRONT_URL || 'https://www.realworldcerts.com',
+        checkoutOriginUrl: env.CHECKOUT_PRICE_ORIGIN_URL || '',
         storefrontToken: env.SHOPIFY_STOREFRONT_ACCESS_TOKEN || '',
         expectedDomain: env.SHOPIFY_PRIMARY_DOMAIN || '',
         canaryCourse: env.SHOPIFY_CANARY_COURSE || '',

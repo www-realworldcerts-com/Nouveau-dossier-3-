@@ -46,7 +46,13 @@ function parseArgs(argv) {
 
 function printPlan(result, json) {
     if (json) {
-        console.log(JSON.stringify({ plan: result.plan, evidence: result.evidence, triggered: result.triggered, written: result.written }, null, 2));
+        console.log(JSON.stringify({
+            plan: result.plan,
+            evidence: result.evidence,
+            resolved_drifts: result.resolved_drifts,
+            triggered: result.triggered,
+            written: result.written
+        }, null, 2));
         return;
     }
     const plan = result.plan;
@@ -68,6 +74,9 @@ function printPlan(result, json) {
         }
         console.log('\n  Redress exposure: ' + JSON.stringify(plan.redress.exposure));
         console.log(`  Money movement: ${plan.redress.money_movement}`);
+    }
+    if (result.resolved_drifts?.length) {
+        console.log(`  Resolved drift(s): ${result.resolved_drifts.map(drift => `${drift.code}/${drift.subject}`).join(', ')}`);
     }
     if (result.triggered?.length) console.log(`  Redress actions triggered: ${result.triggered.join(', ')}`);
     if (result.written?.incident) console.log(`  Incident written: ${result.written.incident}`);

@@ -214,18 +214,42 @@ prices without changing anything:
 ```bash
 npm run shopify:price-audit
 npm run shopify:price-audit -- --json
-npm run shopify:price-audit -- --checkout-url https://www.realworldcerts.com/data/store-prices.json
+npm run shopify:price-audit -- \
+  --checkout-url https://www.realworldcerts.com/data/store-prices.json \
+  --checkout-origin-url https://your-deployment.vercel.app
 ```
 
-The audit only issues GET requests. It fails closed with a finding when:
+`CHECKOUT_PRICE_ORIGIN_URL` (or `--checkout-origin-url`) must point at the
+deployment origin that serves the same `/data/store-prices.json` route. The
+audit fetches the exact buyer-facing edge URL without a cache buster, fetches
+that same edge URL with a unique `_price_audit` query, and fetches the origin
+with the same cache buster and `cache-control: no-cache`. This catches a stale
+CDN copy even when the cache-busted edge and origin agree with the catalog. If
+the origin is not configured or cannot be read, the audit is `unavailable` and
+cannot report a clean result from the edge alone.
 
-- a catalog course is missing from checkout or Shopify;
-- a checkout price differs from the catalog or contains an unknown course;
-- a Shopify variant or presentment price differs in the store currency;
-- checkout or Shopify cannot be read, so consistency is unverified.
+The audit only issues GET requests. It fails closed with a high-severity
+`SHOPIFY_PRICE_DRIFT` only when a comparable amount actually differs:
 
-Exit code 2 means drift was found, 1 means a source was unavailable, and 0
-means all three views agree. The post-tick silent-failure run enables the audit
+- the buyer-facing edge checkout price differs from the catalog, even if the
+  cache-busted edge or origin is fresh;
+- the cache-busted edge or direct origin price differs from the catalog;
+- a Shopify variant or presentment price differs in the store currency.
+
+Those findings are grouped by affected course, so a variant and its presentment
+price are one course-level divergence rather than duplicate rows. Missing FX
+rates, missing checkout/product/variant data, currency gaps, extra checkout
+courses and unreadable sources are `SHOPIFY_PRICE_DRIFT_UNCHECKED` (medium), not
+high-severity drift.
+
+The report records the edge, cache-busted edge and origin responses separately,
+including cache headers. It marks `edge.stale_vs_fresh` when the buyer-facing
+payload is not the payload a fresh request returns, `edge.differs_from_origin`
+when the two routes disagree, and `origin.differs_from_fresh` when the direct
+origin is not the cache-busted payload. Exit code 2 means a real price divergence
+was found, 1 means the audit could not fully verify the prices or the origin is
+not configured, and 0 means all views agree. The post-tick
+silent-failure run enables the audit
 automatically when both `SHOPIFY_STORE_DOMAIN` and `SHOPIFY_ADMIN_TOKEN` (or
 `SHOPIFY_shpat_TOKEN`) are set, so drift becomes a finding without a separate
 command. The manual form remains available for a one-off check:

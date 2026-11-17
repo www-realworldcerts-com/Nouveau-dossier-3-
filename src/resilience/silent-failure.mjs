@@ -230,6 +230,19 @@ export const FINDING_CATALOG = {
         owner_action: 'Check PayPal credentials and reporting API access.',
         sla_hours: 24
     },
+    PAYPAL_ORDER_PRICE_DRIFT: {
+        domain: 'revenue',
+        severity: 'high',
+        title: 'Captured order price differs from the canonical catalog',
+        impact: 'A buyer was charged an amount that no longer matches the price book. That creates refund exposure, customer disputes and a mismatch between revenue and the catalog.',
+        containment: 'Do not change catalog or Shopify prices automatically; treat the captured amount as the source of the payment dispute until reviewed.',
+        obligation: 'Reconcile every captured order to the canonical price and make the owner-approved refund or adjustment.',
+        remedy: 'Review the listed order and capture ids, refund or collect the difference under owner authorization, and fix the stale checkout or price deployment that produced it.',
+        mitigation: 'Every tick runs the read-only PayPal reconciliation and the purchase-time price assertion rejects stale checkout amounts before a charge.',
+        verification: 'A later reconciliation reports price_mismatch_count 0 and the order amount matches the canonical catalog in its currency.',
+        owner_action: 'Review the affected orders and decide whether to refund, collect the difference or accept the captured amount.',
+        sla_hours: 4
+    },
     PAYMENT_WEBHOOK_UNREACHABLE: {
         domain: 'revenue',
         severity: 'critical',
@@ -246,13 +259,13 @@ export const FINDING_CATALOG = {
     SHOPIFY_PRICE_DRIFT: {
         domain: 'revenue',
         severity: 'high',
-        title: 'Catalog, checkout and Shopify prices diverge',
-        impact: 'A buyer can be shown one price at checkout and charged another on Shopify, or a course can be missing a live price entirely. That creates lost sales, refund exposure and broken price promises.',
-        containment: 'Do not change prices while the drift is open; treat checkout and Shopify as inconsistent until every row is reconciled.',
-        obligation: 'Reconcile the canonical catalog, the served checkout payload and every live Shopify variant to the same price.',
-        remedy: 'Run `npm run shopify:price-audit -- --json` to identify each drift, fix stale checkout data or use shopify:reprice for active prices, then rerun the audit until it reports ok.',
-        mitigation: 'The audit is read-only and compares three independent projections; it never writes prices itself.',
-        verification: 'The audit returns status ok with checkout and Shopify prices matching the canonical catalog.',
+        title: 'Catalog, edge/origin checkout and Shopify prices diverge',
+        impact: 'A buyer can be shown one price at checkout and charged another on Shopify, the CDN edge can serve a stale price, or a course can be missing a live price entirely. That creates lost sales, refund exposure and broken price promises.',
+        containment: 'Do not change prices while the drift is open; treat the edge, origin, checkout and Shopify as inconsistent until every row is reconciled.',
+        obligation: 'Reconcile the canonical catalog, the buyer-facing edge payload, the direct origin payload and every live Shopify variant to the same price.',
+        remedy: 'Run `npm run shopify:price-audit -- --json` to identify each drift, purge the stale edge payload or use shopify:reprice for active prices, then rerun the audit until it reports ok.',
+        mitigation: 'The audit is read-only and compares the edge, a cache-busted edge, the direct origin and Shopify; it never writes prices itself.',
+        verification: 'The audit returns status ok with edge, origin and Shopify prices matching the canonical catalog and no stale marker.',
         owner_action: 'Review the drift rows and authorize a checkout refresh or shopify:reprice for the affected courses.',
         sla_hours: 4
     },
@@ -263,10 +276,10 @@ export const FINDING_CATALOG = {
         impact: 'Without both the checkout payload and live Shopify reads, a price divergence can go unnoticed while checkout and the store continue selling.',
         containment: 'Do not report price consistency as verified while the audit is unavailable.',
         obligation: 'Restore read access to the checkout payload and Shopify Admin API.',
-        remedy: 'Set the Shopify Admin credentials and confirm the storefront checkout payload URL responds, then rerun the price audit.',
-        mitigation: 'Missing credentials or a failed read is reported explicitly instead of producing a clean audit.',
-        verification: 'The audit returns status ok or drift with no unavailable reasons.',
-        owner_action: 'Check SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_TOKEN and the storefront /data/store-prices.json route.',
+        remedy: 'Set the Shopify Admin credentials, confirm the storefront checkout payload URL responds, set CHECKOUT_PRICE_ORIGIN_URL to the direct deployment origin, then rerun the price audit.',
+        mitigation: 'Missing credentials, a missing origin or a failed read is reported explicitly instead of producing a clean audit from the edge alone.',
+        verification: 'The audit returns status ok or drift with no unavailable reasons and both edge and origin responses checked.',
+        owner_action: 'Check SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_TOKEN, CHECKOUT_PRICE_ORIGIN_URL and the storefront /data/store-prices.json route.',
         sla_hours: 24
     }
 };
@@ -438,6 +451,63 @@ export function readTickMonotony(root = process.cwd()) {
     return { samples: rows.length, duplicate_rate: round(1 - unique / statuses.length, 2) };
 }
 
+const DRIFT_CODES = new Set(['SHOPIFY_PRICE_DRIFT', 'PAYPAL_ORDER_PRICE_DRIFT']);
+const MAX_RESOLVED_DRIFTS = 200;
+
+function driftFingerprint(code, subject) {
+    const identity = String(subject || 'unknown').trim();
+    const digest = crypto.createHash('sha256')
+        .update(`${code}|${identity}`)
+        .digest('hex')
+        .slice(0, 12);
+    return `${code.toLowerCase()}:${digest}`;
+}
+
+function driftRows(finding) {
+    if (finding.code === 'SHOPIFY_PRICE_DRIFT') return finding.evidence?.drift || [];
+    if (finding.code === 'PAYPAL_ORDER_PRICE_DRIFT') return finding.evidence?.mismatches || [];
+    return [];
+}
+
+function attachDriftFingerprints(findings) {
+    for (const finding of findings) {
+        if (!DRIFT_CODES.has(finding.code)) continue;
+        const rows = driftRows(finding);
+        if (!rows.length) continue;
+        const seen = new Set();
+        const drifts = [];
+        for (const row of rows) {
+            const subject = finding.code === 'PAYPAL_ORDER_PRICE_DRIFT'
+                ? (row.order_id || row.product_id || 'unknown')
+                : (row.course_id || 'catalog');
+            const fingerprint = driftFingerprint(finding.code, subject);
+            if (seen.has(fingerprint)) continue;
+            seen.add(fingerprint);
+            drifts.push({
+                fingerprint,
+                subject,
+                ...(row.product_id ? { product_id: row.product_id } : {}),
+                ...(row.sources ? { sources: row.sources } : {}),
+                ...(row.reasons ? { reasons: row.reasons } : {}),
+                ...(row.expected !== undefined ? { expected: row.expected } : {}),
+                ...(row.actual !== undefined ? { actual: row.actual } : {})
+            });
+        }
+        finding.drifts = drifts;
+        finding.drift_fingerprints = drifts.map(drift => drift.fingerprint);
+    }
+}
+
+function canResolveDrifts(code, evidence) {
+    if (code !== 'SHOPIFY_PRICE_DRIFT') return false;
+    const report = evidence.shopify_price_drift;
+    if (!report) return false;
+    if (report.status === 'ok') return true;
+    return report.status === 'drift'
+        && !(report.unavailable || []).length
+        && !(report.unchecked || []).length;
+}
+
 export function detectSilentFailures({
     root = process.cwd(),
     now = new Date(),
@@ -605,6 +675,15 @@ export function detectSilentFailures({
                     window: report.window || null
                 });
             }
+            if (Number(report.price_mismatch_count) > 0) {
+                add('PAYPAL_ORDER_PRICE_DRIFT', `${report.price_mismatch_count} captured order(s) were charged a price different from the canonical catalog.`, {
+                    order_ids: (report.price_mismatches || []).map(order => order.order_id),
+                    mismatches: report.price_mismatches || [],
+                    price_unchecked: report.price_unchecked || [],
+                    price_catalog_error: report.price_catalog_error || null,
+                    window: report.window || null
+                });
+            }
         } else if (paypalReconciliation.error) {
             add('PAYPAL_RECONCILIATION_UNAVAILABLE', paypalReconciliation.error, {
                 reason: paypalReconciliation.error
@@ -614,29 +693,40 @@ export function detectSilentFailures({
 
     if (shopifyPriceDrift && typeof shopifyPriceDrift === 'object') {
         if (shopifyPriceDrift.status === 'drift') {
+            const affected = shopifyPriceDrift.affected_courses ?? shopifyPriceDrift.drift.length;
             add(
                 'SHOPIFY_PRICE_DRIFT',
-                `${shopifyPriceDrift.drift.length} price divergence(s) between the catalog, checkout and Shopify.`,
+                `${affected} course(s) with a real price divergence between the catalog, checkout and Shopify.`,
                 {
                     checked_at: shopifyPriceDrift.checked_at,
                     catalog_file: shopifyPriceDrift.catalog_file,
                     store_currency: shopifyPriceDrift.store_currency,
                     checkout_url: shopifyPriceDrift.checkout?.url || null,
+                    checkout: shopifyPriceDrift.checkout || null,
                     checked: shopifyPriceDrift.checked,
-                    drift_count: shopifyPriceDrift.drift.length,
+                    affected_courses: affected,
                     drift: shopifyPriceDrift.drift,
+                    unchecked: shopifyPriceDrift.unchecked || [],
                     unavailable: shopifyPriceDrift.unavailable || []
                 }
             );
         } else if (shopifyPriceDrift.status === 'unavailable') {
+            const unchecked = [
+                ...(shopifyPriceDrift.unavailable || []),
+                ...(shopifyPriceDrift.unchecked || []).map(row =>
+                    `${row.source}:${row.course_id || 'catalog'} ${row.reason}`
+                )
+            ];
             add(
                 'SHOPIFY_PRICE_DRIFT_UNCHECKED',
-                (shopifyPriceDrift.unavailable || []).join('; ') || 'Price audit did not complete.',
+                unchecked.join('; ') || 'Price audit did not complete.',
                 {
                     checked_at: shopifyPriceDrift.checked_at,
                     catalog_file: shopifyPriceDrift.catalog_file,
                     checkout_url: shopifyPriceDrift.checkout?.url || null,
+                    checkout: shopifyPriceDrift.checkout || null,
                     checked: shopifyPriceDrift.checked,
+                    unchecked: shopifyPriceDrift.unchecked || [],
                     unavailable: shopifyPriceDrift.unavailable || []
                 }
             );
@@ -679,6 +769,8 @@ export function detectSilentFailures({
         }, {})).filter(([, count]) => count > 1)
             .map(([external_id, count]) => ({ external_id, count }))
         : [];
+
+    attachDriftFingerprints(findings);
 
     return {
         findings,
@@ -730,7 +822,7 @@ export function listMitigations() {
     ];
 }
 
-export function buildRedressPlan(findings, { now = new Date(), evidence = {} } = {}) {
+export function buildRedressPlan(findings, { now = new Date(), evidence = {}, resolvedDrifts = [] } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const sorted = [...findings].sort((a, b) => (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0));
     const severity = sorted.length ? sorted[0].severity : 'none';
@@ -747,7 +839,9 @@ export function buildRedressPlan(findings, { now = new Date(), evidence = {} } =
         severity,
         summary: sorted.length
             ? `${sorted.length} silent-failure finding(s); highest severity ${severity}`
-            : 'No silent-failure signals detected',        findings: sorted.map(finding => {
+            : 'No silent-failure signals detected',
+        resolved_drifts: resolvedDrifts,
+        findings: sorted.map(finding => {
             const meta = FINDING_CATALOG[finding.code] || {};
             const deadline = new Date(at.getTime() + Number(meta.sla_hours || 24) * 3600000);
             return {
@@ -812,11 +906,24 @@ export function runSilentFailureAudit({
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };
+    const previousDrifts = previous.drifts && typeof previous.drifts === 'object' && !Array.isArray(previous.drifts)
+        ? previous.drifts
+        : {};
+    const previousResolved = Array.isArray(previous.resolved_drifts) ? previous.resolved_drifts : [];
     const nextFindings = {};
+    const openDrifts = {};
+    const activeFingerprints = new Set();
+    const resolvedDrifts = [...previousResolved];
+    const newlyResolvedDrifts = [];
 
     for (const finding of detected.findings) {
         const prior = previous.findings?.[finding.code];
-        const firstSeen = prior?.first_seen || stamp;
+        const priorDriftFirstSeen = Object.values(previousDrifts)
+            .filter(drift => drift.code === finding.code)
+            .map(drift => Date.parse(drift.first_seen))
+            .filter(Number.isFinite)
+            .sort((a, b) => a - b)[0];
+        const firstSeen = prior?.first_seen || (priorDriftFirstSeen ? iso(priorDriftFirstSeen) : stamp);
         const silentHours = round((at.getTime() - Date.parse(firstSeen)) / 3600000, 1);
         finding.first_seen = firstSeen;
         finding.silent_hours = silentHours;
@@ -826,15 +933,83 @@ export function runSilentFailureAudit({
             if (SEVERITY_RANK[finding.severity] < SEVERITY_RANK.critical) finding.severity = 'critical';
             finding.detail = `${finding.detail} (unresolved for ${silentHours}h; silence budget ${silenceBudgetHours}h exceeded)`;
         }
+
+        finding.new_drifts = [];
+        finding.newly_escalated_drifts = [];
+        for (const drift of finding.drifts || []) {
+            const priorDrift = previousDrifts[drift.fingerprint];
+            const driftFirstSeen = priorDrift?.first_seen || stamp;
+            const driftSilentHours = round((at.getTime() - Date.parse(driftFirstSeen)) / 3600000, 1);
+            const driftEscalated = Boolean(priorDrift?.escalated) || driftSilentHours >= silenceBudgetHours;
+            const entry = {
+                ...drift,
+                code: finding.code,
+                status: 'open',
+                first_seen: driftFirstSeen,
+                last_seen: stamp,
+                occurrences: Number(priorDrift?.occurrences || 0) + 1,
+                silent_hours: driftSilentHours,
+                severity: driftEscalated
+                    ? 'critical'
+                    : (FINDING_CATALOG[finding.code]?.severity || finding.severity),
+                escalated: driftEscalated,
+                escalated_at: priorDrift?.escalated_at || (driftEscalated ? stamp : null)
+            };
+            openDrifts[drift.fingerprint] = entry;
+            activeFingerprints.add(drift.fingerprint);
+            Object.assign(drift, {
+                status: entry.status,
+                first_seen: entry.first_seen,
+                last_seen: entry.last_seen,
+                occurrences: entry.occurrences,
+                silent_hours: entry.silent_hours,
+                severity: entry.severity,
+                escalated: entry.escalated,
+                escalated_at: entry.escalated_at
+            });
+            if (!priorDrift) finding.new_drifts.push(drift.fingerprint);
+            if (driftEscalated && !priorDrift?.escalated) finding.newly_escalated_drifts.push(drift.fingerprint);
+        }
+
         nextFindings[finding.code] = {
             first_seen: firstSeen,
             last_seen: stamp,
             occurrences: finding.occurrences,
-            severity: finding.severity
+            severity: finding.severity,
+            drift_fingerprints: finding.drift_fingerprints || [],
+            new_drift_fingerprints: finding.new_drifts,
+            open_drift_count: (finding.drifts || []).length,
+            escalated_drift_count: (finding.drifts || []).filter(drift => drift.escalated).length
         };
     }
 
-    const plan = buildRedressPlan(detected.findings, { now: at, evidence: detected.evidence });
+    for (const [fingerprint, priorDrift] of Object.entries(previousDrifts)) {
+        if (activeFingerprints.has(fingerprint)) continue;
+        if (canResolveDrifts(priorDrift.code, detected.evidence)) {
+            const resolved = {
+                ...priorDrift,
+                status: 'resolved',
+                resolved_at: stamp
+            };
+            resolvedDrifts.push(resolved);
+            newlyResolvedDrifts.push(resolved);
+        } else {
+            // An audit that could not verify this source must not silently
+            // resolve a previously observed drift.
+            openDrifts[fingerprint] = {
+                ...priorDrift,
+                status: 'open',
+                unchecked_at: stamp
+            };
+        }
+    }
+
+    const cappedResolvedDrifts = resolvedDrifts.slice(-MAX_RESOLVED_DRIFTS);
+    const plan = buildRedressPlan(detected.findings, {
+        now: at,
+        evidence: detected.evidence,
+        resolvedDrifts: newlyResolvedDrifts
+    });
     let triggered = [];
     let written = null;
 
@@ -842,7 +1017,12 @@ export function runSilentFailureAudit({
         const incidentDir = path.join(root, 'data', 'resilience', 'incidents');
         fs.mkdirSync(incidentDir, { recursive: true });
         fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-        fs.writeFileSync(stateFile, JSON.stringify({ updated_at: stamp, findings: nextFindings }, null, 2));
+        fs.writeFileSync(stateFile, JSON.stringify({
+            updated_at: stamp,
+            findings: nextFindings,
+            drifts: openDrifts,
+            resolved_drifts: cappedResolvedDrifts
+        }, null, 2));
         fs.writeFileSync(
             path.join(root, 'data', 'resilience', 'contentieux.json'),
             JSON.stringify({
@@ -886,7 +1066,13 @@ export function runSilentFailureAudit({
         findings: detected.findings,
         evidence: detected.evidence,
         plan,
-        state: { updated_at: stamp, findings: nextFindings },
+        state: {
+            updated_at: stamp,
+            findings: nextFindings,
+            drifts: openDrifts,
+            resolved_drifts: cappedResolvedDrifts
+        },
+        resolved_drifts: newlyResolvedDrifts,
         triggered,
         written
     };

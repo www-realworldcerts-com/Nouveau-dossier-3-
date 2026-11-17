@@ -5,6 +5,7 @@ import test from 'node:test';
 const probe = String.raw`
 import handler from './api/index.mjs';
 
+globalThis.__orderCreateCalls = 0;
 globalThis.fetch = async (url, init = {}) => {
   const target = String(url);
   if (target.includes('/v1/oauth2/token')) {
@@ -14,6 +15,7 @@ globalThis.fetch = async (url, init = {}) => {
     });
   }
   if (target.endsWith('/v2/checkout/orders')) {
+    globalThis.__orderCreateCalls += 1;
     return new Response(JSON.stringify({
       id: 'ORDER-NEW',
       status: 'CREATED',
@@ -58,15 +60,22 @@ function call(url, method = 'GET', body = '{}') {
 const buy = await call('/buy');
 const discovery = await call('/acp/v1/discovery');
 const prices = await call('/data/store-prices.json');
-const create = await call('/acp/v1/transactions', 'POST', JSON.stringify({
+const stale = await call('/acp/v1/transactions', 'POST', JSON.stringify({
   product_id: 'financial-risk-manager-test-bank',
   amount: 0.01,
   currency: 'EUR',
   return_url: 'https://www.realworldcerts.com/buy/success',
   cancel_url: 'https://www.realworldcerts.com/buy/cancel'
 }));
+const create = await call('/acp/v1/transactions', 'POST', JSON.stringify({
+  product_id: 'financial-risk-manager-test-bank',
+  amount: 19,
+  currency: 'USD',
+  return_url: 'https://www.realworldcerts.com/buy/success',
+  cancel_url: 'https://www.realworldcerts.com/buy/cancel'
+}));
 const capture = await call('/acp/v1/transactions/ORDER-TEST/capture', 'POST');
-process.stdout.write(JSON.stringify({ buy, discovery, prices, create, capture }) + '\n');
+process.stdout.write(JSON.stringify({ buy, discovery, prices, stale, create, capture, order_create_calls: globalThis.__orderCreateCalls }) + '\n');
 `;
 
 function runProbe() {
@@ -104,6 +113,8 @@ test('the checkout page is reachable and calls the order API', () => {
     assert.match(probe.buy.body, /\/acp\/v1\/transactions/);
     assert.match(probe.buy.body, /Continue to PayPal/);
     assert.match(probe.buy.body, /Checkout could not start/);
+    assert.match(probe.buy.body, /requestBody\.amount = Number/);
+    assert.match(probe.buy.body, /requestBody\.currency = String/);
 });
 
 test('checkout discovery and the public payload use the explicit price file', () => {
@@ -115,7 +126,18 @@ test('checkout discovery and the public payload use the explicit price file', ()
     assert.equal(JSON.parse(probe.prices.body).prices['financial-risk-manager-test-bank'], 19);
 });
 
-test('ACP checkout charges the product price, not a posted amount or currency', () => {
+test('ACP checkout rejects a stale displayed amount before creating a PayPal order', () => {
+    const probe = result();
+    assert.equal(probe.stale.status, 409);
+    const body = JSON.parse(probe.stale.body);
+    assert.equal(body.ok, false);
+    assert.equal(body.code, 'PRICE_CHANGED');
+    assert.deepEqual(body.expected, { value: '19.00', currency: 'USD' });
+    assert.deepEqual(body.submitted, { value: '0.01', currency: 'EUR' });
+    assert.equal(probe.order_create_calls, 1, 'only the matching checkout may call PayPal');
+});
+
+test('ACP checkout accepts the displayed amount when it matches the catalog', () => {
     const probe = result();
     assert.equal(probe.create.status, 200);
     const body = JSON.parse(probe.create.body);

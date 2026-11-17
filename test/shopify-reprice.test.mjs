@@ -206,6 +206,8 @@ test('rollback fails verification when a variant does not return to its snapshot
     assert.equal(result.rollback.verification.ok, false);
     assert.equal(result.rollback.verification.checked, 2);
     assert.equal(result.rollback.verification.mismatches.length, 1);
+    assert.equal(result.rollback.verification.mismatches[0].course_id, 'course-one');
+    assert.equal(result.rollback.verification.mismatches[0].handle, 'course-one');
     assert.equal(result.rollback.verification.mismatches[0].reason, 'rollback_price_mismatch');
     assert.equal(result.rollback.verification.mismatches[0].expected, '17.00');
     assert.equal(result.rollback.verification.mismatches[0].actual, '19.00');
@@ -240,6 +242,37 @@ test('manual rollback restores a completed reprice run', async () => {
         shop.products().map(product => product.variants[0].price),
         ['17.00', '27.00']
     );
+});
+
+test('manual rollback reports the same verification mismatches', async () => {
+    const dataDir = tempDir();
+    const shop = fakeShopify({ products: productsAt() });
+    const result = await repriceShopifyCatalog({
+        catalog,
+        settings,
+        storeCurrency: 'USD',
+        dataDir,
+        fetchImpl: shop.fetchImpl
+    });
+    assert.equal(result.status, 'ok');
+
+    const rolledBack = await rollbackShopifyReprice({
+        settings,
+        dataDir,
+        runId: result.run_id,
+        fetchImpl: fakeShopify({
+            products: shop.products(),
+            ignoreUpdates: [{ variant_id: 1001, price: '17.00' }]
+        }).fetchImpl
+    });
+
+    assert.equal(rolledBack.status, 'rollback_failed');
+    assert.equal(rolledBack.rollback.ok, false);
+    assert.equal(rolledBack.rollback.verification.mismatches.length, 1);
+    assert.equal(rolledBack.rollback.verification.mismatches[0].course_id, 'course-one');
+    assert.equal(rolledBack.rollback.verification.mismatches[0].expected, '17.00');
+    assert.equal(rolledBack.rollback.verification.mismatches[0].actual, '19.00');
+    assert.equal(rolledBack.manual_rollback.rollback.verification.ok, false);
 });
 
 test('draft products are blocked before any write', async () => {

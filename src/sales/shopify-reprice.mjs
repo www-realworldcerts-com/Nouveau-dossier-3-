@@ -225,61 +225,35 @@ async function buildRepricePlan({ catalog, selected, settings, fetchImpl, storeC
     };
 }
 
-async function verifySnapshotPrices(settings, snapshot, { fetchImpl = globalThis.fetch } = {}) {
-    let products;
-    try {
-        products = await listProducts(settings, { fetchImpl });
-    } catch (error) {
-        return {
-            ok: false,
-            checked: 0,
-            verified: [],
-            mismatches: [],
-            error: error.message
-        };
-    }
+function failedVerification(error) {
+    return {
+        ok: false,
+        checked: 0,
+        mismatches: [],
+        error: error?.message ?? String(error)
+    };
+}
 
+function verifySnapshotProducts(products, snapshot) {
     const productsById = new Map(products.map(product => [String(product.id), product]));
-    const verified = [];
     const mismatches = [];
     for (const row of snapshot) {
         const product = productsById.get(String(row.product_id));
         const variant = product?.variants?.find(item => String(item.id) === String(row.variant_id));
-        if (!variant) {
-            mismatches.push({
-                product_id: row.product_id,
-                variant_id: row.variant_id,
-                reason: 'snapshot_target_missing',
-                expected: row.from_price,
-                actual: null
-            });
-            continue;
-        }
+        const actual = variant ? normalizeVariantPrice(variant.price) : null;
+        if (variant && comparePrice(actual, row.from_price)) continue;
 
-        const actual = normalizeVariantPrice(variant.price);
-        if (comparePrice(actual, row.from_price)) {
-            verified.push({
-                product_id: row.product_id,
-                variant_id: row.variant_id,
-                price: actual
-            });
-            continue;
-        }
         mismatches.push({
+            course_id: row.course_id ?? null,
+            handle: row.handle ?? null,
             product_id: row.product_id,
             variant_id: row.variant_id,
-            reason: 'rollback_price_mismatch',
+            reason: variant ? 'rollback_price_mismatch' : 'snapshot_target_missing',
             expected: row.from_price,
             actual
         });
     }
-
-    return {
-        ok: mismatches.length === 0,
-        checked: snapshot.length,
-        verified,
-        mismatches
-    };
+    return { ok: mismatches.length === 0, checked: snapshot.length, mismatches };
 }
 
 async function restoreSnapshot(settings, snapshot, { fetchImpl = globalThis.fetch } = {}) {
@@ -295,13 +269,7 @@ async function restoreSnapshot(settings, snapshot, { fetchImpl = globalThis.fetc
             restored,
             skipped,
             errors: [{ reason: 'products_unavailable', error: error.message }],
-            verification: {
-                ok: false,
-                checked: 0,
-                verified: [],
-                mismatches: [],
-                error: error.message
-            }
+            verification: failedVerification(error)
         };
     }
     const productsById = new Map(products.map(product => [String(product.id), product]));
@@ -356,7 +324,13 @@ async function restoreSnapshot(settings, snapshot, { fetchImpl = globalThis.fetc
 
     // A successful PUT is not proof of restoration. Re-read every snapshotted
     // variant and fail the rollback if any price is still different.
-    const verification = await verifySnapshotPrices(settings, snapshot, { fetchImpl });
+    let verification;
+    try {
+        const after = await listProducts(settings, { fetchImpl });
+        verification = verifySnapshotProducts(after, snapshot);
+    } catch (error) {
+        verification = failedVerification(error);
+    }
     return {
         ok: errors.length === 0 && verification.ok,
         restored,
@@ -603,13 +577,7 @@ export async function repriceShopifyCatalog({
                     restored: [],
                     skipped: [],
                     errors: [{ reason: 'rollback_failed', error: error.message }],
-                    verification: {
-                        ok: false,
-                        checked: 0,
-                        verified: [],
-                        mismatches: [],
-                        error: error.message
-                    }
+                    verification: failedVerification(error)
                 };
             }
             report.status = rollback.ok ? 'rolled_back' : 'rollback_failed';

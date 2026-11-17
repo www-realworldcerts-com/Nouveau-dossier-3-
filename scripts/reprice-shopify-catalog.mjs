@@ -33,6 +33,26 @@ failure. The command shares the catalog-mutation lock with shopify:activate.
 `);
 }
 
+function printRollback(rollback) {
+    console.log(`rollback: ${rollback.ok ? 'complete' : 'incomplete'} ` +
+        `(${rollback.restored?.length || 0} restored)`);
+    const verification = rollback.verification;
+    if (verification) {
+        console.log(`verified: ${verification.ok ? 'ok' : 'failed'} ` +
+            `(${verification.checked || 0} checked)`);
+        if (verification.error) console.log(`  verification error: ${verification.error}`);
+        for (const row of verification.mismatches || []) {
+            const label = row.course_id || row.handle || 'variant';
+            console.log(`  MISMATCH ${label} (product ${row.product_id}, variant ${row.variant_id}): ` +
+                `expected ${row.expected}, got ${row.actual ?? 'missing'}`);
+        }
+    }
+    for (const row of rollback.errors || []) {
+        console.log(`  FAILED product ${row.product_id} variant ${row.variant_id || 'unknown'}: ` +
+            `${row.reason}${row.error ? ` (${row.error})` : ''}`);
+    }
+}
+
 async function main() {
     const flags = parseArgs(process.argv.slice(2));
     if (flags.help) return help();
@@ -58,21 +78,7 @@ async function main() {
             console.log(`shopify reprice rollback: ${report.status}`);
             if (report.run_id) console.log(`run: ${report.run_id}`);
             if (report.reason) console.log(`reason: ${report.reason}`);
-            if (report.rollback) {
-                console.log(`restored: ${report.rollback.restored?.length || 0}`);
-                if (report.rollback.verification) {
-                    const verification = report.rollback.verification;
-                    console.log(`verified: ${verification.ok ? 'ok' : 'failed'} ` +
-                        `(${verification.checked || 0} checked)`);
-                    for (const row of verification.mismatches || []) {
-                        console.log(`  MISMATCH product ${row.product_id} variant ${row.variant_id}: ` +
-                            `expected ${row.expected}, got ${row.actual}`);
-                    }
-                }
-                for (const row of report.rollback.errors || []) {
-                    console.log(`  FAILED product ${row.product_id}: ${row.reason}${row.error ? ` (${row.error})` : ''}`);
-                }
-            }
+            if (report.rollback) printRollback(report.rollback);
             console.log(`report: ${reportPath}`);
         }
         if (report.status !== 'rolled_back') process.exitCode = 1;
@@ -119,22 +125,7 @@ async function main() {
         if (report.failure) {
             console.log(`failure: ${report.failure.reason} at ${report.failure.stage}`);
         }
-        if (report.rollback) {
-            console.log(`rollback: ${report.rollback.ok ? 'complete' : 'incomplete'} ` +
-                `(${report.rollback.restored?.length || 0} restored)`);
-            if (report.rollback.verification) {
-                const verification = report.rollback.verification;
-                console.log(`verified: ${verification.ok ? 'ok' : 'failed'} ` +
-                    `(${verification.checked || 0} checked)`);
-                for (const row of verification.mismatches || []) {
-                    console.log(`  MISMATCH product ${row.product_id} variant ${row.variant_id}: ` +
-                        `expected ${row.expected}, got ${row.actual}`);
-                }
-            }
-            for (const row of report.rollback.errors || []) {
-                console.log(`  FAILED product ${row.product_id}: ${row.reason}${row.error ? ` (${row.error})` : ''}`);
-            }
-        }
+        if (report.rollback) printRollback(report.rollback);
         if (report.verification) {
             console.log(`verification: ${report.verification.ok ? 'ok' : 'failed'}`);
         }

@@ -15,6 +15,9 @@
   currency and tax mode, requires a complete canary delivery address, and
   validates canary availability, shipping, tax and totals against that market.
   Added the `read_markets` scope and the canary address variables.
+- Updated production dependencies within their existing ranges to clear six
+  audit advisories, including critical `proxy-addr` IP spoofing and high
+  `body-parser`, `path-to-regexp` and `ws` issues.
 
 ## 2026-11-14
 - Added AES-256-GCM encryption at rest for financial JSON fields (IBANs, RIBs,

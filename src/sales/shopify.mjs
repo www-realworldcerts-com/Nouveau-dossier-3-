@@ -17,7 +17,11 @@ export function shopifySettingsFromEnv(env = process.env) {
         storefrontToken: env.SHOPIFY_STOREFRONT_ACCESS_TOKEN || '',
         expectedDomain: env.SHOPIFY_PRIMARY_DOMAIN || '',
         canaryCourse: env.SHOPIFY_CANARY_COURSE || '',
-        canaryCountryCode: env.SHOPIFY_CANARY_COUNTRY_CODE || 'US',
+        canaryCountryCode: env.SHOPIFY_CANARY_COUNTRY_CODE || '',
+        canaryAddress1: env.SHOPIFY_CANARY_ADDRESS1 || '',
+        canaryCity: env.SHOPIFY_CANARY_CITY || '',
+        canaryProvinceCode: env.SHOPIFY_CANARY_PROVINCE_CODE || '',
+        canaryPostalCode: env.SHOPIFY_CANARY_POSTAL_CODE || '',
         payoutAttestationFile: env.SHOPIFY_PAYOUT_ATTESTATION_FILE || ''
     };
 }
@@ -142,9 +146,23 @@ export function productPayloadFor(course, price, { currency = 'USD', status = 'd
     };
 }
 
+function priceCents(value) {
+    const amount = Number(value);
+    return Number.isFinite(amount) ? Math.round(amount * 100) : null;
+}
+
+export function normalizeVariantPrice(value) {
+    const cents = priceCents(value);
+    return cents === null ? String(value ?? '') : (cents / 100).toFixed(2);
+}
+
 /**
  * Create or update one product. Returns {action, product_id, handle}.
  * `existing` is the product list already fetched once per publish run.
+ *
+ * A publish run may create drafts and update draft prices. It must never
+ * reprice an active product: that requires shopify:reprice, which snapshots
+ * the prior prices and can roll the whole batch back.
  */
 export async function upsertProduct(course, price, { settings, existing = [], fetchImpl, currency = 'USD' } = {}) {
     const payload = productPayloadFor(course, price, { currency });
@@ -158,18 +176,33 @@ export async function upsertProduct(course, price, { settings, existing = [], fe
     }
 
     const currentPrice = String(match.variants?.[0]?.price ?? '');
-    if (currentPrice === variantPrice) {
+    if (priceCents(currentPrice) === priceCents(variantPrice)) {
         return { action: 'unchanged', product_id: match.id, handle };
     }
-    const variantId = match.variants?.[0]?.id;
-    if (!variantId) {
-        throw new Error(`Product ${handle} has no variant to update`);
+    if (String(match.status || '').toLowerCase() === 'active') {
+        throw new Error(
+            `ACTIVE_PRODUCT_PRICE_CHANGE_BLOCKED: ${handle} is active at ${currentPrice}; ` +
+            'use shopify:reprice to snapshot and change active prices'
+        );
     }
-    await adminRequest(settings, 'PUT', `variants/${variantId}.json`, {
-        body: { variant: { id: variantId, price: variantPrice } },
-        fetchImpl
+    await updateVariantPrice(settings, match.variants?.[0]?.id, variantPrice, {
+        fetchImpl,
+        handle
     });
     return { action: 'updated', product_id: match.id, handle };
+}
+
+/** Write one variant price without changing product status or publication. */
+export async function updateVariantPrice(settings, variantId, price, { fetchImpl, handle = null } = {}) {
+    if (variantId === undefined || variantId === null || variantId === '') {
+        throw new Error(`Product ${handle || variantId || 'unknown'} has no variant to update`);
+    }
+    const normalized = normalizeVariantPrice(price);
+    await adminRequest(settings, 'PUT', `variants/${variantId}.json`, {
+        body: { variant: { id: variantId, price: normalized } },
+        fetchImpl
+    });
+    return { variant_id: variantId, price: normalized };
 }
 
 /** Change a product's publication status without touching its price. */

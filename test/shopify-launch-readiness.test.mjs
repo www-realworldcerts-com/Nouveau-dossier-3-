@@ -53,9 +53,17 @@ function readyInput(overrides = {}) {
             bankAccounts: { nodes: [{ id: 1 }] }
         },
         canary: { ok: true, mode: 'storefront_cart', http_status: 200 },
+        market: {
+            country_code: 'US',
+            country_name: 'United States',
+            currency: 'USD',
+            tax_inclusive: false,
+            tax_source: 'shop'
+        },
         expectedDomain: 'realworldcerts.com',
         catalogCurrency: 'USD',
         storeCurrency: 'USD',
+        marketCurrency: 'USD',
         fx: catalog.fx,
         selectedCourseIds: ['test-course'],
         ...overrides
@@ -67,7 +75,8 @@ test('requests only the read scopes the gate calls', () => {
         'read_products',
         'read_publications',
         'read_payment_gateways',
-        'read_shopify_payments_accounts'
+        'read_shopify_payments_accounts',
+        'read_markets'
     ]);
 });
 
@@ -200,7 +209,13 @@ function launchFetch({
     paymentProvider = 'shopify_payments',
     paypalAccount = null,
     variant = {},
-    cart = {}
+    cart = {},
+    market = true,
+    marketCurrency = 'USD',
+    marketCountry = 'US',
+    marketCountryName = 'United States',
+    taxInclusive = false,
+    marketTaxStrategy = null
 } = {}) {
     return async (url, options = {}) => {
         const target = String(url);
@@ -232,6 +247,35 @@ function launchFetch({
                 : response({ payment_gateways: [] });
         }
         if (target.includes('/admin/api/') && target.includes('/graphql.json')) {
+            const body = options.body ? JSON.parse(options.body) : {};
+            const query = String(body.query || '');
+            if (query.includes('LaunchMarketContext')) {
+                return response({
+                    data: {
+                        shop: {
+                            currencyCode: marketCurrency,
+                            taxesIncluded: taxInclusive,
+                            taxShipping: false
+                        },
+                        primaryMarket: market
+                            ? {
+                                id: 'gid://shopify/Market/1',
+                                name: 'Primary',
+                                currencySettings: {
+                                    baseCurrency: { currencyCode: marketCurrency },
+                                    localCurrencies: false
+                                },
+                                regions: {
+                                    nodes: [{ code: marketCountry, name: marketCountryName }]
+                                },
+                                ...(marketTaxStrategy
+                                    ? { priceInclusions: { inclusiveTaxPricingStrategy: marketTaxStrategy } }
+                                    : {})
+                            }
+                            : null
+                    }
+                });
+            }
             return payouts
                 ? response({
                     data: {
@@ -259,7 +303,7 @@ function launchFetch({
                                 ? 5
                                 : variant.quantityAvailable,
                             requiresShipping: variant.requiresShipping ?? false,
-                            price: variant.price || money('19.00'),
+                            price: variant.price || money('19.00', marketCurrency),
                             product: { title: 'Test Course', handle: 'test-course' }
                         }
                     }
@@ -273,9 +317,9 @@ function launchFetch({
                             id: 'gid://shopify/Cart/1',
                             checkoutUrl: 'https://checkout.shopify.com/canary',
                             cost: {
-                                subtotalAmount: cart.subtotal || money('19.00'),
-                                totalAmount: cart.total || money('19.00'),
-                                totalTaxAmount: cart.tax || money('0.00')
+                                subtotalAmount: cart.subtotal || money('19.00', marketCurrency),
+                                totalAmount: cart.total || money('19.00', marketCurrency),
+                                totalTaxAmount: cart.tax || money('0.00', marketCurrency)
                             },
                             deliveryGroups: {
                                 nodes: deliveryOptions.length
@@ -305,6 +349,10 @@ function settings(overrides = {}) {
         storefrontToken: 'public-storefront-token',
         expectedDomain: 'realworldcerts.com',
         canaryCourse: 'test-course',
+        canaryAddress1: '1 Test Street',
+        canaryCity: 'New York',
+        canaryProvinceCode: 'NY',
+        canaryPostalCode: '10001',
         ...overrides
     };
 }
@@ -317,6 +365,10 @@ test('runs the full network gate and creates a canary checkout URL', async () =>
     assert.equal(result.ready, true, JSON.stringify(result.blockers));
     assert.equal(result.canary.mode, 'storefront_cart');
     assert.equal(result.canary.http_status, 200);
+    assert.equal(result.canary.currency, 'USD');
+    assert.equal(result.canary.address.country_code, 'US');
+    assert.equal(result.canary.address.province_code, 'NY');
+    assert.equal(result.canary.address.postal_code, '10001');
     assert.equal(result.collection.product_count, 1);
     assert.ok(result.checks.every(row => row.ok));
 });
@@ -403,6 +455,68 @@ test('canary validates currency, tax and totals', async () => {
     assert.ok(badTotal.blockers.includes('canary_total_mismatch'));
 });
 
+test('canary uses the primary market currency and requires a full address', async () => {
+    const euro = await checkShopifyLaunchReadiness(settings(), {
+        catalog,
+        fetchImpl: launchFetch({
+            marketCurrency: 'EUR',
+            variant: { price: money('19.00', 'EUR') }
+        })
+    });
+    assert.equal(euro.ready, true, euro.blockers.join(' '));
+    assert.equal(euro.canary.currency, 'EUR');
+    assert.equal(euro.market.currency, 'EUR');
+
+    const incomplete = await checkShopifyLaunchReadiness(settings({ canaryProvinceCode: '' }), {
+        catalog,
+        fetchImpl: launchFetch()
+    });
+    assert.ok(incomplete.blockers.includes('canary_address_incomplete'));
+    assert.deepEqual(incomplete.canary.missing, ['province']);
+});
+
+test('canary applies the primary market tax mode to the total check', async () => {
+    const inclusive = await checkShopifyLaunchReadiness(settings(), {
+        catalog,
+        fetchImpl: launchFetch({
+            taxInclusive: true,
+            cart: { tax: money('1.00'), total: money('19.00') }
+        })
+    });
+    assert.equal(inclusive.ready, true, inclusive.blockers.join(' '));
+    assert.equal(inclusive.canary.tax_inclusive, true);
+
+    const exclusive = await checkShopifyLaunchReadiness(settings(), {
+        catalog,
+        fetchImpl: launchFetch({
+            cart: { tax: money('1.00'), total: money('19.00') }
+        })
+    });
+    assert.ok(exclusive.blockers.includes('canary_total_mismatch'));
+});
+
+test('uses the market tax inclusion strategy when the API supports it', async () => {
+    const result = await checkShopifyLaunchReadiness(settings({ apiVersion: '2026-10' }), {
+        catalog,
+        fetchImpl: launchFetch({
+            marketTaxStrategy: 'INCLUDES_TAXES_IN_PRICE',
+            cart: { tax: money('1.00'), total: money('19.00') }
+        })
+    });
+    assert.equal(result.ready, true, result.blockers.join(' '));
+    assert.equal(result.canary.tax_inclusive, true);
+    assert.equal(result.canary.tax_source, 'market');
+});
+
+test('blocks when the primary market cannot be resolved', async () => {
+    const result = await checkShopifyLaunchReadiness(settings(), {
+        catalog,
+        fetchImpl: launchFetch({ market: false })
+    });
+    assert.equal(result.ready, false);
+    assert.ok(result.blockers.includes('primary_market_unavailable'));
+});
+
 test('reports payment and payout gaps as blockers', async () => {
     const noPayments = await checkShopifyLaunchReadiness(settings(), {
         catalog,
@@ -423,7 +537,11 @@ const LAUNCH_ENV = {
     SHOPIFY_STOREFRONT_URL: 'https://www.realworldcerts.com',
     SHOPIFY_STOREFRONT_ACCESS_TOKEN: 'public-storefront-token',
     SHOPIFY_PRIMARY_DOMAIN: 'realworldcerts.com',
-    SHOPIFY_CANARY_COURSE: 'test-course'
+    SHOPIFY_CANARY_COURSE: 'test-course',
+    SHOPIFY_CANARY_ADDRESS1: '1 Test Street',
+    SHOPIFY_CANARY_CITY: 'New York',
+    SHOPIFY_CANARY_PROVINCE_CODE: 'NY',
+    SHOPIFY_CANARY_POSTAL_CODE: '10001'
 };
 const PAYPAL_ATTESTATION = {
     provider: 'paypal',

@@ -71,6 +71,10 @@ async function main() {
         }
         if (result.total) console.log(`courses:       ${result.total}`);
         if (result.dry_run) {
+            if (result.active_price_check) {
+                console.log(`active prices: ${result.active_price_check}`);
+            }
+            if (result.warning) console.log(`warning:       ${result.warning}`);
             for (const row of result.preview || []) {
                 console.log(`  ${row.course_id}: ${row.price} ${row.currency}`);
             }
@@ -80,6 +84,16 @@ async function main() {
             console.log(`unchanged:     ${result.unchanged}`);
             console.log(`failed:        ${result.failed.length}`);
         }
+        if (result.active_price_changes?.length) {
+            console.log('active products need shopify:reprice:');
+            for (const row of result.active_price_changes) {
+                console.log(`  - ${row.course_id}: ${row.current_price} -> ${row.target_price} ${row.currency}`);
+            }
+        }
+        for (const row of result.active_variant_errors || []) {
+            console.log(`  BLOCKED ${row.course_id}: ${row.reason}`);
+        }
+        if (result.next_step) console.log(`next: ${result.next_step}`);
         if (result.failed?.length) {
             for (const row of result.failed) console.log(`  FAILED ${row.course_id}: ${row.error}`);
         }
@@ -87,6 +101,7 @@ async function main() {
 
     if (!['ok', 'dry_run'].includes(result.status)) process.exitCode = 1;
     else if (result.status === 'partial') process.exitCode = 1;
+    else if (result.status === 'dry_run' && result.ready === false) process.exitCode = 1;
 }
 
 main().catch(error => {

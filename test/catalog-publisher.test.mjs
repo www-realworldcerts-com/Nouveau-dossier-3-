@@ -87,6 +87,8 @@ test('dry-run reports the converted price without requiring a token or writing',
     assert.equal(result.total, 1);
     assert.equal(result.preview[0].price, 17.48);
     assert.equal(result.published, false);
+    assert.equal(result.active_price_check, 'skipped');
+    assert.equal(result.warning, 'active_price_guard_not_evaluated');
 });
 
 test('a course absent from the canonical catalog blocks the publish', async () => {
@@ -140,10 +142,76 @@ test('an existing product at the canonical price is unchanged', async () => {
         settings,
         storeCurrency: 'USD',
         fetchImpl: shopifyFetch({
-            existing: [{ id: 42, handle: 'test-course', variants: [{ id: 7, price: '19.00' }] }]
+            existing: [{ id: 42, handle: 'test-course', status: 'active', variants: [{ id: 7, price: '19.00' }] }]
         })
     });
     assert.equal(result.status, 'ok');
     assert.equal(result.unchanged, 1);
     assert.equal(result.created, 0);
+});
+
+test('dry-run reports active price changes that a real publish would block', async () => {
+    const repriced = {
+        ...catalog,
+        courses: [{ ...catalog.courses[0], price_cents: 2400 }]
+    };
+    const result = await publishCatalogToShopify({
+        catalog: repriced,
+        settings,
+        storeCurrency: 'USD',
+        dryRun: true,
+        fetchImpl: shopifyFetch({
+            existing: [{
+                id: 42,
+                handle: 'test-course',
+                status: 'active',
+                variants: [{ id: 7, price: '19.00' }]
+            }]
+        })
+    });
+
+    assert.equal(result.status, 'dry_run');
+    assert.equal(result.ready, false);
+    assert.equal(result.would_block, true);
+    assert.equal(result.active_price_check, 'evaluated');
+    assert.equal(result.active_price_changes.length, 1);
+    assert.equal(result.active_price_changes[0].current_price, '19.00');
+    assert.equal(result.active_price_changes[0].target_price, '24.00');
+    assert.equal(result.next_step, 'Run `npm run shopify:reprice` to snapshot and change active product prices.');
+});
+
+test('an active product price change blocks the whole publish before any write', async () => {
+    const repriced = {
+        ...catalog,
+        courses: [{ ...catalog.courses[0], price_cents: 2400 }]
+    };
+    let wrote = false;
+    const result = await publishCatalogToShopify({
+        catalog: repriced,
+        settings,
+        storeCurrency: 'USD',
+        fetchImpl: async (url, options = {}) => {
+            const target = String(url);
+            if (target.includes('/shop.json')) return response({ shop: { currency: 'USD' } });
+            if (target.includes('/products.json') && (!options.method || options.method === 'GET')) {
+                return response({
+                    products: [{
+                        id: 42,
+                        handle: 'test-course',
+                        status: 'active',
+                        variants: [{ id: 7, price: '19.00' }]
+                    }]
+                });
+            }
+            wrote = true;
+            throw new Error(`unexpected write: ${target}`);
+        }
+    });
+
+    assert.equal(result.status, 'blocked');
+    assert.equal(result.reason, 'active_product_price_change_requires_reprice');
+    assert.equal(result.active_price_changes.length, 1);
+    assert.equal(result.active_price_changes[0].current_price, '19.00');
+    assert.equal(result.active_price_changes[0].target_price, '24.00');
+    assert.equal(wrote, false);
 });

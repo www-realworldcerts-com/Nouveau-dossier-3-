@@ -25,7 +25,8 @@ export const LAUNCH_REQUIRED_SCOPES = [
     'read_products',
     'read_publications',
     'read_payment_gateways',
-    'read_shopify_payments_accounts'
+    'read_shopify_payments_accounts',
+    'read_markets'
 ];
 
 export function normalizeHost(value) {
@@ -71,6 +72,81 @@ function loadPayoutAttestation(settings) {
 
 function check(id, ok, reason, detail = {}) {
     return { id, ok: Boolean(ok), reason: ok ? null : reason, ...detail };
+}
+
+function apiVersionAtLeast(version, minimum) {
+    const actual = String(version || '').trim();
+    return /^\d{4}-\d{2}$/.test(actual) && actual >= minimum;
+}
+
+/**
+ * The buyer path is country/currency/tax sensitive. Resolve the primary market
+ * once and use its country and presentment currency for the canary. Shopify
+ * exposes market tax inclusion from 2025-10; fall back to the shop-level tax
+ * mode on older API versions so the gate remains usable during an upgrade.
+ */
+export async function readPrimaryMarket(settings, { fetchImpl = globalThis.fetch } = {}) {
+    const includeMarketTax = apiVersionAtLeast(settings.apiVersion, '2025-10');
+    const taxField = includeMarketTax
+        ? 'priceInclusions { inclusiveTaxPricingStrategy }'
+        : '';
+    const data = await adminGraphql(settings, `query LaunchMarketContext {
+        shop { currencyCode taxesIncluded taxShipping }
+        primaryMarket {
+            id
+            name
+            currencySettings {
+                baseCurrency { currencyCode }
+                localCurrencies
+            }
+            regions(first: 10) {
+                nodes {
+                    ... on MarketRegionCountry { code name }
+                }
+            }
+            ${taxField}
+        }
+    }`, { fetchImpl });
+
+    const market = data?.primaryMarket;
+    if (!market) throw new Error('primary market unavailable');
+    const regions = market.regions?.nodes || [];
+    const region = regions.find(row => row?.code) || regions[0] || null;
+    const countryCode = String(region?.code || '').trim().toUpperCase();
+    const countryName = String(region?.name || '').trim();
+    const currency = String(
+        market.currencySettings?.baseCurrency?.currencyCode
+        || data?.shop?.currencyCode
+        || ''
+    ).trim().toUpperCase();
+    if (!countryCode) throw new Error('primary market country unavailable');
+    if (!currency) throw new Error('primary market currency unavailable');
+
+    const strategy = String(market.priceInclusions?.inclusiveTaxPricingStrategy || '').toUpperCase();
+    let taxInclusive = null;
+    let taxSource = null;
+    if (strategy === 'INCLUDES_TAXES_IN_PRICE' || strategy === 'INCLUDES_TAXES_IN_PRICE_BASED_ON_COUNTRY') {
+        taxInclusive = true;
+        taxSource = 'market';
+    } else if (strategy === 'ADD_TAXES_AT_CHECKOUT') {
+        taxInclusive = false;
+        taxSource = 'market';
+    } else if (typeof data?.shop?.taxesIncluded === 'boolean') {
+        taxInclusive = data.shop.taxesIncluded;
+        taxSource = 'shop';
+    }
+
+    return {
+        id: market.id || null,
+        name: market.name || null,
+        country_code: countryCode,
+        country_name: countryName || countryCode,
+        currency,
+        local_currencies: market.currencySettings?.localCurrencies === true,
+        tax_inclusive: taxInclusive,
+        tax_source: taxSource,
+        tax_shipping: typeof data?.shop?.taxShipping === 'boolean' ? data.shop.taxShipping : null
+    };
 }
 
 function gatewaySlug(value) {
@@ -153,9 +229,11 @@ export function assessLaunchReadiness({
     payoutAttestationSource = null,
     paypalVerification = null,
     canary = null,
+    market = null,
     expectedDomain = null,
     catalogCurrency = 'USD',
     storeCurrency = null,
+    marketCurrency = null,
     fx = null,
     selectedCourseIds = []
 } = {}) {
@@ -182,7 +260,23 @@ export function assessLaunchReadiness({
         checks.push(check('scopes', false, 'scopes_unverified'));
     }
 
-    const store = String(storeCurrency || shop?.currency || '').toUpperCase();
+    if (!market) {
+        checks.push(check('primary_market', false, 'primary_market_unavailable'));
+    } else if (typeof market.tax_inclusive !== 'boolean') {
+        checks.push(check('primary_market', false, 'primary_market_tax_unavailable', {
+            country: market.country_code || null,
+            currency: market.currency || null
+        }));
+    } else {
+        checks.push(check('primary_market', true, null, {
+            country: market.country_code || null,
+            currency: market.currency || null,
+            tax_inclusive: market.tax_inclusive,
+            tax_source: market.tax_source || null
+        }));
+    }
+
+    const store = String(marketCurrency || storeCurrency || shop?.currency || '').toUpperCase();
     if (!store) {
         checks.push(check('currency', false, 'currency_unavailable'));
     } else if (store !== catalogCurrency) {
@@ -385,11 +479,18 @@ async function runCanaryCheckout(settings, {
     domain,
     expectedDomain,
     product,
+    market,
     storeCurrency,
     fetchImpl
 }) {
     if (!settings.storefrontToken) {
         return { ok: false, reason: 'missing_storefront_token', mode: 'none' };
+    }
+    if (!market?.country_code || !market?.currency) {
+        return { ok: false, reason: 'primary_market_unavailable', mode: 'storefront_cart' };
+    }
+    if (typeof market.tax_inclusive !== 'boolean') {
+        return { ok: false, reason: 'primary_market_tax_unavailable', mode: 'storefront_cart' };
     }
     const variantId = product?.variants?.[0]?.id;
     if (!variantId) return { ok: false, reason: 'canary_variant_missing', mode: 'storefront_cart' };
@@ -455,7 +556,7 @@ async function runCanaryCheckout(settings, {
     if (!Number.isFinite(variantPrice.amount) || !variantPrice.currency) {
         return { ok: false, reason: 'canary_price_missing', mode: 'storefront_cart' };
     }
-    const expectedCurrency = String(storeCurrency || variantPrice.currency).toUpperCase();
+    const expectedCurrency = String(market.currency || storeCurrency || variantPrice.currency).toUpperCase();
     if (variantPrice.currency !== expectedCurrency) {
         return {
             ok: false,
@@ -469,7 +570,32 @@ async function runCanaryCheckout(settings, {
         return { ok: false, reason: 'canary_shipping_unverified', mode: 'storefront_cart' };
     }
 
-    const countryCode = String(settings.canaryCountryCode || 'US').trim().toUpperCase();
+    const countryCode = String(settings.canaryCountryCode || market.country_code).trim().toUpperCase();
+    const countryName = countryCode === market.country_code
+        ? market.country_name
+        : countryCode;
+    const address = {
+        address1: String(settings.canaryAddress1 || '').trim(),
+        city: String(settings.canaryCity || '').trim(),
+        province: String(settings.canaryProvinceCode || '').trim().toUpperCase(),
+        postal_code: String(settings.canaryPostalCode || '').trim(),
+        country_code: countryCode,
+        country_name: countryName
+    };
+    const missingAddressFields = [
+        !address.address1 && 'address1',
+        !address.city && 'city',
+        !address.province && 'province',
+        !address.postal_code && 'postal_code'
+    ].filter(Boolean);
+    if (missingAddressFields.length) {
+        return {
+            ok: false,
+            reason: 'canary_address_incomplete',
+            mode: 'storefront_cart',
+            missing: missingAddressFields
+        };
+    }
     let data;
     try {
         data = await storefrontGraphql(settings, `mutation LaunchCanary($input: CartInput!) {
@@ -499,7 +625,19 @@ async function runCanaryCheckout(settings, {
             variables: {
                 input: {
                     lines: [{ merchandiseId: variantGid, quantity: 1 }],
-                    buyerIdentity: { countryCode }
+                    buyerIdentity: {
+                        countryCode,
+                        deliveryAddressPreferences: [{
+                            deliveryAddress: {
+                                address1: address.address1,
+                                city: address.city,
+                                province: address.province,
+                                zip: address.postal_code,
+                                country: address.country_name
+                            },
+                            oneTimeUse: true
+                        }]
+                    }
                 }
             },
             fetchImpl
@@ -558,7 +696,12 @@ async function runCanaryCheckout(settings, {
             currency: expectedCurrency
         };
     }
-    if (tax.amount < 0 || total.amount < subtotal.amount + tax.amount) {
+    const expectedTotalFloor = market.tax_inclusive
+        ? subtotal.amount
+        : subtotal.amount + tax.amount;
+    if (tax.amount < 0
+        || total.amount < expectedTotalFloor
+        || (market.tax_inclusive && tax.amount > subtotal.amount)) {
         return {
             ok: false,
             reason: 'canary_total_mismatch',
@@ -566,7 +709,9 @@ async function runCanaryCheckout(settings, {
             subtotal: subtotal.amount,
             tax: tax.amount,
             total: total.amount,
-            currency: expectedCurrency
+            currency: expectedCurrency,
+            tax_inclusive: market.tax_inclusive,
+            expected_total_floor: expectedTotalFloor
         };
     }
 
@@ -627,11 +772,18 @@ async function runCanaryCheckout(settings, {
         http_status: response.status,
         checkout_host: checkoutHost,
         country_code: countryCode,
+        address: {
+            country_code: address.country_code,
+            province_code: address.province,
+            postal_code: address.postal_code
+        },
         available_for_sale: true,
         currently_not_in_stock: variant.currentlyNotInStock === true,
         quantity_available: quantityAvailable,
         requires_shipping: variant.requiresShipping,
         currency: expectedCurrency,
+        tax_inclusive: market.tax_inclusive,
+        tax_source: market.tax_source || null,
         subtotal,
         tax,
         total,
@@ -700,6 +852,7 @@ export async function checkShopifyLaunchReadiness(settings, {
     let collectionProductIds = [];
     let paymentGateways = null;
     let paymentsAccount = null;
+    let market = null;
     const errors = [];
 
     try {
@@ -729,6 +882,11 @@ export async function checkShopifyLaunchReadiness(settings, {
             errors.push(`collection:${redactToken(error.message, settings.token)}`);
         }
         try {
+            market = await readPrimaryMarket(scoped, { fetchImpl });
+        } catch (error) {
+            errors.push(`market:${redactToken(error.message, settings.token)}`);
+        }
+        try {
             paymentGateways = await readPaymentGateways(scoped, { fetchImpl });
         } catch (error) {
             errors.push(`payments:${redactToken(error.message, settings.token)}`);
@@ -755,12 +913,17 @@ export async function checkShopifyLaunchReadiness(settings, {
             reason: 'canary_checkout_skipped_dry_run',
             mode: 'none'
         };
+    } else if (!market) {
+        canary = { ok: false, reason: 'primary_market_unavailable', mode: 'storefront_cart' };
+    } else if (typeof market.tax_inclusive !== 'boolean') {
+        canary = { ok: false, reason: 'primary_market_tax_unavailable', mode: 'storefront_cart' };
     } else if (canaryCourse && canaryProduct) {
         try {
             canary = await runCanaryCheckout(scoped, {
                 domain,
                 expectedDomain,
                 product: canaryProduct,
+                market,
                 storeCurrency: shop?.currency || null,
                 fetchImpl
             });
@@ -804,9 +967,11 @@ export async function checkShopifyLaunchReadiness(settings, {
         payoutAttestationSource: attestation.source,
         paypalVerification,
         canary,
+        market,
         expectedDomain,
         catalogCurrency: catalog.currency,
         storeCurrency: shop?.currency || null,
+        marketCurrency: market?.currency || null,
         fx: catalog.fx,
         selectedCourseIds
     });
@@ -816,6 +981,7 @@ export async function checkShopifyLaunchReadiness(settings, {
         ...assessment,
         storefront: storefront ? { ...storefront, expected_domain: normalizeHost(expectedDomain) } : null,
         collection: collection ? { id: collection.id, handle: collection.handle, product_count: collectionProductIds.length } : null,
+        market,
         canary,
         warnings: [...assessment.warnings, ...errors.map(error => `api_error:${error}`)]
     };

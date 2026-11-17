@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-16
+- `shopify:publish` now fails closed before any write when a selected active
+  product's price differs from the canonical catalog. `--dry-run` evaluates the
+  same guard, lists each current → target price and exits non-zero when a real
+  publish would be blocked; without Admin credentials it marks the check
+  skipped instead of implying the guard passed.
+- Added `shopify:reprice` for active prices: it takes the shared catalog
+  mutation lock, snapshots every prior variant price, updates only active
+  single-variant products, verifies the result and restores the whole snapshot
+  on failure. `--rollback <run-id|latest>` restores a completed run, and
+  refuses to overwrite a price changed outside that run.
+- The Shopify launch gate now resolves the primary market for country,
+  currency and tax mode, requires a complete canary delivery address, and
+  validates canary availability, shipping, tax and totals against that market.
+  Added the `read_markets` scope and the canary address variables.
+
 ## 2026-11-14
 - Added AES-256-GCM encryption at rest for financial JSON fields (IBANs, RIBs,
   bank/account numbers, recipient identities, emails, phones) and encrypted

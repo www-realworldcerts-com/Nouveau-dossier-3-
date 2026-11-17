@@ -38,7 +38,7 @@ links instead of pretending they were automated.
 2. API credentials → copy the **client id** and **client secret**.
 3. Configuration → Admin API integration → enable scopes `read_products`,
    `write_products`, `read_publications`, `write_publications`,
-   `read_payment_gateways`, `read_shopify_payments_accounts`.
+   `read_payment_gateways`, `read_shopify_payments_accounts`, `read_markets`.
 4. Add the redirect URL `http://127.0.0.1:3456/callback`.
 5. Put the credentials in `.env` (gitignored). Start from
    [`env.shopify.template`](../env.shopify.template):
@@ -107,12 +107,23 @@ SHOPIFY_STOREFRONT_ACCESS_TOKEN=...
 SHOPIFY_PRIMARY_DOMAIN=www.realworldcerts.com
 # optional: override the first active course used for the canary
 SHOPIFY_CANARY_COURSE=
-# optional: country used for shipping and tax estimates (default US)
-SHOPIFY_CANARY_COUNTRY_CODE=US
+# required: a deliverable address for shipping and tax estimates
+SHOPIFY_CANARY_ADDRESS1=1 Example Street
+SHOPIFY_CANARY_CITY=New York
+SHOPIFY_CANARY_PROVINCE_CODE=NY
+SHOPIFY_CANARY_POSTAL_CODE=10001
+# optional: override the primary market country
+SHOPIFY_CANARY_COUNTRY_CODE=
 ```
 
+The canary uses the primary market's country and presentment currency. On API
+versions that expose market price inclusions it also uses the market's
+tax-included/excluded mode; older versions fall back to the shop tax mode. The
+full address is sent as a one-time delivery address so the cart returns real
+delivery options and tax for that buyer.
+
 The launch gate reads with `read_products`, `read_publications`,
-`read_payment_gateways` and `read_shopify_payments_accounts`. The publisher
+`read_payment_gateways`, `read_shopify_payments_accounts` and `read_markets`. The publisher
 additionally needs `write_products`; activation publishes drafts to the Online
 Store channel and verifies them, so it needs `write_publications` too. Add those
 scopes to `SHOPIFY_OAUTH_SCOPES` before re-running OAuth if the token was issued
@@ -162,7 +173,36 @@ npm run shopify:publish                # create/update drafts only
 ```
 
 `shopify:publish` never activates a product. New products are created as
-`draft`, so a first run cannot expose an unready catalog.
+`draft`, so a first run cannot expose an unready catalog. It also refuses to
+change the price of an already-active product; the whole publish is blocked
+with `active_product_price_change_requires_reprice` before any write. With
+Admin credentials, `--dry-run` evaluates the same guard, lists every active
+price change and exits non-zero when a real publish would be blocked. Without
+credentials it reports `active_price_check: skipped`.
+
+## Reprice active products
+
+Use the dedicated reprice path after a product is active:
+
+```bash
+npm run shopify:reprice -- --dry-run
+npm run shopify:reprice -- --course <slug>
+npm run shopify:reprice -- --json
+```
+
+Reprice accepts only active products with one variant, takes the shared
+catalog-mutation lock, snapshots every prior price in
+`data/sales/ShopifyRepriceRuns/<run-id>.json`, updates the batch, and verifies
+the resulting prices. Any failed write or verification restores the snapshot.
+A completed run can be rolled back explicitly:
+
+```bash
+npm run shopify:reprice -- --rollback <run-id>
+npm run shopify:reprice -- --rollback latest
+```
+
+Manual rollback refuses to overwrite a price that changed outside that reprice
+run. Draft products still use `shopify:publish` and `shopify:activate`.
 
 ## Step 5 — run the gate and activate
 
@@ -229,18 +269,20 @@ The gate verifies all of the following:
 - every selected course is a member of the `Courses` collection;
 - every selected product is published to the Online Store channel;
 - the canary variant is `availableForSale`, not `currentlyNotInStock`, has a
-  price in the store currency, and has usable inventory data;
-- a country-aware Storefront cart returns subtotal, tax and total amounts in the
-  store currency, the subtotal matches the variant price, and the total is not
-  below the subtotal;
-- a shipping variant has at least one delivery option in the store currency, or
-  the variant explicitly does not require shipping;
+  price in the primary market currency, and has usable inventory data;
+- the configured canary address is complete, including province and postal code;
+- a market-aware Storefront cart returns subtotal, tax and total amounts in the
+  primary market currency, the subtotal matches the variant price, and the total
+  satisfies the market's tax-included or tax-excluded rule;
+- a shipping variant has at least one delivery option in the primary market
+  currency, or the variant explicitly does not require shipping;
 - the resulting checkout URL is reachable.
 
 The canary creates a cart and fetches the checkout URL; it does **not** complete
 a payment or create an order. Missing Storefront credentials or payment/payout
-configuration are blockers, not warnings. `SHOPIFY_CANARY_COUNTRY_CODE`
-controls the delivery/tax context; align it with the store's primary market.
+configuration are blockers, not warnings. The primary market supplies the
+canary country, currency and tax mode; the configured address supplies province
+and postal code, and `SHOPIFY_CANARY_COUNTRY_CODE` is only an override.
 
 Then complete the manual steps from the report:
 
@@ -279,14 +321,18 @@ checks and activates.
 | `missing_storefront_token` | Add a Storefront API access token as `SHOPIFY_STOREFRONT_ACCESS_TOKEN` |
 | `canary_variant_unavailable` | Publish the canary variant to the Online Store channel and make it available for sale |
 | `canary_variant_out_of_stock` | Restock the canary variant or choose a stocked canary course |
-| `canary_shipping_unavailable` | Add a shipping rate for `SHOPIFY_CANARY_COUNTRY_CODE`, or use a non-shipping canary |
+| `canary_shipping_unavailable` | Add a shipping rate for the primary market (or `SHOPIFY_CANARY_COUNTRY_CODE` override), or use a non-shipping canary |
 | `canary_currency_mismatch` | Align the canary market/country with the store currency or fix the variant price |
-| `canary_subtotal_mismatch` | Re-run `npm run shopify:publish` so the canary subtotal matches the variant price |
+| `canary_subtotal_mismatch` | For an active product, run `npm run shopify:reprice`; for a draft, run `npm run shopify:publish` |
 | `canary_total_mismatch` | Fix the cart price/tax configuration; the total must not be below the subtotal |
 | `canary_tax_missing` | Enable tax calculations for the canary market and retry |
+| `canary_address_incomplete` | Set the missing `SHOPIFY_CANARY_ADDRESS1`, `CITY`, `PROVINCE_CODE` or `POSTAL_CODE` values |
+| `primary_market_unavailable` | Confirm the shop has a primary market and the app has `read_markets` |
+| `primary_market_tax_unavailable` | Re-authorize with `read_markets`, or set the shop-level tax mode |
 | `collection_missing_products` | Run `npm run shopify:setup -- --ensure-collection` and `npm run shopify:activate`; activation adds selected products to the collection |
 | `products_not_published` | Run `npm run shopify:publish` first; activation only operates on existing drafts |
-| `variant_validation_failed` | Re-run `npm run shopify:publish` to restore canonical prices, or fix the variant in Shopify; activation reports each mismatch |
+| `variant_validation_failed` | Use `npm run shopify:reprice` for active products, `npm run shopify:publish` for drafts, or fix the variant in Shopify; activation reports each mismatch |
+| `active_product_price_change_requires_reprice` | Run `npm run shopify:reprice` with the snapshot/rollback path; `shopify:publish` will not change an active price |
 | `products_not_published_to_online_store` | Confirm each listed product is visible to the Online Store channel, then rerun `npm run shopify:activate` |
 | `online_store_publication_missing` | Confirm the Online Store sales channel is active and the app has `read_publications` |
 | `publication_set_failed` | Add `write_publications`, confirm the app can edit products, and rerun activation |

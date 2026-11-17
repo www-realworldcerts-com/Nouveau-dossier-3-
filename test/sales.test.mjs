@@ -293,6 +293,28 @@ describe('shopify publisher', () => {
         assert.equal(calls, 1);
     });
 
+    it('refuses to reprice an active product through the publish path', async () => {
+        let calls = 0;
+        const fetchImpl = async () => {
+            calls += 1;
+            throw new Error('active price changes must not reach the API from publish');
+        };
+        await assert.rejects(
+            upsertProduct(course, 24, {
+                settings,
+                existing: [{
+                    id: 42,
+                    handle: 'test-course',
+                    status: 'active',
+                    variants: [{ id: 7, price: '19.00' }]
+                }],
+                fetchImpl
+            }),
+            /ACTIVE_PRODUCT_PRICE_CHANGE_BLOCKED/
+        );
+        assert.equal(calls, 0);
+    });
+
     it('detects the password gate and redacts tokens', () => {
         assert.equal(isPasswordGate('<html><body class="password-page">'), true);
         assert.equal(isPasswordGate('<html><body>catalog</body></html>'), false);

@@ -18,7 +18,11 @@ Options:
   --catalog <file>        Canonical catalog (default config/course-catalog.json)
   --course <slug>         Activate one course (repeatable or comma-separated)
   --canary-course <slug>  Product to activate first for the checkout canary
-  --canary-country <code> Two-letter country for canary shipping/tax (default US)
+  --canary-country <code> Two-letter country override (defaults to primary market)
+  --canary-address1 <line>  Canary street address (required for shipping/tax)
+  --canary-city <city>      Canary city (required for shipping/tax)
+  --canary-province <code>  Canary province/state code (required)
+  --canary-postal-code <zip> Canary postal code (required)
   --payout-attestation <file>  Owner attestation for an external payout provider
   --resume <run-id>       Resume an interrupted activation run (or "latest")
   --dry-run               Report the activation plan without writing to Shopify

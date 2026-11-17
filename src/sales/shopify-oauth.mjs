@@ -21,7 +21,8 @@ export const DEFAULT_SCOPES = [
     'read_publications',
     'write_publications',
     'read_payment_gateways',
-    'read_shopify_payments_accounts'
+    'read_shopify_payments_accounts',
+    'read_markets'
 ];
 export const DEFAULT_PORT = 3456;
 

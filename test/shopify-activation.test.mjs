@@ -22,7 +22,11 @@ const settings = {
     storefrontUrl: 'https://www.realworldcerts.com',
     storefrontToken: 'public-storefront-token',
     expectedDomain: 'realworldcerts.com',
-    canaryCourse: 'test-course'
+    canaryCourse: 'test-course',
+    canaryAddress1: '1 Test Street',
+    canaryCity: 'New York',
+    canaryProvinceCode: 'NY',
+    canaryPostalCode: '10001'
 };
 
 function response(body, status = 200, url = null) {
@@ -59,7 +63,8 @@ function fakeShop({ payments = true, variantPrice = '19.00', variants = null, sh
                     'read_products',
                     'read_publications',
                     'read_payment_gateways',
-                    'read_shopify_payments_accounts'
+                    'read_shopify_payments_accounts',
+                    'read_markets'
                 ].map(handle => ({ handle }))
             });
         }
@@ -97,6 +102,22 @@ function fakeShop({ payments = true, variantPrice = '19.00', variants = null, sh
         if (target.includes('/admin/api/') && target.includes('/graphql.json')) {
             const body = options.body ? JSON.parse(options.body) : {};
             const query = String(body.query || '');
+            if (query.includes('LaunchMarketContext')) {
+                return response({
+                    data: {
+                        shop: { currencyCode: 'USD', taxesIncluded: false, taxShipping: false },
+                        primaryMarket: {
+                            id: 'gid://shopify/Market/1',
+                            name: 'Primary',
+                            currencySettings: {
+                                baseCurrency: { currencyCode: 'USD' },
+                                localCurrencies: false
+                            },
+                            regions: { nodes: [{ code: 'US', name: 'United States' }] }
+                        }
+                    }
+                });
+            }
             if (query.includes('LaunchPublications')) {
                 return response({
                     data: {

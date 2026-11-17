@@ -25,10 +25,12 @@ State lives in `data/sales/jobs/<job_id>/`. Re-running with `--job <id>`
 resumes from the files on disk; nothing is held in memory between runs.
 
 **Publishing authority:** Shopify products always come from
-`config/course-catalog.json` via `npm run shopify:publish`. The MAD tier engine
-below is an offline analysis and repricing tool; it cannot set a Shopify price.
-If a `run` job contains a course id that is absent from the canonical catalog,
-the publisher reports it as failed rather than creating a tier-priced product.
+`config/course-catalog.json` via `npm run shopify:publish` (drafts) and
+`npm run shopify:reprice` (active prices, with snapshot and rollback). The MAD
+tier engine below is an offline analysis and repricing tool; it cannot set a
+Shopify price. If a `run` job contains a course id that is absent from the
+canonical catalog, the publisher reports it as failed rather than creating a
+tier-priced product.
 
 ## Quick start
 
@@ -126,7 +128,9 @@ from `data/sales/course-views.ndjson` (`{course_id, views}`); paid orders from
 | `SALES_LLM_BASE_URL`, `SALES_LLM_MODEL` | OpenAI-compatible endpoint and model |
 | `SHOPIFY_STORE_DOMAIN`, `SHOPIFY_ADMIN_TOKEN` | Shopify Admin API publishing. Token is redacted from every error and report |
 | `SHOPIFY_STOREFRONT_ACCESS_TOKEN` | Storefront API token used for the launch gate's canary cart/checkout |
-| `SHOPIFY_PRIMARY_DOMAIN`, `SHOPIFY_CANARY_COURSE`, `SHOPIFY_CANARY_COUNTRY_CODE` | Expected storefront domain, optional canary course, and country for shipping/tax estimates (default US) |
+| `SHOPIFY_PRIMARY_DOMAIN`, `SHOPIFY_CANARY_COURSE` | Expected storefront domain and optional canary course |
+| `SHOPIFY_CANARY_ADDRESS1`, `SHOPIFY_CANARY_CITY`, `SHOPIFY_CANARY_PROVINCE_CODE`, `SHOPIFY_CANARY_POSTAL_CODE` | Required deliverable canary address; country and currency come from the primary market |
+| `SHOPIFY_CANARY_COUNTRY_CODE` | Optional primary-market country override |
 | `SHOPIFY_API_VERSION` | Shopify API version (default `2024-10`) |
 
 Until `SHOPIFY_ADMIN_TOKEN` is present, `publish` writes prices to
@@ -141,7 +145,8 @@ validates every selected variant against the canonical price and currency,
 publishes selected products to the Online Store channel, activates one canary,
 runs the launch gate, and activates the remaining selected products only when
 the gate passes. The gate checks variant availability/inventory, a
-country-aware cart's shipping, tax, currency and totals, and the checkout URL.
+market-aware cart's full delivery address, shipping, tax mode, currency and
+totals, and the checkout URL.
 Any failure restores the snapshot exactly. Interrupted runs
 can be continued with `--resume <run-id>` or `--resume latest`; reports live in
 `data/sales/ShopifyActivationRuns/`. The gate verifies Shopify Payments

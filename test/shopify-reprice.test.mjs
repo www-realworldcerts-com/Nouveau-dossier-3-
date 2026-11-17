@@ -55,7 +55,7 @@ function tempDir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'shopify-reprice-'));
 }
 
-function fakeShopify({ products, failVariantId = null } = {}) {
+function fakeShopify({ products, failVariantId = null, ignoreUpdates = [] } = {}) {
     let state = structuredClone(products);
     const updates = [];
     const fetchImpl = async (url, options = {}) => {
@@ -72,15 +72,20 @@ function fakeShopify({ products, failVariantId = null } = {}) {
             }
             const body = JSON.parse(options.body);
             const price = body.variant.price;
-            state = state.map(product => ({
-                ...product,
-                variants: product.variants.map(variant =>
-                    String(variant.id) === String(variantId)
-                        ? { ...variant, price }
-                        : variant
-                )
-            }));
-            updates.push({ variant_id: variantId, price });
+            const ignored = ignoreUpdates.some(row =>
+                String(row.variant_id) === String(variantId) && String(row.price) === String(price)
+            );
+            if (!ignored) {
+                state = state.map(product => ({
+                    ...product,
+                    variants: product.variants.map(variant =>
+                        String(variant.id) === String(variantId)
+                            ? { ...variant, price }
+                            : variant
+                    )
+                }));
+            }
+            updates.push({ variant_id: variantId, price, ignored });
             return response({ variant: { id: variantId, price } });
         }
         throw new Error(`unexpected fetch: ${target}`);
@@ -170,12 +175,41 @@ test('a failed update restores every already-changed price', async () => {
     assert.equal(result.reason, 'price_update_failed');
     assert.equal(result.rollback.ok, true);
     assert.equal(result.rollback.restored.length, 1);
+    assert.equal(result.rollback.verification.ok, true);
+    assert.equal(result.rollback.verification.checked, 2);
     assert.equal(shop.products()[0].variants[0].price, '17.00');
     assert.equal(shop.products()[1].variants[0].price, '27.00');
 
     const saved = loadRepriceRun(dataDir, result.run_id);
     assert.equal(saved.status, 'rolled_back');
     assert.equal(saved.rollback.ok, true);
+    assert.equal(saved.rollback.verification.ok, true);
+});
+
+test('rollback fails verification when a variant does not return to its snapshot', async () => {
+    const dataDir = tempDir();
+    const shop = fakeShopify({
+        products: productsAt(),
+        failVariantId: 1002,
+        ignoreUpdates: [{ variant_id: 1001, price: '17.00' }]
+    });
+    const result = await repriceShopifyCatalog({
+        catalog,
+        settings,
+        storeCurrency: 'USD',
+        dataDir,
+        fetchImpl: shop.fetchImpl
+    });
+
+    assert.equal(result.status, 'rollback_failed');
+    assert.equal(result.rollback.ok, false);
+    assert.equal(result.rollback.verification.ok, false);
+    assert.equal(result.rollback.verification.checked, 2);
+    assert.equal(result.rollback.verification.mismatches.length, 1);
+    assert.equal(result.rollback.verification.mismatches[0].reason, 'rollback_price_mismatch');
+    assert.equal(result.rollback.verification.mismatches[0].expected, '17.00');
+    assert.equal(result.rollback.verification.mismatches[0].actual, '19.00');
+    assert.equal(shop.products()[0].variants[0].price, '19.00');
 });
 
 test('manual rollback restores a completed reprice run', async () => {
@@ -200,6 +234,8 @@ test('manual rollback restores a completed reprice run', async () => {
     assert.equal(rolledBack.status, 'rolled_back');
     assert.equal(rolledBack.rollback.ok, true);
     assert.equal(rolledBack.rollback.restored.length, 2);
+    assert.equal(rolledBack.rollback.verification.ok, true);
+    assert.equal(rolledBack.rollback.verification.checked, 2);
     assert.deepEqual(
         shop.products().map(product => product.variants[0].price),
         ['17.00', '27.00']

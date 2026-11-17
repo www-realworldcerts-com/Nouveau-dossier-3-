@@ -202,7 +202,9 @@ npm run shopify:reprice -- --rollback latest
 ```
 
 Manual rollback refuses to overwrite a price that changed outside that reprice
-run. Draft products still use `shopify:publish` and `shopify:activate`.
+run. After restoring, it re-reads every snapshotted variant and reports any
+`rollback_price_mismatch` instead of treating a successful PUT as proof of
+rollback. Draft products still use `shopify:publish` and `shopify:activate`.
 
 ## Step 5 — run the gate and activate
 

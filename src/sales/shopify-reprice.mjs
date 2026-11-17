@@ -225,6 +225,63 @@ async function buildRepricePlan({ catalog, selected, settings, fetchImpl, storeC
     };
 }
 
+async function verifySnapshotPrices(settings, snapshot, { fetchImpl = globalThis.fetch } = {}) {
+    let products;
+    try {
+        products = await listProducts(settings, { fetchImpl });
+    } catch (error) {
+        return {
+            ok: false,
+            checked: 0,
+            verified: [],
+            mismatches: [],
+            error: error.message
+        };
+    }
+
+    const productsById = new Map(products.map(product => [String(product.id), product]));
+    const verified = [];
+    const mismatches = [];
+    for (const row of snapshot) {
+        const product = productsById.get(String(row.product_id));
+        const variant = product?.variants?.find(item => String(item.id) === String(row.variant_id));
+        if (!variant) {
+            mismatches.push({
+                product_id: row.product_id,
+                variant_id: row.variant_id,
+                reason: 'snapshot_target_missing',
+                expected: row.from_price,
+                actual: null
+            });
+            continue;
+        }
+
+        const actual = normalizeVariantPrice(variant.price);
+        if (comparePrice(actual, row.from_price)) {
+            verified.push({
+                product_id: row.product_id,
+                variant_id: row.variant_id,
+                price: actual
+            });
+            continue;
+        }
+        mismatches.push({
+            product_id: row.product_id,
+            variant_id: row.variant_id,
+            reason: 'rollback_price_mismatch',
+            expected: row.from_price,
+            actual
+        });
+    }
+
+    return {
+        ok: mismatches.length === 0,
+        checked: snapshot.length,
+        verified,
+        mismatches
+    };
+}
+
 async function restoreSnapshot(settings, snapshot, { fetchImpl = globalThis.fetch } = {}) {
     const restored = [];
     const skipped = [];
@@ -237,7 +294,14 @@ async function restoreSnapshot(settings, snapshot, { fetchImpl = globalThis.fetc
             ok: false,
             restored,
             skipped,
-            errors: [{ reason: 'products_unavailable', error: error.message }]
+            errors: [{ reason: 'products_unavailable', error: error.message }],
+            verification: {
+                ok: false,
+                checked: 0,
+                verified: [],
+                mismatches: [],
+                error: error.message
+            }
         };
     }
     const productsById = new Map(products.map(product => [String(product.id), product]));
@@ -290,7 +354,16 @@ async function restoreSnapshot(settings, snapshot, { fetchImpl = globalThis.fetc
         }
     }
 
-    return { ok: errors.length === 0, restored, skipped, errors };
+    // A successful PUT is not proof of restoration. Re-read every snapshotted
+    // variant and fail the rollback if any price is still different.
+    const verification = await verifySnapshotPrices(settings, snapshot, { fetchImpl });
+    return {
+        ok: errors.length === 0 && verification.ok,
+        restored,
+        skipped,
+        errors,
+        verification
+    };
 }
 
 async function verifyAppliedPrices(settings, changes, { fetchImpl = globalThis.fetch } = {}) {
@@ -529,7 +602,14 @@ export async function repriceShopifyCatalog({
                     ok: false,
                     restored: [],
                     skipped: [],
-                    errors: [{ reason: 'rollback_failed', error: error.message }]
+                    errors: [{ reason: 'rollback_failed', error: error.message }],
+                    verification: {
+                        ok: false,
+                        checked: 0,
+                        verified: [],
+                        mismatches: [],
+                        error: error.message
+                    }
                 };
             }
             report.status = rollback.ok ? 'rolled_back' : 'rollback_failed';

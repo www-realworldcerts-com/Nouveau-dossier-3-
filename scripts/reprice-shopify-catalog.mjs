@@ -60,6 +60,15 @@ async function main() {
             if (report.reason) console.log(`reason: ${report.reason}`);
             if (report.rollback) {
                 console.log(`restored: ${report.rollback.restored?.length || 0}`);
+                if (report.rollback.verification) {
+                    const verification = report.rollback.verification;
+                    console.log(`verified: ${verification.ok ? 'ok' : 'failed'} ` +
+                        `(${verification.checked || 0} checked)`);
+                    for (const row of verification.mismatches || []) {
+                        console.log(`  MISMATCH product ${row.product_id} variant ${row.variant_id}: ` +
+                            `expected ${row.expected}, got ${row.actual}`);
+                    }
+                }
                 for (const row of report.rollback.errors || []) {
                     console.log(`  FAILED product ${row.product_id}: ${row.reason}${row.error ? ` (${row.error})` : ''}`);
                 }
@@ -113,6 +122,15 @@ async function main() {
         if (report.rollback) {
             console.log(`rollback: ${report.rollback.ok ? 'complete' : 'incomplete'} ` +
                 `(${report.rollback.restored?.length || 0} restored)`);
+            if (report.rollback.verification) {
+                const verification = report.rollback.verification;
+                console.log(`verified: ${verification.ok ? 'ok' : 'failed'} ` +
+                    `(${verification.checked || 0} checked)`);
+                for (const row of verification.mismatches || []) {
+                    console.log(`  MISMATCH product ${row.product_id} variant ${row.variant_id}: ` +
+                        `expected ${row.expected}, got ${row.actual}`);
+                }
+            }
             for (const row of report.rollback.errors || []) {
                 console.log(`  FAILED product ${row.product_id}: ${row.reason}${row.error ? ` (${row.error})` : ''}`);
             }

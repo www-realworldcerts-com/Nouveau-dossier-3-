@@ -10,7 +10,9 @@
   mutation lock, snapshots every prior variant price, updates only active
   single-variant products, verifies the result and restores the whole snapshot
   on failure. `--rollback <run-id|latest>` restores a completed run, and
-  refuses to overwrite a price changed outside that run.
+  refuses to overwrite a price changed outside that run. After rollback it
+  re-reads every snapshotted variant and reports `rollback_price_mismatch` if
+  any price did not return to its original value.
 - The Shopify launch gate now resolves the primary market for country,
   currency and tax mode, requires a complete canary delivery address, and
   validates canary availability, shipping, tax and totals against that market.

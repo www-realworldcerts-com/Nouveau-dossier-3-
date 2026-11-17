@@ -59,14 +59,31 @@ capture amount or currency is missing, the product is unknown or an FX rate is
 unavailable;
 - `price_catalog_error` — the catalog itself could not be read.
 
-This check is read-only. It does not change a catalog, Shopify or PayPal price,
+The audit report also records the canonical `catalog_digest`, making it clear
+which catalog revision the comparison used. This check is read-only. It does
+not change a catalog, Shopify or PayPal price,
 and `--apply` only enqueues missing fulfilment. A mismatch is a
 `PAYPAL_ORDER_PRICE_DRIFT` high finding for the owner to review for a refund,
 collection or acceptance decision.
 
 The purchase path has a separate assertion: `/acp/v1/transactions` charges the
-catalog price, and when the checkout posts the amount/currency it displayed, a
-stale value receives `409 PRICE_CHANGED` before PayPal is called.
+catalog price and requires a short-lived signed price quote binding the product,
+amount, currency, catalog version and content-addressed catalog digest. A
+missing, expired, tampered or stale quote receives `409 PRICE_CHANGED` before
+PayPal is called. New orders store the quote ID and catalog version in
+`custom_id` (for example `product|q=quote-id|v=1`) and the catalog digest in
+`invoice_id` (for example `q=quote-id|d=sha256:...`). Product extraction accepts
+both this structured custom ID and the legacy product-only value, so existing
+orders remain reconcilable.
+
+`reconcileOrderPrice` also exposes `quote_id`, `catalog_version`,
+`catalog_digest`, `catalog_digest_expected` and `catalog_revision`. The
+reconciliation report summarizes `catalog_revision_checked`,
+`catalog_revision_mismatch_count`, `catalog_revision_mismatches` and
+`catalog_revision_unchecked`. A revision mismatch means the order was created
+from a different catalog revision than the one currently loaded; it is reported
+separately from a captured amount mismatch, and legacy orders without a digest
+are unchecked rather than treated as clean or as price drift.
 
 ## Idempotency
 

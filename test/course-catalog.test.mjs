@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+    catalogRevisionDigest,
     loadCourseCatalog,
     priceInCurrency,
     productsFromCatalog,
@@ -49,6 +50,29 @@ test('store prices are derived from USD cents through the catalog FX table', () 
     assert.equal(priceInCurrency(course, 'MAD', catalog.fx).amount, 190);
     assert.equal(priceInCurrency(course, 'EUR', catalog.fx).amount, 17.48);
     assert.throws(() => priceInCurrency(course, 'GBP', catalog.fx), /No FX rate for GBP/);
+});
+
+test('the catalog revision digest is content-addressed and stable across paths and ordering', () => {
+    const fixture = {
+        version: 1,
+        currency: 'USD',
+        fulfillmentCostCents: 200,
+        fx: { USD: 1, MAD: 10 },
+        courses: [
+            { slug: 'course-one', title: 'One', price_cents: 1900, status: 'active' },
+            { slug: 'course-two', title: 'Two', price_cents: 2900, status: 'active' }
+        ]
+    };
+    const digest = catalogRevisionDigest(fixture);
+    assert.match(digest, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(catalogRevisionDigest({ ...fixture, courses: [...fixture.courses].reverse() }), digest);
+    assert.notEqual(catalogRevisionDigest({
+        ...fixture,
+        courses: [{ ...fixture.courses[0], price_cents: 2000 }, fixture.courses[1]]
+    }), digest);
+    assert.notEqual(catalogRevisionDigest({ ...fixture, version: 2 }), digest);
+    assert.notEqual(catalogRevisionDigest({ ...fixture, fx: { USD: 1, MAD: 11 } }), digest);
+    assert.equal(loadCourseCatalog().digest.startsWith('sha256:'), true);
 });
 
 test('the importer collapses duplicate rows and preserves an existing explicit price', () => {

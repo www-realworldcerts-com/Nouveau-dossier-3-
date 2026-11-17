@@ -43,6 +43,15 @@ function response(body, status = 200, headers = undefined) {
     };
 }
 
+function rawResponse(body, status = 200, headers = undefined) {
+    return {
+        ok: status < 400,
+        status,
+        headers,
+        text: async () => String(body)
+    };
+}
+
 function product(slug, price, { id = 1, variantId = 10, currency = 'USD' } = {}) {
     return {
         id,
@@ -59,7 +68,7 @@ function product(slug, price, { id = 1, variantId = 10, currency = 'USD' } = {})
 
 function fakeFetch({ products, shopCurrency = 'USD', checkout = null, checkoutHandler = null, methods = [] } = {}) {
     return async (url, options = {}) => {
-        methods.push({ url: String(url), method: options.method || 'GET', headers: options.headers || {} });
+        methods.push({ url: String(url), method: options.method || 'GET', headers: options.headers || {}, redirect: options.redirect });
         if (String(url).endsWith('/shop.json')) return response({ shop: { currency: shopCurrency } });
         if (String(url).includes('/products.json')) return response({ products });
         if (String(url).includes('/data/store-prices.json')) {
@@ -87,6 +96,7 @@ test('matching catalog, checkout and Shopify prices produce an ok audit', async 
     assert.deepEqual(report.drift, []);
     assert.deepEqual(report.unchecked, []);
     assert.equal(report.checked.catalog_courses, 2);
+    assert.match(report.catalog_digest, /^sha256:[a-f0-9]{64}$/);
     assert.equal(report.checked.checkout_prices, 2);
     assert.equal(report.checked.shopify_products, 2);
     assert.equal(report.checked.shopify_variants, 2);
@@ -318,4 +328,90 @@ test('a missing checkout origin fails closed instead of accepting the edge alone
     assert.match(report.unavailable.join('; '), /checkout_origin_unavailable/);
     assert.equal(report.finding.code, 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
     assert.equal(report.finding.severity, 'medium');
+});
+
+const freshCheckout = { currency: 'USD', prices: { 'course-one': 19, 'course-two': 29 } };
+const healthyShopify = [product('course-one', 19), product('course-two', 29)];
+
+function originAudit(originUrl, checkoutHandler = null, extra = {}) {
+    return auditShopifyPriceDrift({
+        catalog,
+        settings: { ...settings, checkoutOriginUrl: originUrl },
+        fetchImpl: fakeFetch({
+            products: healthyShopify,
+            checkoutHandler: checkoutHandler || (() => response(freshCheckout)),
+            ...extra
+        })
+    });
+}
+
+for (const [name, originUrl, reason] of [
+    ['a non-HTTPS origin is unverified', 'http://origin.example', /checkout_origin_insecure/],
+    ['a malformed origin is unverified', 'not a url', /checkout_origin_invalid/],
+    ['the CDN host cannot be used as the origin', 'https://store.example/data/store-prices.json', /checkout_origin_not_distinct/],
+    ['a www alias of the CDN is the same origin', 'https://www.store.example/data/store-prices.json', /checkout_origin_not_distinct/],
+    ['a private origin is unverified', 'https://127.0.0.1/data/store-prices.json', /checkout_origin_invalid/]
+]) {
+    test(name, async () => {
+        const report = await originAudit(originUrl);
+        assert.equal(report.status, 'unavailable');
+        assert.deepEqual(report.drift, []);
+        assert.match(report.unavailable.join('; '), reason);
+        assert.equal(report.checkout.origin_validation.ok, false);
+        assert.equal(report.checkout.origin.ok, false);
+        assert.equal(report.finding.code, 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
+    });
+}
+
+for (const [name, handler, reason] of [
+    ['a protection challenge is unchecked', url => url.startsWith('https://origin.example/')
+        ? response({ error: 'auth' }, 401)
+        : response(freshCheckout), /origin_protected/],
+    ['an authentication header is unchecked', url => url.startsWith('https://origin.example/')
+        ? rawResponse(JSON.stringify(freshCheckout), 200, { 'www-authenticate': 'Basic realm="preview"' })
+        : response(freshCheckout), /origin_protected/],
+    ['an SSO login page is unchecked', url => url.startsWith('https://origin.example/')
+        ? rawResponse('<!doctype html><html><body>Vercel Authentication: Sign in</body></html>', 200, { 'content-type': 'text/html' })
+        : response(freshCheckout), /origin_sso/],
+    ['a redirect to SSO is unchecked', url => url.startsWith('https://origin.example/')
+        ? response({}, 302, { location: 'https://vercel.com/sso-api' })
+        : response(freshCheckout), /origin_redirected/],
+    ['a CDN cache hit is not a direct origin', url => url.startsWith('https://origin.example/')
+        ? response(freshCheckout, 200, { 'x-vercel-cache': 'HIT' })
+        : response(freshCheckout), /origin_cache_hit/]
+]) {
+    test(name, async () => {
+        const report = await originAudit('https://origin.example', handler);
+        assert.equal(report.status, 'unavailable');
+        assert.deepEqual(report.drift, []);
+        assert.match(report.unavailable.join('; '), reason);
+        assert.equal(report.checkout.origin.ok, false);
+        assert.equal(report.finding.code, 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
+    });
+}
+
+test('an injected checkout payload cannot hide an invalid configured origin', async () => {
+    const report = await auditShopifyPriceDrift({
+        catalog,
+        settings: { ...settings, checkoutOriginUrl: 'http://origin.example' },
+        checkoutPayload: freshCheckout,
+        fetchImpl: fakeFetch({ products: healthyShopify })
+    });
+
+    assert.equal(report.status, 'unavailable');
+    assert.match(report.unavailable.join('; '), /checkout_origin_insecure/);
+    assert.equal(report.finding.code, 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
+});
+
+test('a valid direct origin is fetched without redirects and can be distinguished from the edge', async () => {
+    const methods = [];
+    const report = await originAudit('https://origin.example', null, { methods });
+
+    assert.equal(report.status, 'ok');
+    assert.equal(report.checkout.origin_validation.ok, true);
+    assert.equal(report.checkout.origin_validation.origin_host, 'origin.example');
+    assert.equal(report.checkout.origin_validation.cdn_host, 'store.example');
+    const originCall = methods.find(call => call.url.startsWith('https://origin.example/data/store-prices.json'));
+    assert.ok(originCall);
+    assert.equal(originCall.redirect, 'manual');
 });

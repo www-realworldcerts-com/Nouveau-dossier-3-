@@ -68,10 +68,14 @@ resolution. Resolution history is capped at the most recent 200 entries.
 
 The Shopify audit compares the exact buyer-facing `/data/store-prices.json`
 route, a cache-busted request to that same edge route, and a cache-busted request
-to `CHECKOUT_PRICE_ORIGIN_URL`. It reports `edge.stale_vs_fresh` when the buyer
-edge differs from the cache-busted edge, `edge.differs_from_origin` when the two
-routes disagree, and `origin.differs_from_fresh` when the direct origin is not
-the cache-busted payload. A missing or unreadable origin is
+to `CHECKOUT_PRICE_ORIGIN_URL`. The origin must be public HTTPS on a host
+distinct from the CDN; the audit rejects non-HTTPS or malformed URLs, CDN
+hosts/`www` aliases, private hosts, redirects, HTTP 401/403/407/511 protection
+challenges, SSO/login pages, authentication cookies, HTML responses and CDN
+cache hits. It reports `edge.stale_vs_fresh` when the buyer edge differs from
+the cache-busted edge, `edge.differs_from_origin` when the two routes disagree,
+and `origin.differs_from_fresh` when the direct origin is not the cache-busted
+payload. A missing, invalid, protected or otherwise unverifiable origin is
 `SHOPIFY_PRICE_DRIFT_UNCHECKED`, not a clean result from the edge alone.
 
 ### Payment webhook (P8)

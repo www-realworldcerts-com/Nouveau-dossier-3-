@@ -37,13 +37,15 @@ function paidOrder(overrides = {}) {
     };
 }
 
-function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.00', currency = 'USD' } = {}) {
+function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.00', currency = 'USD', quoteId = null, catalogVersion = null, catalogDigest = null } = {}) {
     return {
         id,
         status: 'COMPLETED',
         payer: { email_address: 'buyer@example.com' },
         purchase_units: [{
             custom_id: productId,
+            ...(quoteId ? { custom_id: `${productId}|q=${quoteId}|v=${catalogVersion ?? 1}` } : {}),
+            ...(catalogDigest ? { invoice_id: `q=${quoteId || 'q_test'}|d=${catalogDigest}` } : {}),
             description: 'Course One',
             amount: { value: amount, currency_code: currency },
             payments: {
@@ -58,7 +60,9 @@ function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.
     };
 }
 
+const CATALOG_DIGEST = `sha256:${'b'.repeat(64)}`;
 const priceCatalog = {
+    digest: CATALOG_DIGEST,
     currency: 'USD',
     fx: { USD: 1, MAD: 10 },
     bySlug: {
@@ -175,6 +179,34 @@ test('a captured amount is compared with the canonical catalog without changing 
     assert.equal(noFx.reason, 'price_unavailable');
 });
 
+test('captured orders prove the catalog revision they were created from', () => {
+    const matching = reconcileOrderPrice(pricedOrder({
+        amount: '19.00',
+        quoteId: 'q_match',
+        catalogVersion: 1,
+        catalogDigest: CATALOG_DIGEST
+    }), { catalog: priceCatalog });
+    assert.equal(matching.status, 'ok');
+    assert.equal(matching.quote_id, 'q_match');
+    assert.equal(matching.catalog_version, '1');
+    assert.equal(matching.catalog_digest, CATALOG_DIGEST);
+    assert.equal(matching.catalog_digest_expected, CATALOG_DIGEST);
+    assert.equal(matching.catalog_revision, 'ok');
+
+    const stale = reconcileOrderPrice(pricedOrder({
+        amount: '19.00',
+        quoteId: 'q_stale',
+        catalogVersion: 1,
+        catalogDigest: `sha256:${'c'.repeat(64)}`
+    }), { catalog: priceCatalog });
+    assert.equal(stale.status, 'ok');
+    assert.equal(stale.catalog_revision, 'mismatch');
+
+    const legacy = reconcileOrderPrice(pricedOrder({ amount: '19.00' }), { catalog: priceCatalog });
+    assert.equal(legacy.status, 'ok');
+    assert.equal(legacy.catalog_revision, 'unchecked');
+});
+
 test('captured price mismatches are reported by reconciliation and never auto-corrected', async () => {
     const queueFile = tempQueue();
     const { api } = fakePaypal({ orders: { 'ORD-PRICE': pricedOrder() } });
@@ -193,8 +225,42 @@ test('captured price mismatches are reported by reconciliation and never auto-co
     assert.equal(report.price_mismatches[0].order_id, 'ORD-PRICE');
     assert.equal(report.price_mismatches[0].expected, 19);
     assert.equal(report.price_mismatches[0].actual, 18);
+    assert.equal(report.catalog_digest, CATALOG_DIGEST);
+    assert.equal(report.catalog_revision_checked, 0);
+    assert.equal(report.catalog_revision_mismatch_count, 0);
     assert.equal(report.missing_count, 1);
     assert.equal(fs.existsSync(queueFile), false);
+});
+
+test('reconciliation reports catalog revision mismatches separately from price mismatches', async () => {
+    const queueFile = tempQueue();
+    const { api } = fakePaypal({
+        orders: {
+            'ORD-REVISION': pricedOrder({
+                id: 'ORD-REVISION',
+                amount: '19.00',
+                quoteId: 'q_revision',
+                catalogVersion: 1,
+                catalogDigest: `sha256:${'d'.repeat(64)}`
+            })
+        }
+    });
+    const report = await reconcilePayPalOrders({
+        paypal: api,
+        orderIds: ['ORD-REVISION'],
+        search: false,
+        now: NOW,
+        queueFile,
+        catalog: priceCatalog,
+        fulfill: queueFulfiller(queueFile)
+    });
+
+    assert.equal(report.price_mismatch_count, 0);
+    assert.equal(report.catalog_revision_checked, 1);
+    assert.equal(report.catalog_revision_mismatch_count, 1);
+    assert.equal(report.catalog_revision_mismatches[0].quote_id, 'q_revision');
+    assert.equal(report.catalog_revision_mismatches[0].catalog_revision, 'mismatch');
+    assert.equal(report.catalog_revision_unchecked.length, 0);
 });
 
 test('dry run reports missing fulfilment and writes nothing', async () => {

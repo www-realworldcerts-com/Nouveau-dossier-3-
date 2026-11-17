@@ -1,4 +1,4 @@
-import { loadCourseCatalog } from './course-catalog.mjs';
+import { catalogRevisionDigest, loadCourseCatalog } from './course-catalog.mjs';
 import { validateVariantPrices } from './shopify-activation.mjs';
 import { getShopCurrency, listProducts, shopifySettingsFromEnv } from './shopify.mjs';
 
@@ -23,6 +23,133 @@ const CHECKOUT_PATH = '/data/store-prices.json';
 
 function normalizeCurrency(value) {
     return String(value || '').trim().toUpperCase();
+}
+
+function hostKey(value) {
+    return String(value || '').toLowerCase().replace(/^www\./, '');
+}
+
+function isPrivateHost(hostname) {
+    const host = String(hostname || '').toLowerCase();
+    if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+    if (host === '0.0.0.0' || host === '::1' || host === '[::1]') return true;
+    if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return true;
+    const match = host.match(/^172\.(\d+)\./);
+    if (match && Number(match[1]) >= 16 && Number(match[1]) <= 31) return true;
+    return false;
+}
+
+/**
+ * Validate the direct-origin target before fetching it. The origin must be a
+ * public HTTPS URL for the same price route, and its host must be genuinely
+ * different from the buyer-facing CDN host. Returning an invalid URL here is
+ * deliberate: a malformed or same-host origin must make the audit unchecked,
+ * never silently fall back to the edge response.
+ */
+export function validateCheckoutOriginUrl(originUrl, checkoutUrl) {
+    const raw = String(originUrl || '').trim();
+    if (!raw) return { ok: false, reason: 'checkout_origin_unavailable: CHECKOUT_PRICE_ORIGIN_URL is not configured' };
+    let origin;
+    try {
+        origin = new URL(raw);
+    } catch {
+        return { ok: false, reason: 'checkout_origin_invalid: CHECKOUT_PRICE_ORIGIN_URL is not a valid URL' };
+    }
+    if (origin.protocol !== 'https:') {
+        return { ok: false, reason: 'checkout_origin_insecure: CHECKOUT_PRICE_ORIGIN_URL must use HTTPS' };
+    }
+    if (origin.username || origin.password) {
+        return { ok: false, reason: 'checkout_origin_invalid: CHECKOUT_PRICE_ORIGIN_URL must not contain credentials' };
+    }
+    if (origin.search || origin.hash) {
+        return { ok: false, reason: 'checkout_origin_invalid: CHECKOUT_PRICE_ORIGIN_URL must not contain a query or fragment' };
+    }
+    if (!origin.hostname || isPrivateHost(origin.hostname)) {
+        return { ok: false, reason: 'checkout_origin_invalid: CHECKOUT_PRICE_ORIGIN_URL must be a public host' };
+    }
+    if (origin.pathname !== '/' && origin.pathname !== CHECKOUT_PATH) {
+        return { ok: false, reason: 'checkout_origin_invalid: CHECKOUT_PRICE_ORIGIN_URL must point at the origin root or /data/store-prices.json' };
+    }
+    origin.pathname = CHECKOUT_PATH;
+
+    let edge;
+    try {
+        edge = new URL(String(checkoutUrl || ''));
+    } catch {
+        return { ok: false, reason: 'checkout_origin_unverified: the buyer-facing CDN URL is missing or invalid' };
+    }
+    if (!edge.hostname || hostKey(edge.hostname) === hostKey(origin.hostname)) {
+        return {
+            ok: false,
+            reason: 'checkout_origin_not_distinct: CHECKOUT_PRICE_ORIGIN_URL must use a host distinct from the buyer-facing CDN'
+        };
+    }
+    return {
+        ok: true,
+        url: origin.toString(),
+        origin_host: origin.hostname,
+        cdn_host: edge.hostname
+    };
+}
+
+function responseHeader(headers, name) {
+    return headerValue(headers, name);
+}
+
+function protectionReason(response, text, requestUrl) {
+    const status = Number(response?.status);
+    const headers = response?.headers;
+    const location = responseHeader(headers, 'location');
+    if (status >= 300 && status < 400) {
+        return `origin_redirected: HTTP ${status}${location ? ` to ${String(location).slice(0, 160)}` : ''}`;
+    }
+    if ([401, 403, 407, 511].includes(status)) {
+        return `origin_protected: HTTP ${status} (authentication or access protection is enabled)`;
+    }
+    if (responseHeader(headers, 'x-vercel-protection')
+        || responseHeader(headers, 'x-vercel-sso')
+        || responseHeader(headers, 'www-authenticate')
+        || responseHeader(headers, 'proxy-authenticate')) {
+        return 'origin_protected: the response is a deployment authentication/SSO challenge';
+    }
+    const cookies = String(responseHeader(headers, 'set-cookie') || '');
+    if (/_vercel_jwt|__Host-next-auth|__session/i.test(cookies)) {
+        return 'origin_protected: the response set an authentication/SSO session cookie';
+    }
+    if (response?.url && requestUrl) {
+        try {
+            const requested = new URL(requestUrl);
+            const final = new URL(response.url);
+            if (hostKey(requested.hostname) !== hostKey(final.hostname)) {
+                return `origin_redirected: the origin redirected to ${final.hostname}`;
+            }
+        } catch { /* the response URL is optional; malformed values are ignored */ }
+    }
+    const contentType = String(responseHeader(headers, 'content-type') || '').toLowerCase();
+    const body = String(text || '').slice(0, 2000);
+    if (/text\/html/i.test(contentType) || /<!doctype html|<html/i.test(body)) {
+        if (/vercel authentication|sign in|single sign-on|sso|authentication required|access denied|log in|login/i.test(body)) {
+            return 'origin_sso: the origin returned a protection or SSO login page instead of the price payload';
+        }
+        return 'origin_html: the origin returned HTML instead of the price payload';
+    }
+    return null;
+}
+
+function originCacheReason(headers) {
+    const vercel = String(responseHeader(headers, 'x-vercel-cache') || '').toUpperCase();
+    const cloudflare = String(responseHeader(headers, 'cf-cache-status') || '').toUpperCase();
+    const xCache = String(responseHeader(headers, 'x-cache') || '').toUpperCase();
+    if (/(^|\b)(HIT|STALE)(\b|$)/.test(vercel)
+        || /(^|\b)(HIT|STALE)(\b|$)/.test(cloudflare)
+        || /(^|\b)HIT(\b|$)/.test(xCache)) {
+        return 'origin_cache_hit: the response came from a CDN cache, not the direct origin';
+    }
+    const age = Number(responseHeader(headers, 'age'));
+    if (Number.isFinite(age) && age > 0) {
+        return 'origin_cache_hit: the response has a non-zero cache age';
+    }
+    return null;
 }
 
 function normalizeCheckoutPayload(payload) {
@@ -70,7 +197,7 @@ function cacheSummary(headers) {
     return summary;
 }
 
-async function readCheckoutView(name, url, { fetchImpl, timeoutMs, cacheBust, nonce }) {
+async function readCheckoutView(name, url, { fetchImpl, timeoutMs, cacheBust, nonce, directOrigin = false }) {
     if (!url) {
         return {
             name,
@@ -86,6 +213,7 @@ async function readCheckoutView(name, url, { fetchImpl, timeoutMs, cacheBust, no
     try {
         const response = await fetchImpl(requestUrl, {
             method: 'GET',
+            redirect: directOrigin ? 'manual' : 'follow',
             headers: {
                 accept: 'application/json',
                 ...(cacheBust ? { 'cache-control': 'no-cache' } : {})
@@ -93,6 +221,12 @@ async function readCheckoutView(name, url, { fetchImpl, timeoutMs, cacheBust, no
             signal: AbortSignal.timeout(timeoutMs)
         });
         const text = await response.text();
+        const protection = protectionReason(response, text, requestUrl);
+        if (protection) throw new Error(protection);
+        if (directOrigin) {
+            const cacheIssue = originCacheReason(response.headers);
+            if (cacheIssue) throw new Error(cacheIssue);
+        }
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${String(text || '').slice(0, 300)}`);
         }
@@ -366,6 +500,7 @@ function buildFinding(report) {
             evidence: {
                 checked_at: report.checked_at,
                 catalog_file: report.catalog_file,
+                catalog_digest: report.catalog_digest,
                 store_currency: report.store_currency,
                 checkout_url: report.checkout.url,
                 checkout: report.checkout,
@@ -386,6 +521,7 @@ function buildFinding(report) {
             evidence: {
                 checked_at: report.checked_at,
                 catalog_file: report.catalog_file,
+                catalog_digest: report.catalog_digest,
                 store_currency: report.store_currency,
                 checkout_url: report.checkout.url,
                 checkout: report.checkout,
@@ -422,12 +558,15 @@ export async function auditShopifyPriceDrift({
     timeoutMs = 15000
 } = {}) {
     const canonical = catalog || loadCourseCatalog(catalogFile);
+    const catalogDigest = canonical.digest || catalogRevisionDigest(canonical);
     const unavailable = [];
     const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const views = [];
+    const originValidation = validateCheckoutOriginUrl(checkoutOriginUrl, checkoutUrl);
     let checkout = {
         url: checkoutUrl || null,
-        origin_url: checkoutOriginUrl || null,
+        origin_url: originValidation.ok ? originValidation.url : (checkoutOriginUrl || null),
+        origin_validation: originValidation,
         currency: null,
         count: 0,
         edge: null,
@@ -449,6 +588,7 @@ export async function auditShopifyPriceDrift({
             payload,
             injected: true
         });
+        if (checkoutOriginUrl && !originValidation.ok) unavailable.push(originValidation.reason);
     } else if (!checkoutUrl) {
         unavailable.push('checkout_unavailable: No checkout payload URL was provided');
     } else {
@@ -466,15 +606,27 @@ export async function auditShopifyPriceDrift({
                 nonce
             })
         ];
-        if (checkoutOriginUrl) {
-            requests.push(readCheckoutView('origin', checkoutOriginUrl, {
+        if (!checkoutOriginUrl) {
+            unavailable.push('checkout_origin_unavailable: CHECKOUT_PRICE_ORIGIN_URL is not configured');
+        } else if (!originValidation.ok) {
+            unavailable.push(originValidation.reason);
+            views.push({
+                name: 'origin',
+                ok: false,
+                skipped: true,
+                requested_url: checkoutOriginUrl,
+                url: null,
+                cache_bust: true,
+                error: originValidation.reason
+            });
+        } else {
+            requests.push(readCheckoutView('origin', originValidation.url, {
                 fetchImpl,
                 timeoutMs,
                 cacheBust: true,
-                nonce
+                nonce,
+                directOrigin: true
             }));
-        } else {
-            unavailable.push('checkout_origin_unavailable: CHECKOUT_PRICE_ORIGIN_URL is not configured');
         }
         views.push(...await Promise.all(requests));
     }
@@ -494,7 +646,8 @@ export async function auditShopifyPriceDrift({
 
     checkout = {
         url: checkoutUrl || null,
-        origin_url: checkoutOriginUrl || null,
+        origin_url: originValidation.ok ? originValidation.url : (checkoutOriginUrl || null),
+        origin_validation: originValidation,
         currency: primary?.currency || null,
         count: primary?.count || 0,
         edge: summarizeView(edge),
@@ -563,6 +716,7 @@ export async function auditShopifyPriceDrift({
         status,
         checked_at: new Date().toISOString(),
         catalog_file: canonical.file || catalogFile || null,
+        catalog_digest: catalogDigest,
         catalog_currency: normalizeCurrency(canonical.currency),
         store_currency: shopify.store_currency,
         checkout,

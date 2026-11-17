@@ -1,6 +1,26 @@
 # Changelog
 
 ## 2026-11-17
+- Hardened the price audit's direct-origin check. `CHECKOUT_PRICE_ORIGIN_URL`
+  must now be a public HTTPS URL for `/data/store-prices.json` on a host distinct
+  from the buyer-facing CDN; non-HTTPS or malformed URLs, credentials, queries,
+  fragments, private hosts, CDN/`www` aliases and unexpected paths are rejected
+  before fetching. The origin request is made without following redirects and
+  rejects protection/SSO responses (401/403/407/511, auth headers/cookies, login
+  pages), HTML, redirects and CDN cache hits. Any unverifiable origin keeps the
+  audit `unavailable` (`SHOPIFY_PRICE_DRIFT_UNCHECKED`) instead of allowing a
+  clean result from the edge alone.
+- Added signed, short-lived checkout price quotes. `/acp/v1/price-quote` binds
+  the product, amount, currency, catalog version and content-addressed catalog
+  digest into a signed, expiring token; `/acp/v1/transactions` now requires that
+  token and rejects a missing, expired, tampered or catalog-mismatched quote
+  with `409 PRICE_CHANGED` before calling PayPal. `/buy` fetches a fresh quote
+  immediately before ordering. The quote ID and catalog version are stored in
+  the PayPal order's `custom_id`, and the catalog digest is stored in
+  `invoice_id`; reconciliation reports catalog revision matches, mismatches and
+  unchecked legacy orders. The endpoint fails closed when
+  `PRICE_QUOTE_SECRET` (or the existing `FULFILLMENT_ACCESS_SECRET` fallback)
+  is not configured.
 - Added a read-only Shopify price-drift audit (`shopify:price-audit`) that
   compares the canonical catalog, the public checkout payload and live Shopify
   variant/presentment prices. It raises `SHOPIFY_PRICE_DRIFT` through the
@@ -11,9 +31,11 @@
   presentment row; missing FX, missing listings, currency gaps and unreadable
   sources are unchecked. The audit now reads the exact buyer-facing edge route
   without a cache buster, the same edge route with a cache-busting nonce, and a
-  direct origin route configured by `CHECKOUT_PRICE_ORIGIN_URL`; it marks
+  direct origin route configured by `CHECKOUT_PRICE_ORIGIN_URL`; the report
+  includes the canonical `catalog_digest`, and it marks
   `edge.stale_vs_fresh`, `edge.differs_from_origin` and
-  `origin.differs_from_fresh`, and fails closed when the origin   is missing or unreadable. The post-tick silent-failure run enables it
+  `origin.differs_from_fresh`, and fails closed when the origin is missing or
+  unreadable. The post-tick silent-failure run enables it
   automatically when a Shopify store domain and Admin token are configured,
   including the scheduled GitHub Actions audit. Silent-failure state now keeps a
   stable fingerprint per drift with independent first-seen/escalation state,
@@ -26,6 +48,11 @@
 - PayPal reconciliation now compares every captured order amount with the
   canonical catalog and raises `PAYPAL_ORDER_PRICE_DRIFT` for a mismatch. It is
   read-only and never changes catalog, Shopify or PayPal prices.
+- Added `checkout:browser-audit`: a Playwright probe that loads the exact `/buy`
+  page on the buyer edge, a cache-busted edge and the direct origin, reads the
+  displayed price, intercepts the checkout POST before PayPal, and verifies the
+  POSTed amount and currency. A stale page or missing POSTed amount is drift;
+  the probe never creates an order or moves money.
 
 ## 2026-11-16
 - `shopify:publish` now fails closed before any write when a selected active

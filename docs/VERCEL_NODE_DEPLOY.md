@@ -50,7 +50,7 @@ The deployment is pinned to Node 22 by `package.json` (`engines.node`).
 the package/config files. `vercel.json` excludes `data/**` and
 `doomsday-vault/**` from the function bundle; without that exclusion the
 function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
-- `FULFILLMENT_ACCESS_SECRET`, `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
+- `PRICE_QUOTE_SECRET` (or `FULFILLMENT_ACCESS_SECRET` as a fallback), `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
 - `SETTLEMENT_LEDGER_PATH`, `FULFILLMENT_QUEUE_FILE` (durable writable paths)
 
 The webhook must be registered in the PayPal dashboard for
@@ -80,10 +80,20 @@ The catalog is the only product source for checkout and Shopify:
 ```
 
 The ACP create endpoint requires a known `product_id` and uses the canonical
-catalog price for the charge. If the page posts the amount and currency it
-displayed, the endpoint requires them to match the catalog; a stale page gets
-`409 PRICE_CHANGED` and no PayPal order is created. Posted values never select
+catalog price for the charge. Before posting the order, `/buy` requests a
+short-lived signed quote from `/acp/v1/price-quote?product_id=...`. The quote
+binds the product, amount, currency, catalog version and content-addressed
+catalog digest; the create endpoint rejects a missing, expired, tampered or
+mismatched quote with `409 PRICE_CHANGED` before creating a PayPal order. The
+quote ID/version are stored in PayPal `custom_id`, and the catalog digest is
+stored in `invoice_id` for reconciliation. If the page also posts the amount and
+currency it displayed, they must match the catalog. Posted values never select
 the charge.
+
+Set `PRICE_QUOTE_SECRET` to a random value. `FULFILLMENT_ACCESS_SECRET` is used
+as a fallback so existing deployments keep working, but a separate secret is
+preferred. Without either secret the quote endpoint fails closed with
+`503 PRICE_QUOTE_UNAVAILABLE` and checkout cannot create an order.
 
 ## Prepaid fulfillment and access delivery
 
@@ -129,8 +139,13 @@ Required for live checkout: `PAYPAL_ENABLE_ORDER_CREATE=true`, `SWARM_LIVE=true`
 `NO_PLATFORM_WALLET=true`, `PAYPAL_MODE=live`, and real PayPal credentials. The
 return URL is derived from the request origin, so `https://www.realworldcerts.com`
 must be the origin buyers use. Set `CHECKOUT_PRICE_ORIGIN_URL` to the direct
-deployment origin (not the CDN hostname) so `shopify:price-audit` can compare the
-buyer-facing edge payload with a cache-busted edge and origin response. Register `https://www.realworldcerts.com/buy/success`
+deployment origin as a public HTTPS URL on a host distinct from the CDN (not a
+`www`/CDN alias, localhost, or a URL with credentials/query/fragment) so
+`shopify:price-audit` can compare the buyer-facing edge payload with a
+cache-busted edge and origin response. The audit rejects protected/SSO, HTML,
+redirected, or CDN-cached origin responses and reports them as unchecked. Use
+`npm run checkout:browser-audit` for the browser-level check of the exact `/buy`
+page and the amount/currency it POSTs. Register `https://www.realworldcerts.com/buy/success`
 as the PayPal return URL only if using a static PayPal button; the `/buy` flow
 sets its own return and cancel URLs.
 

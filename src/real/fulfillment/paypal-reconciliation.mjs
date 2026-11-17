@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { getPayPalOrderDetails, searchTransactions } from '../../paypal-api.mjs';
 import { loadCourseCatalog, priceInCurrency } from '../../sales/course-catalog.mjs';
+import { parsePayPalCustomId, parsePayPalInvoiceId } from '../../sales/price-quote.mjs';
 import { FulfillmentManager } from './FulfillmentManager.mjs';
 
 /**
@@ -80,7 +81,7 @@ export function orderToFulfillment(order) {
     const amount = capture?.amount?.value ?? unit?.amount?.value ?? null;
     return {
         id: order?.id ?? null,
-        product_id: unit?.custom_id ? String(unit.custom_id) : null,
+        product_id: parsePayPalCustomId(unit?.custom_id).productId,
         product: unit?.description || unit?.items?.[0]?.name || 'PayPal order',
         customer_email: order?.payer?.email_address || null,
         revenue: Number(amount),
@@ -101,14 +102,25 @@ export function reconcileOrderPrice(order, { catalog = null, catalogError = null
     const capture = captures.find(item => String(item?.status || '').toUpperCase() === 'COMPLETED') || captures[0] || {};
     const currency = String(capture?.amount?.currency_code || unit?.amount?.currency_code || '').trim().toUpperCase();
     const actual = Number(capture?.amount?.value ?? unit?.amount?.value ?? NaN);
-    const productId = unit?.custom_id ? String(unit.custom_id) : null;
+    const custom = parsePayPalCustomId(unit?.custom_id);
+    const invoice = parsePayPalInvoiceId(unit?.invoice_id);
+    const productId = custom.productId;
+    const expectedCatalogDigest = catalog?.digest || null;
+    const catalogRevision = invoice.catalogDigest && expectedCatalogDigest
+        ? (invoice.catalogDigest === expectedCatalogDigest ? 'ok' : 'mismatch')
+        : 'unchecked';
     const base = {
         order_id: order?.id ?? null,
         product_id: productId,
         product: unit?.description || unit?.items?.[0]?.name || null,
         capture_id: capture?.id || null,
         paid_at: capture?.create_time || order?.update_time || null,
-        currency: currency || null
+        currency: currency || null,
+        quote_id: custom.quoteId || invoice.quoteId || null,
+        catalog_version: custom.catalogVersion || null,
+        catalog_digest: invoice.catalogDigest || null,
+        catalog_digest_expected: expectedCatalogDigest,
+        catalog_revision: catalogRevision
     };
 
     if (!productId) return { ...base, status: 'unchecked', reason: 'missing_product_id' };
@@ -158,7 +170,10 @@ export async function reconcilePayPalOrders({
     const skipped = [];
     const priceMismatches = [];
     const priceUnchecked = [];
+    const catalogRevisionMismatches = [];
+    const catalogRevisionUnchecked = [];
     let priceChecked = 0;
+    let catalogRevisionChecked = 0;
     let priceCatalogError = null;
     let searchError = null;
 
@@ -230,6 +245,14 @@ export async function reconcilePayPalOrders({
             } else {
                 priceChecked += 1;
             }
+            if (price.catalog_revision === 'mismatch') {
+                catalogRevisionMismatches.push(price);
+                catalogRevisionChecked += 1;
+            } else if (price.catalog_revision === 'unchecked') {
+                catalogRevisionUnchecked.push(price);
+            } else {
+                catalogRevisionChecked += 1;
+            }
         }
 
         if (fulfilled.has(String(mapped.id))) continue;
@@ -273,6 +296,11 @@ export async function reconcilePayPalOrders({
         price_mismatches: priceMismatches,
         price_unchecked: priceUnchecked,
         price_catalog_error: priceCatalogError,
+        catalog_digest: priceCatalog?.digest || null,
+        catalog_revision_checked: catalogRevisionChecked,
+        catalog_revision_mismatch_count: catalogRevisionMismatches.length,
+        catalog_revision_mismatches: catalogRevisionMismatches,
+        catalog_revision_unchecked: catalogRevisionUnchecked,
         enqueued,
         failed,
         skipped,

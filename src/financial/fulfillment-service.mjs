@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 
 import { SettlementLedger } from './SettlementLedger.mjs';
 import { FulfillmentManager } from '../real/fulfillment/FulfillmentManager.mjs';
+import { parsePayPalCustomId } from '../sales/price-quote.mjs';
 
 /**
  * Paid-order fulfilment.
@@ -84,7 +85,7 @@ export function capturedOrderDetails(order) {
   const amount = Number(capture?.amount?.value ?? unit?.amount?.value ?? NaN);
   return {
     orderId: order?.id ? String(order.id) : null,
-    productId: unit?.custom_id ? String(unit.custom_id) : null,
+    productId: parsePayPalCustomId(unit?.custom_id).productId,
     productName: String(unit?.description || '').trim() || null,
     amount: Number.isFinite(amount) ? amount : null,
     currency: String(capture?.amount?.currency_code || unit?.amount?.currency_code || 'USD').toUpperCase(),

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -14,6 +15,40 @@ export const DEFAULT_COURSE_CATALOG_FILE = path.join(process.cwd(), 'config', 'c
 
 function normalizeCurrency(value) {
     return String(value || '').trim().toUpperCase();
+}
+
+function canonicalJson(value) {
+    if (value === null || value === undefined) return 'null';
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    if (typeof value === 'object') {
+        return `{${Object.keys(value)
+            .filter(key => value[key] !== undefined)
+            .sort()
+            .map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+            .join(',')}}`;
+    }
+    if (typeof value === 'number' && !Number.isFinite(value)) return 'null';
+    return JSON.stringify(value);
+}
+
+/**
+ * Content-addressed revision of the canonical catalog. The digest is stable
+ * across file paths and course ordering, but changes when any catalog content
+ * (including the human-facing version) changes. Prices and FX are part of the
+ * hashed content, so a quote can prove the exact price book it was issued from.
+ */
+export function catalogRevisionDigest(catalog) {
+    const courses = Array.isArray(catalog?.courses)
+        ? [...catalog.courses].sort((a, b) => String(a?.slug || '').localeCompare(String(b?.slug || '')))
+        : [];
+    const projection = {
+        version: catalog?.version ?? 1,
+        currency: normalizeCurrency(catalog?.currency),
+        fulfillment_cost_cents: catalog?.fulfillmentCostCents ?? 0,
+        fx: catalog?.fx || {},
+        courses
+    };
+    return `sha256:${crypto.createHash('sha256').update(canonicalJson(projection)).digest('hex')}`;
 }
 
 function normalizeCourse(raw, index) {
@@ -68,7 +103,7 @@ export function loadCourseCatalog(file = process.env.COURSE_CATALOG_FILE || DEFA
     }
     if (!Number.isFinite(fx[currency])) fx[currency] = 1;
 
-    return {
+    const catalog = {
         file: resolved,
         version: raw.version ?? 1,
         currency,
@@ -77,6 +112,8 @@ export function loadCourseCatalog(file = process.env.COURSE_CATALOG_FILE || DEFA
         courses,
         bySlug
     };
+    catalog.digest = catalogRevisionDigest(catalog);
+    return catalog;
 }
 
 /**

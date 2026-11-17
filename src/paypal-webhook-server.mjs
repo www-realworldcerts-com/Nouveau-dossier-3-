@@ -24,7 +24,15 @@ import { createDedupeStore } from "./dedupe-store.mjs";
 import { enforceAuthorityProtocol } from "./authority.mjs";
 import { addSecurityHeaders, validateRequest, validateAuth } from "./security-middleware.mjs";
 import { escapeHtml, fulfillPaidOrder, verifyAccessToken } from "./financial/fulfillment-service.mjs";
-import { productsFromCatalog, storefrontPricePayload } from "./sales/course-catalog.mjs";
+import { loadCourseCatalog, productsFromCatalog, storefrontPricePayload } from "./sales/course-catalog.mjs";
+import {
+  createPriceQuote,
+  encodePayPalCustomId,
+  encodePayPalInvoiceId,
+  parsePayPalCustomId,
+  parsePayPalInvoiceId,
+  verifyPriceQuote
+} from "./sales/price-quote.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -108,6 +116,18 @@ function getPathname(req) {
   } catch {
     return "/";
   }
+}
+
+function getSearchParams(req) {
+  try {
+    return new URL(req?.url ?? "/", "http://localhost").searchParams;
+  } catch {
+    return new URLSearchParams();
+  }
+}
+
+function priceQuoteSecret() {
+  return process.env.PRICE_QUOTE_SECRET || process.env.FULFILLMENT_ACCESS_SECRET || "";
 }
 
 function bufferToText(value) {
@@ -225,16 +245,22 @@ function shouldCreatePayPalOrders() {
   return (process.env.PAYPAL_ENABLE_ORDER_CREATE ?? "false").toLowerCase() === "true";
 }
 
-async function createPayPalCheckoutOrder({ amount, currency, description, customId, productId, returnUrl, cancelUrl }) {
+async function createPayPalCheckoutOrder({ amount, currency, description, customId, productId, quoteId, catalogVersion, catalogDigest, returnUrl, cancelUrl }) {
   const token = await getPayPalAccessToken();
+  const customIdValue = quoteId
+    ? encodePayPalCustomId({ productId: productId || customId, quoteId, catalogVersion })
+    : (productId || customId ? String(productId || customId).slice(0, 127) : null);
+  const invoiceIdValue = quoteId
+    ? (encodePayPalInvoiceId({ quoteId, catalogDigest }) || (customId ? String(customId).slice(0, 127) : null))
+    : (customId ? String(customId).slice(0, 127) : null);
   const purchaseUnit = {
     amount: {
       currency_code: currency,
       value: Number(amount).toFixed(2)
     },
     ...(description ? { description } : {}),
-    ...(productId || customId ? { custom_id: String(productId || customId).slice(0, 127) } : {}),
-    ...(customId ? { invoice_id: String(customId).slice(0, 127) } : {})
+    ...(customIdValue ? { custom_id: customIdValue } : {}),
+    ...(invoiceIdValue ? { invoice_id: invoiceIdValue } : {})
   };
   const body = {
     intent: "CAPTURE",
@@ -349,11 +375,21 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
       requestBody.amount = Number(selected.price);
       requestBody.currency = String(selected.currency || 'USD');
     }
-    fetch('/acp/v1/transactions', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(requestBody)
-    }).then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); }).then(function(result){
+    fetch('/acp/v1/price-quote?product_id=' + encodeURIComponent(productId), {cache:'no-store'})
+      .then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); })
+      .then(function(result){
+        var quote = result.body || {};
+        if (result.status >= 300 || quote.ok !== true || !quote.quote) {
+          throw new Error(quote.error || ('Price quote failed (HTTP ' + result.status + ')'));
+        }
+        requestBody.price_quote = quote.quote;
+        return fetch('/acp/v1/transactions', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(requestBody)
+        });
+      })
+      .then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); }).then(function(result){
       var body = result.body || {};
       if (result.status >= 300 || body.ok !== true) throw new Error(body.error || ('Checkout failed (HTTP ' + result.status + ')'));
       var approval = body.payment_instructions && body.payment_instructions.approval_url;
@@ -1407,6 +1443,7 @@ if (args.check === true || args["config-check"] === true) {
         products: Array.isArray(products) ? products : [],
         endpoints: {
           checkout: "/buy",
+          price_quote: "/acp/v1/price-quote?product_id=:id",
           initiate_transaction: "/acp/v1/transactions",
           capture_transaction: "/acp/v1/transactions/:id/capture",
           transaction_status: "/acp/v1/transactions/:id",
@@ -1414,6 +1451,55 @@ if (args.check === true || args["config-check"] === true) {
         },
         compliance: { sbds: "1.0", direct_settlement: true, no_intermediaries: true }
       });
+      return;
+    }
+
+    if (pathname === "/acp/v1/price-quote") {
+      if (req.method !== "GET") {
+        json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      const productId = getSearchParams(req).get("product_id");
+      if (!productId) {
+        json(res, 400, { ok: false, error: "product_id is required" });
+        return;
+      }
+      const secret = priceQuoteSecret();
+      if (!secret) {
+        json(res, 503, { ok: false, code: "PRICE_QUOTE_UNAVAILABLE", error: "Price quoting is not configured (set PRICE_QUOTE_SECRET)" });
+        return;
+      }
+      try {
+        const catalog = loadCourseCatalog();
+        const course = catalog.bySlug[String(productId)];
+        if (!course) {
+          json(res, 404, { ok: false, error: "Unknown product_id" });
+          return;
+        }
+        const currency = normalizeCurrency(catalog.currency, String(process.env.PAYPAL_CURRENCY ?? "USD"));
+        const quote = createPriceQuote({
+          productId: course.slug,
+          amountCents: course.price_cents,
+          currency,
+          catalogVersion: catalog.version,
+          catalogDigest: catalog.digest,
+          ttlSeconds: process.env.PRICE_QUOTE_TTL_SECONDS
+        }, secret);
+        json(res, 200, {
+          ok: true,
+          protocol: "ACP-1.0",
+          quote: quote.token,
+          quote_id: quote.quote_id,
+          product_id: course.slug,
+          amount: { value: (course.price_cents / 100).toFixed(2), currency },
+          currency,
+          catalog_version: String(catalog.version),
+          catalog_digest: quote.catalog_digest,
+          expires_at: quote.expires_at
+        });
+      } catch (error) {
+        json(res, 503, { ok: false, code: "PRICE_QUOTE_UNAVAILABLE", error: error?.message ?? String(error) });
+      }
       return;
     }
 
@@ -1449,7 +1535,9 @@ if (args.check === true || args["config-check"] === true) {
         const units = Array.isArray(order?.purchase_units) ? order.purchase_units : [];
         const captures = units.flatMap((unit) => Array.isArray(unit?.payments?.captures) ? unit.payments.captures : []);
         const amount = captures[0]?.amount ?? units[0]?.amount ?? null;
-        const productId = units[0]?.custom_id ? String(units[0].custom_id) : null;
+        const custom = parsePayPalCustomId(units[0]?.custom_id);
+        const invoice = parsePayPalInvoiceId(units[0]?.invoice_id);
+        const productId = custom.productId;
         const product = productId ? publicProducts().find((item) => String(item.id ?? '') === productId) || null : null;
         const fulfill = shouldFulfillPaidOrders();
         let fulfillment = null;
@@ -1469,6 +1557,9 @@ if (args.check === true || args["config-check"] === true) {
           transaction_id: order?.id ?? orderId,
           status: order?.status ?? null,
           amount: amount ? { value: amount.value ?? null, currency: amount.currency_code ?? amount.currency ?? null } : null,
+          quote_id: custom.quoteId || invoice.quoteId || null,
+          catalog_version: custom.catalogVersion || null,
+          catalog_digest: invoice.catalogDigest || null,
           captures: captures.map((capture) => ({
             id: capture?.id ?? null,
             status: capture?.status ?? null,
@@ -1563,23 +1654,82 @@ if (args.check === true || args["config-check"] === true) {
         return;
       }
 
-      const productId = body.product_id ?? body.productId ?? null;
+      const quoteToken = body.price_quote ?? body.priceQuote ?? body.quote ?? null;
+      if (!quoteToken) {
+        json(res, 400, {
+          ok: false,
+          code: "PRICE_QUOTE_REQUIRED",
+          error: "A fresh price quote is required. Refresh checkout and try again."
+        });
+        return;
+      }
+      const quoteSecret = priceQuoteSecret();
+      if (!quoteSecret) {
+        json(res, 503, { ok: false, code: "PRICE_QUOTE_UNAVAILABLE", error: "Price quoting is not configured (set PRICE_QUOTE_SECRET)" });
+        return;
+      }
+      const verifiedQuote = verifyPriceQuote(quoteToken, quoteSecret);
+      if (!verifiedQuote.ok) {
+        json(res, 409, {
+          ok: false,
+          code: "PRICE_CHANGED",
+          error: "The price quote is invalid or expired. Refresh checkout and try again.",
+          quote_error: verifiedQuote.reason
+        });
+        return;
+      }
+      const quote = verifiedQuote.quote;
+      const productId = body.product_id ?? body.productId ?? quote.p;
       if (!productId) {
         json(res, 400, { ok: false, error: "product_id is required" });
         return;
       }
-      const picked = publicProducts().find((item) => String(item.id ?? "") === String(productId));
+      let catalog;
+      try {
+        catalog = loadCourseCatalog();
+      } catch (error) {
+        json(res, 503, { ok: false, code: "PRICE_CATALOG_UNAVAILABLE", error: error?.message ?? String(error) });
+        return;
+      }
+      const picked = catalog.bySlug[String(productId)];
       if (!picked) {
         json(res, 400, { ok: false, error: "Unknown product_id" });
         return;
       }
-      const amount = Number(picked.price);
+      const amount = Number(picked.price_cents) / 100;
       if (!Number.isFinite(amount) || amount <= 0) {
         json(res, 400, { ok: false, error: "Product price is not configured" });
         return;
       }
 
-      const currency = normalizeCurrency(picked.currency, String(process.env.PAYPAL_CURRENCY ?? "USD"));
+      const currency = normalizeCurrency(catalog.currency, String(process.env.PAYPAL_CURRENCY ?? "USD"));
+      const catalogVersion = String(catalog.version);
+      const catalogDigest = String(catalog.digest);
+      if (String(quote.p) !== String(picked.slug)
+          || Number(quote.a) !== Number(picked.price_cents)
+          || String(quote.c) !== currency
+          || String(quote.cv) !== catalogVersion
+          || String(quote.cd) !== catalogDigest) {
+        json(res, 409, {
+          ok: false,
+          code: "PRICE_CHANGED",
+          error: "The price quote no longer matches the catalog. Refresh checkout and try again.",
+          product_id: String(picked.slug),
+          expected: {
+            value: amount.toFixed(2),
+            currency,
+            catalog_version: catalogVersion,
+            catalog_digest: catalogDigest
+          },
+          quote: {
+            value: (Number(quote.a) / 100).toFixed(2),
+            currency: String(quote.c),
+            catalog_version: String(quote.cv),
+            catalog_digest: String(quote.cd)
+          }
+        });
+        return;
+      }
       const submittedAmountRaw = body.amount ?? body.total ?? body.price ?? null;
       const hasSubmittedAmount = submittedAmountRaw !== null && submittedAmountRaw !== undefined && submittedAmountRaw !== "";
       const submittedAmount = hasSubmittedAmount ? Number(submittedAmountRaw) : null;
@@ -1603,7 +1753,7 @@ if (args.check === true || args["config-check"] === true) {
           ok: false,
           code: "PRICE_CHANGED",
           error: "The price changed. Refresh checkout and try again.",
-          product_id: String(picked.id),
+          product_id: String(picked.slug),
           expected: { value: amount.toFixed(2), currency },
           submitted: {
             value: hasSubmittedAmount ? Number(submittedAmount).toFixed(2) : null,
@@ -1612,7 +1762,7 @@ if (args.check === true || args["config-check"] === true) {
         });
         return;
       }
-      const description = String(picked.name || "").trim() || null;
+      const description = String(picked.title || "").trim() || null;
       const customId = String(body.reference ?? body.custom_id ?? body.customId ?? `acp_${Date.now()}`).slice(0, 120);
       const returnUrl = String(body.return_url ?? body.returnUrl ?? process.env.PAYPAL_RETURN_URL ?? "").trim();
       const cancelUrl = String(body.cancel_url ?? body.cancelUrl ?? process.env.PAYPAL_CANCEL_URL ?? "").trim();
@@ -1626,7 +1776,10 @@ if (args.check === true || args["config-check"] === true) {
         currency,
         description,
         customId,
-        productId: picked.id,
+        productId: picked.slug,
+        quoteId: quote.qid,
+        catalogVersion,
+        catalogDigest,
         returnUrl,
         cancelUrl
       });
@@ -1637,7 +1790,17 @@ if (args.check === true || args["config-check"] === true) {
         protocol: "ACP-1.0",
         transaction_id: order?.id ?? null,
         amount: { value: amount.toFixed(2), currency },
-        payment_instructions: { method: "paypal_order", approval_url: approvalUrl, custom_id: customId },
+        quote_id: quote.qid,
+        catalog_version: catalogVersion,
+        catalog_digest: catalogDigest,
+        payment_instructions: {
+          method: "paypal_order",
+          approval_url: approvalUrl,
+          custom_id: customId,
+          quote_id: quote.qid,
+          catalog_version: catalogVersion,
+          catalog_digest: catalogDigest
+        },
         order: { id: order?.id ?? null, status: order?.status ?? null }
       });
       return;

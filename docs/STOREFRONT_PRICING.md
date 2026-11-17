@@ -45,7 +45,8 @@ path.
 ```
 
 - `src/sales/course-catalog.mjs` validates the catalog and derives checkout
-  products, storefront prices and Shopify store-currency amounts.
+  products, storefront prices, Shopify store-currency amounts and the
+  content-addressed catalog digest.
 - `src/sales/course-catalog.mjs` is imported directly by checkout and Shopify.
 - `/data/store-prices.json` is the server route for static pages.
 - `scripts/generate-course-catalog.mjs` imports `data/catalog.json` into the
@@ -148,7 +149,8 @@ The page lookup only fixes what the customer sees. The payment-intent endpoint m
 
 - `src/paypal-webhook-server.mjs` reads `config/course-catalog.json`.
 - `/buy` renders server-owned products and posts the amount/currency it displayed.
-- `/acp/v1/transactions` requires a known `product_id` and charges `product.price`; a posted `amount`/`currency` must match the catalog or the request is rejected with `409 PRICE_CHANGED` before PayPal is called.
+- `/buy` first requests a short-lived signed quote from `/acp/v1/price-quote?product_id=...`, binding the product, amount, currency, catalog version and content-addressed catalog digest.
+- `/acp/v1/transactions` requires a known `product_id` and charges `product.price`; a missing, expired or mismatched quote, or a posted `amount`/`currency` that does not match the catalog, is rejected with `409 PRICE_CHANGED` before PayPal is called. The quote ID and catalog version are stored in PayPal `custom_id`; the catalog digest is stored in `invoice_id` so reconciliation can prove the exact catalog revision.
 - `/acp/v1/transactions/:id/capture` captures the server-created order.
 - `npm run reconcile:paypal` compares captured orders with the catalog in a read-only report and never changes a price.
 
@@ -164,7 +166,7 @@ Deploy the static site and `/data/store-prices.json` together, then purge `/cata
 4. A stale displayed amount is rejected with `409 PRICE_CHANGED` before a PayPal order exists.
 5. An unknown slug shows “Price unavailable” and cannot submit.
 6. A capture creates a `$19.00` capture, credits revenue, prepays fulfillment, and sends the access email.
-7. `shopify:price-audit` reads the buyer edge route, a cache-busted edge route and `CHECKOUT_PRICE_ORIGIN_URL`; all agree and no edge/origin stale marker is reported.
+7. `shopify:price-audit` reads the buyer edge route, a cache-busted edge route and a validated public-HTTPS `CHECKOUT_PRICE_ORIGIN_URL` on a host distinct from the CDN; all agree, the report includes the canonical `catalog_digest`, the origin is not redirected/protected/SSO/HTML/cache-hit, and no edge/origin stale marker is reported.
 
 ## Known limitations
 

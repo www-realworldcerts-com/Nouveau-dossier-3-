@@ -6,6 +6,7 @@ const probe = String.raw`
 import handler from './api/index.mjs';
 
 globalThis.__orderCreateCalls = 0;
+globalThis.__orderBodies = [];
 globalThis.fetch = async (url, init = {}) => {
   const target = String(url);
   if (target.includes('/v1/oauth2/token')) {
@@ -16,6 +17,7 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (target.endsWith('/v2/checkout/orders')) {
     globalThis.__orderCreateCalls += 1;
+    globalThis.__orderBodies.push(JSON.parse(init.body || '{}'));
     return new Response(JSON.stringify({
       id: 'ORDER-NEW',
       status: 'CREATED',
@@ -60,10 +62,20 @@ function call(url, method = 'GET', body = '{}') {
 const buy = await call('/buy');
 const discovery = await call('/acp/v1/discovery');
 const prices = await call('/data/store-prices.json');
+const quote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank');
+const quoteBody = JSON.parse(quote.body);
+const missing = await call('/acp/v1/transactions', 'POST', JSON.stringify({
+  product_id: 'financial-risk-manager-test-bank',
+  amount: 19,
+  currency: 'USD',
+  return_url: 'https://www.realworldcerts.com/buy/success',
+  cancel_url: 'https://www.realworldcerts.com/buy/cancel'
+}));
 const stale = await call('/acp/v1/transactions', 'POST', JSON.stringify({
   product_id: 'financial-risk-manager-test-bank',
   amount: 0.01,
   currency: 'EUR',
+  price_quote: quoteBody.quote,
   return_url: 'https://www.realworldcerts.com/buy/success',
   cancel_url: 'https://www.realworldcerts.com/buy/cancel'
 }));
@@ -71,11 +83,12 @@ const create = await call('/acp/v1/transactions', 'POST', JSON.stringify({
   product_id: 'financial-risk-manager-test-bank',
   amount: 19,
   currency: 'USD',
+  price_quote: quoteBody.quote,
   return_url: 'https://www.realworldcerts.com/buy/success',
   cancel_url: 'https://www.realworldcerts.com/buy/cancel'
 }));
 const capture = await call('/acp/v1/transactions/ORDER-TEST/capture', 'POST');
-process.stdout.write(JSON.stringify({ buy, discovery, prices, stale, create, capture, order_create_calls: globalThis.__orderCreateCalls }) + '\n');
+process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, missing, stale, create, capture, order_create_calls: globalThis.__orderCreateCalls, order_bodies: globalThis.__orderBodies }) + '\n');
 `;
 
 function runProbe() {
@@ -94,7 +107,8 @@ function runProbe() {
             PAYPAL_MODE: 'live',
             SWARM_LIVE: 'true',
             NO_PLATFORM_WALLET: 'true',
-            OWNER_PAYPAL_EMAIL: 'owner@example.com'
+            OWNER_PAYPAL_EMAIL: 'owner@example.com',
+            PRICE_QUOTE_SECRET: 'quote-test-secret'
         }
     });
 }
@@ -115,6 +129,8 @@ test('the checkout page is reachable and calls the order API', () => {
     assert.match(probe.buy.body, /Checkout could not start/);
     assert.match(probe.buy.body, /requestBody\.amount = Number/);
     assert.match(probe.buy.body, /requestBody\.currency = String/);
+    assert.match(probe.buy.body, /\/acp\/v1\/price-quote/);
+    assert.match(probe.buy.body, /requestBody\.price_quote = quote\.quote/);
 });
 
 test('checkout discovery and the public payload use the explicit price file', () => {
@@ -124,6 +140,29 @@ test('checkout discovery and the public payload use the explicit price file', ()
     assert.equal(product.price, 19);
     assert.equal(product.currency, 'USD');
     assert.equal(JSON.parse(probe.prices.body).prices['financial-risk-manager-test-bank'], 19);
+    assert.equal(discovery.endpoints.price_quote, '/acp/v1/price-quote?product_id=:id');
+});
+
+test('ACP issues a short-lived quote bound to the catalog price and version', () => {
+    const probe = result();
+    assert.equal(probe.quote.status, 200);
+    const body = JSON.parse(probe.quote.body);
+    assert.equal(body.ok, true);
+    assert.equal(body.product_id, 'financial-risk-manager-test-bank');
+    assert.deepEqual(body.amount, { value: '19.00', currency: 'USD' });
+    assert.equal(body.catalog_version, '1');
+    assert.match(body.catalog_digest, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(typeof body.quote_id, 'string');
+    assert.equal(typeof body.quote, 'string');
+    assert.ok(Date.parse(body.expires_at) > Date.now());
+});
+
+test('ACP rejects checkout without a price quote before calling PayPal', () => {
+    const probe = result();
+    assert.equal(probe.missing.status, 400);
+    const body = JSON.parse(probe.missing.body);
+    assert.equal(body.code, 'PRICE_QUOTE_REQUIRED');
+    assert.equal(probe.order_create_calls, 1, 'only the quoted checkout may call PayPal');
 });
 
 test('ACP checkout rejects a stale displayed amount before creating a PayPal order', () => {
@@ -142,6 +181,14 @@ test('ACP checkout accepts the displayed amount when it matches the catalog', ()
     assert.equal(probe.create.status, 200);
     const body = JSON.parse(probe.create.body);
     assert.deepEqual(body.amount, { value: '19.00', currency: 'USD' });
+    const issued = JSON.parse(probe.quote.body);
+    assert.equal(body.quote_id, issued.quote_id);
+    assert.equal(body.catalog_version, '1');
+    assert.equal(body.catalog_digest, issued.catalog_digest);
+    const unit = probe.order_bodies[0].purchase_units[0];
+    assert.match(unit.custom_id, /financial-risk-manager-test-bank\|q=q_/);
+    assert.match(unit.custom_id, /\|v=1$/);
+    assert.equal(unit.invoice_id, `q=${issued.quote_id}|d=${issued.catalog_digest}`);
 });
 
 test('an approved PayPal order can be captured and reports COMPLETED', () => {

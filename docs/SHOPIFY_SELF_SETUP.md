@@ -219,14 +219,21 @@ npm run shopify:price-audit -- \
   --checkout-origin-url https://your-deployment.vercel.app
 ```
 
-`CHECKOUT_PRICE_ORIGIN_URL` (or `--checkout-origin-url`) must point at the
-deployment origin that serves the same `/data/store-prices.json` route. The
-audit fetches the exact buyer-facing edge URL without a cache buster, fetches
-that same edge URL with a unique `_price_audit` query, and fetches the origin
-with the same cache buster and `cache-control: no-cache`. This catches a stale
-CDN copy even when the cache-busted edge and origin agree with the catalog. If
-the origin is not configured or cannot be read, the audit is `unavailable` and
-cannot report a clean result from the edge alone.
+`CHECKOUT_PRICE_ORIGIN_URL` (or `--checkout-origin-url`) must be a public
+**HTTPS** URL for the deployment that serves the same
+`/data/store-prices.json` route, and its host must be distinct from the
+buyer-facing CDN host. A non-HTTPS URL, malformed URL, credentials, query or
+fragment, private/localhost host, unexpected path, or a host that aliases the
+CDN is rejected before any request. The audit fetches the exact buyer-facing
+edge URL without a cache buster, fetches that same edge URL with a unique
+`_price_audit` query, and fetches the validated origin with the same cache
+buster and `cache-control: no-cache` without following redirects. A redirect,
+HTTP 401/403/407/511 protection challenge, SSO login page, authentication
+cookie, HTML response, or CDN cache hit is treated as an unverifiable origin.
+This catches a stale CDN copy even when the cache-busted edge and origin agree
+with the catalog. If the origin is not configured, fails validation or cannot
+be read, the audit is `unavailable` (`SHOPIFY_PRICE_DRIFT_UNCHECKED`) and cannot
+report a clean result from the edge alone.
 
 The audit only issues GET requests. It fails closed with a high-severity
 `SHOPIFY_PRICE_DRIFT` only when a comparable amount actually differs:
@@ -242,8 +249,9 @@ rates, missing checkout/product/variant data, currency gaps, extra checkout
 courses and unreadable sources are `SHOPIFY_PRICE_DRIFT_UNCHECKED` (medium), not
 high-severity drift.
 
-The report records the edge, cache-busted edge and origin responses separately,
-including cache headers. It marks `edge.stale_vs_fresh` when the buyer-facing
+The report records the canonical `catalog_digest` plus the edge, cache-busted
+edge and origin responses separately, including cache headers. It marks
+`edge.stale_vs_fresh` when the buyer-facing
 payload is not the payload a fresh request returns, `edge.differs_from_origin`
 when the two routes disagree, and `origin.differs_from_fresh` when the direct
 origin is not the cache-busted payload. Exit code 2 means a real price divergence
@@ -257,6 +265,36 @@ command. The manual form remains available for a one-off check:
 ```bash
 npm run resilience -- audit --shopify-price-drift
 ```
+
+### Browser checkout audit
+
+The JSON audit cannot see stale `/buy` HTML or inline JavaScript. Run the browser
+probe against the same three routes:
+
+```bash
+npm run checkout:browser-audit -- \
+  --product-id certified-blockchain-expert-cbe-preptest-2025 \
+  --buy-url https://www.realworldcerts.com/buy \
+  --buy-origin-url https://your-deployment.vercel.app/buy
+```
+
+It loads the exact page in Chromium, reads the selected option's displayed price,
+intercepts the checkout POST before it reaches `/acp/v1/transactions`, and checks
+the POSTed `amount` and `currency`. The cache-busted edge and origin requests use
+a `_price_audit` nonce. The intercepted POST is answered locally with an error;
+no PayPal order is created and no money moves. A page that displays the right
+price but omits the POSTed amount fails with `posted_amount_missing`.
+
+The probe uses Playwright and its Chromium browser. Install them in the audit
+environment, not in the production runtime:
+
+```bash
+npm install --no-save playwright
+npx playwright install chromium
+```
+
+Exit code 2 means a displayed or POSTed price differs, 1 means a route or the
+browser probe could not be verified, and 0 means every route agrees.
 
 ## Step 5 — run the gate and activate
 

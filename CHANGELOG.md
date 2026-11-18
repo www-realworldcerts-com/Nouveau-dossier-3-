@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-11-18
+- Returned a retryable `409 CHECKOUT_IN_PROGRESS` when another instance is still
+  creating the order for a quote instead of letting the attempt registry's
+  conflict surface as an unhandled `500`. The response carries `retryable`,
+  `retry_after_ms`, `quote_id`, `request_id` and a `Retry-After` header, and the
+  failed request still creates no order. `CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS`
+  tunes how long a request waits for the competing creator first.
+- Made quote-to-order attempt idempotency durable and shared. With
+  `CHECKOUT_ATTEMPT_STORE_DIR` set, a checkout attempt is claimed through an
+  exclusive lock file and its order is published with an atomic rename, so a
+  replay after a restart or on another instance returns the stored order instead
+  of creating a second PayPal order. A crashed claim goes stale after 60 seconds
+  and a failed creation releases the claim for retry. Without the directory the
+  registry stays in process memory.
+- Checked both quote currencies, top-level `currency` and `amount.currency`,
+  against the catalog instead of letting a correct one hide a wrong one; each
+  mismatch is reported with the field that is wrong.
+- Pinned both buyer-facing price-audit reads (edge and cache-busted edge) to the
+  DNS-verified CDN address through the HTTPS request, and reject every 3xx
+  instead of following it. A rebinding DNS answer or a redirect to a private
+  address now leaves the read unchecked and is never fetched. The CDN host is
+  resolved once per audit and that snapshot also feeds the origin-distinctness
+  check, so the two proofs cannot disagree.
+
 ## 2026-11-17
 - Required the cache-busted edge read to prove it was a cache miss. The audit
   accepts explicit `MISS`/`BYPASS`/`DYNAMIC` cache status with no non-zero

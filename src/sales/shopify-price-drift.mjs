@@ -121,7 +121,8 @@ async function resolveHostRecords(host, resolver, timeoutMs) {
  */
 export async function verifyCheckoutOriginDns(originUrl, checkoutUrl, {
     dnsResolver = dnsPromises,
-    timeoutMs = 3000
+    timeoutMs = 3000,
+    edgeRecords = null
 } = {}) {
     let origin;
     let edge;
@@ -140,7 +141,7 @@ export async function verifyCheckoutOriginDns(originUrl, checkoutUrl, {
     try {
         [originDns, edgeDns] = await Promise.all([
             resolveHostRecords(origin.hostname, dnsResolver, timeoutMs),
-            resolveHostRecords(edge.hostname, dnsResolver, timeoutMs)
+            edgeRecords ? Promise.resolve(edgeRecords) : resolveHostRecords(edge.hostname, dnsResolver, timeoutMs)
         ]);
     } catch (error) {
         return {
@@ -322,16 +323,70 @@ export function validateCheckoutOriginUrl(originUrl, checkoutUrl) {
     };
 }
 
+/**
+ * Resolve the buyer-facing CDN host once, before any edge read, and return the
+ * public address the reads must pin. Fetching the edge with a normal fetch
+ * re-resolves the host at connect time and follows redirects, so a rebinding
+ * DNS answer or a 3xx could send the cache-busted read to a private address.
+ */
+export async function verifyCheckoutEdgeHost(checkoutUrl, {
+    dnsResolver = dnsPromises,
+    timeoutMs = 3000
+} = {}) {
+    let edge;
+    try {
+        edge = new URL(String(checkoutUrl || ''));
+    } catch {
+        return { ok: false, reason: 'checkout_edge_unverified: the buyer-facing CDN URL is invalid' };
+    }
+    if (edge.protocol !== 'https:') {
+        return { ok: false, reason: 'checkout_edge_insecure: the buyer-facing CDN URL must use HTTPS' };
+    }
+    if (edge.username || edge.password) {
+        return { ok: false, reason: 'checkout_edge_invalid: the buyer-facing CDN URL must not contain credentials' };
+    }
+    if (!edge.hostname || isPrivateHost(edge.hostname)) {
+        return { ok: false, reason: 'checkout_edge_private_address: the buyer-facing CDN URL must be a public host' };
+    }
+
+    let records;
+    try {
+        records = await resolveHostRecords(edge.hostname, dnsResolver, timeoutMs);
+    } catch (error) {
+        return { ok: false, reason: `checkout_edge_dns_unverified: ${error?.message || String(error)}` };
+    }
+    if (!records.addresses.length) {
+        return { ok: false, reason: 'checkout_edge_dns_unverified: the buyer-facing CDN host did not resolve to an address' };
+    }
+    const privateAddress = records.addresses.find(isPrivateAddress);
+    if (privateAddress) {
+        return {
+            ok: false,
+            reason: `checkout_edge_private_address: the buyer-facing CDN host resolves to the private address ${privateAddress}`,
+            host: edge.hostname,
+            records
+        };
+    }
+    return {
+        ok: true,
+        url: edge.toString(),
+        host: edge.hostname,
+        address: records.addresses[0],
+        // Reused by the origin check, so both proofs see one DNS snapshot.
+        records
+    };
+}
+
 function responseHeader(headers, name) {
     return headerValue(headers, name);
 }
 
-function protectionReason(response, text, requestUrl) {
+function protectionReason(response, text, requestUrl, { redirectLabel = 'origin' } = {}) {
     const status = Number(response?.status);
     const headers = response?.headers;
     const location = responseHeader(headers, 'location');
     if (status >= 300 && status < 400) {
-        return `origin_redirected: HTTP ${status}${location ? ` to ${String(location).slice(0, 160)}` : ''}`;
+        return `${redirectLabel}_redirected: HTTP ${status}${location ? ` to ${String(location).slice(0, 160)}` : ''}`;
     }
     if ([401, 403, 407, 511].includes(status)) {
         return `origin_protected: HTTP ${status} (authentication or access protection is enabled)`;
@@ -351,7 +406,7 @@ function protectionReason(response, text, requestUrl) {
             const requested = new URL(requestUrl);
             const final = new URL(response.url);
             if (hostKey(requested.hostname) !== hostKey(final.hostname)) {
-                return `origin_redirected: the origin redirected to ${final.hostname}`;
+                return `${redirectLabel}_redirected: the response redirected to ${final.hostname}`;
             }
         } catch { /* the response URL is optional; malformed values are ignored */ }
     }
@@ -468,12 +523,11 @@ function cacheSummary(headers) {
 }
 
 async function readCheckoutView(name, url, {
-    fetchImpl,
     timeoutMs,
     cacheBust,
     nonce,
+    pinnedAddress,
     directOrigin = false,
-    pinnedAddress = null,
     originRequestImpl = requestPinnedUrl
 }) {
     if (!url) {
@@ -493,17 +547,18 @@ async function readCheckoutView(name, url, {
         ...(cacheBust ? { 'cache-control': 'no-cache' } : {})
     };
     try {
-        if (directOrigin && !pinnedAddress) throw new Error('origin_pin_missing: no verified origin address');
-        const response = directOrigin
-            ? await originRequestImpl(requestUrl, { address: pinnedAddress, timeoutMs, headers })
-            : await fetchImpl(requestUrl, {
-                method: 'GET',
-                redirect: 'follow',
-                headers,
-                signal: AbortSignal.timeout(timeoutMs)
-            });
+        // Every read goes to the address that was verified before the fetch: the
+        // request never follows a redirect and never re-resolves the host, so a
+        // rebinding answer or a 3xx cannot move the audit to another address.
+        const response = await originRequestImpl(requestUrl, {
+            address: pinnedAddress,
+            timeoutMs,
+            headers
+        });
         const text = await response.text();
-        const protection = protectionReason(response, text, requestUrl);
+        const protection = protectionReason(response, text, requestUrl, {
+            redirectLabel: directOrigin ? 'origin' : 'checkout_edge'
+        });
         if (protection) throw new Error(protection);
         if (directOrigin) {
             const cacheIssue = originCacheReason(response.headers);
@@ -530,6 +585,7 @@ async function readCheckoutView(name, url, {
             currency: payload.currency,
             count: Object.keys(payload.prices).length,
             cache: cacheSummary(response.headers),
+            ...(pinnedAddress ? { pinned_address: pinnedAddress } : {}),
             ...(freshness ? { freshness } : {}),
             payload
         };
@@ -670,9 +726,18 @@ async function auditPriceQuotes(canonical, catalogDigest, {
             issues.push({ reason: 'quote_product_mismatch', expected: productId, actual: body.product_id ?? null });
         }
 
-        const currency = normalizeCurrency(body.amount?.currency || body.currency);
-        if (currency !== expectedCurrency) {
-            issues.push({ reason: 'quote_currency_mismatch', expected: expectedCurrency, actual: currency || null });
+        // The contract carries the currency twice. Check each present field
+        // against the catalog instead of letting a correct one mask a wrong one.
+        const topLevelCurrency = normalizeCurrency(body.currency);
+        const amountCurrency = normalizeCurrency(body.amount?.currency);
+        const currency = amountCurrency || topLevelCurrency;
+        if (!currency) {
+            issues.push({ reason: 'quote_currency_mismatch', field: 'currency', expected: expectedCurrency, actual: null });
+        }
+        for (const [field, value] of [['currency', topLevelCurrency], ['amount.currency', amountCurrency]]) {
+            if (value && value !== expectedCurrency) {
+                issues.push({ reason: 'quote_currency_mismatch', field, expected: expectedCurrency, actual: value });
+            }
         }
 
         const actualAmount = Number(body.amount?.value);
@@ -905,6 +970,18 @@ function payloadFingerprint(payload) {
     return `${payload.currency}|${prices}`;
 }
 
+function skippedView(name, url, cacheBust, reason) {
+    return {
+        name,
+        ok: false,
+        skipped: true,
+        requested_url: url,
+        url: null,
+        cache_bust: cacheBust,
+        error: reason
+    };
+}
+
 function summarizeView(view) {
     if (!view) return null;
     const summary = {
@@ -919,6 +996,7 @@ function summarizeView(view) {
     if (view.currency) summary.currency = view.currency;
     if (view.ok) summary.count = view.count;
     if (view.cache && Object.keys(view.cache).length) summary.cache = view.cache;
+    if (view.pinned_address) summary.pinned_address = view.pinned_address;
     if (view.freshness) summary.freshness = view.freshness;
     if (view.error) summary.error = view.error;
     return summary;
@@ -1047,25 +1125,25 @@ export async function auditShopifyPriceDrift({
     const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const views = [];
     const urlValidation = validateCheckoutOriginUrl(checkoutOriginUrl, checkoutUrl);
+    // A supplied payload stands in for the edge reads, so the CDN is not contacted.
+    const injected = checkoutPayload !== undefined && checkoutPayload !== null;
+    // Resolve the buyer-facing host once: that snapshot pins the address of
+    // every edge read and proves the origin is not the same infrastructure.
+    const edgeValidation = !injected && checkoutUrl
+        ? await verifyCheckoutEdgeHost(checkoutUrl, { dnsResolver, timeoutMs: dnsTimeoutMs })
+        : null;
     const dnsValidation = checkoutUrl && urlValidation.ok
-        ? await verifyCheckoutOriginDns(urlValidation.url, checkoutUrl, { dnsResolver, timeoutMs: dnsTimeoutMs })
+        ? await verifyCheckoutOriginDns(urlValidation.url, checkoutUrl, {
+            dnsResolver,
+            timeoutMs: dnsTimeoutMs,
+            edgeRecords: edgeValidation?.records || null
+        })
         : null;
     const originValidation = dnsValidation
         ? { ...urlValidation, ...dnsValidation, url: urlValidation.url }
         : urlValidation;
-    let checkout = {
-        url: checkoutUrl || null,
-        origin_url: originValidation.ok ? originValidation.url : (checkoutOriginUrl || null),
-        origin_validation: originValidation,
-        currency: null,
-        count: 0,
-        edge: null,
-        edge_fresh: null,
-        origin: null,
-        routes: []
-    };
 
-    if (checkoutPayload !== undefined && checkoutPayload !== null) {
+    if (injected) {
         const payload = normalizeCheckoutPayload(checkoutPayload);
         views.push({
             name: 'checkout',
@@ -1082,45 +1160,46 @@ export async function auditShopifyPriceDrift({
     } else if (!checkoutUrl) {
         unavailable.push('checkout_unavailable: No checkout payload URL was provided');
     } else {
-        const requests = [
-            readCheckoutView('edge', checkoutUrl, {
-                fetchImpl,
-                timeoutMs,
-                cacheBust: false,
-                nonce
-            }),
-            readCheckoutView('edge_fresh', checkoutUrl, {
-                fetchImpl,
-                timeoutMs,
-                cacheBust: true,
-                nonce
-            })
-        ];
+        const reads = [];
+        if (edgeValidation.ok) {
+            reads.push(
+                readCheckoutView('edge', checkoutUrl, {
+                    timeoutMs,
+                    cacheBust: false,
+                    nonce,
+                    pinnedAddress: edgeValidation.address,
+                    originRequestImpl
+                }),
+                readCheckoutView('edge_fresh', checkoutUrl, {
+                    timeoutMs,
+                    cacheBust: true,
+                    nonce,
+                    pinnedAddress: edgeValidation.address,
+                    originRequestImpl
+                })
+            );
+        } else {
+            // Without a verified public address neither edge read is attempted.
+            unavailable.push(edgeValidation.reason);
+            views.push(skippedView('edge', checkoutUrl, false, edgeValidation.reason));
+            views.push(skippedView('edge_fresh', checkoutUrl, true, edgeValidation.reason));
+        }
         if (!checkoutOriginUrl) {
             unavailable.push('checkout_origin_unavailable: CHECKOUT_PRICE_ORIGIN_URL is not configured');
         } else if (!originValidation.ok) {
             unavailable.push(originValidation.reason);
-            views.push({
-                name: 'origin',
-                ok: false,
-                skipped: true,
-                requested_url: checkoutOriginUrl,
-                url: null,
-                cache_bust: true,
-                error: originValidation.reason
-            });
+            views.push(skippedView('origin', checkoutOriginUrl, true, originValidation.reason));
         } else {
-            requests.push(readCheckoutView('origin', originValidation.url, {
-                fetchImpl,
+            reads.push(readCheckoutView('origin', originValidation.url, {
                 timeoutMs,
                 cacheBust: true,
                 nonce,
-                directOrigin: true,
                 pinnedAddress: originValidation.address,
+                directOrigin: true,
                 originRequestImpl
             }));
         }
-        views.push(...await Promise.all(requests));
+        views.push(...await Promise.all(reads));
     }
 
     const edge = views.find(view => view.name === 'edge');
@@ -1140,10 +1219,11 @@ export async function auditShopifyPriceDrift({
         if (!view.ok && !view.skipped) unavailable.push(`${failureName(view)}: ${view.error}`);
     }
 
-    checkout = {
+    const checkout = {
         url: checkoutUrl || null,
         origin_url: originValidation.ok ? originValidation.url : (checkoutOriginUrl || null),
         origin_validation: originValidation,
+        edge_validation: edgeValidation,
         currency: primary?.currency || null,
         count: primary?.count || 0,
         edge: summarizeView(edge),
@@ -1151,7 +1231,7 @@ export async function auditShopifyPriceDrift({
         origin: summarizeView(origin),
         routes: views.filter(view => view.name === 'checkout' || view.name === 'edge' || view.name === 'edge_fresh' || view.name === 'origin').map(view => view.name)
     };
-    if (checkoutPayload !== undefined && checkoutPayload !== null) {
+    if (injected) {
         checkout.edge = summarizeView(views[0]);
     }
     if (edge?.ok && edgeFreshVerified) {

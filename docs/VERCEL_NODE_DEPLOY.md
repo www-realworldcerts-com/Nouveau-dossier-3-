@@ -52,6 +52,10 @@ the package/config files. `vercel.json` excludes `data/**` and
 function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
 - `PRICE_QUOTE_SECRET` and optional `PRICE_QUOTE_KEY_ID`, `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
 - `SETTLEMENT_LEDGER_PATH`, `FULFILLMENT_QUEUE_FILE` (durable writable paths)
+- `CHECKOUT_ATTEMPT_STORE_DIR` (durable directory shared by every instance, so
+  quote replay protection survives restarts)
+- Optional `CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS` (how long a checkout waits for a
+  competing creator before answering `409 CHECKOUT_IN_PROGRESS`; default 10000)
 - Optional legacy quote reconciliation allowlist: `PAYPAL_LEGACY_QUOTE_ORDER_IDS` (comma-separated) or `PAYPAL_QUOTE_REQUIRED_AFTER` (ISO timestamp)
 
 The webhook must be registered in the PayPal dashboard for
@@ -105,7 +109,18 @@ signed URLs and rejects a body that tries to change either one with
 origin, if different) for every buyer-facing domain you operate.
 
 Set `PRICE_QUOTE_SECRET` to a random value and give it a stable name in
-`PRICE_QUOTE_KEY_ID` (default `primary`). Outside `NODE_ENV=development`, the
+`PRICE_QUOTE_KEY_ID` (default `primary`). Checkout attempts are idempotent per
+quote: replaying a quote returns the order created by the first request. Set
+`CHECKOUT_ATTEMPT_STORE_DIR` to a directory on durable storage that every
+instance sees, so a replay is deduplicated after a restart or on another
+instance. The store claims a creation with an exclusive lock file and publishes
+the order with an atomic rename, so the volume must support atomic exclusive
+create. While another instance still holds that claim, the create endpoint
+answers `409 CHECKOUT_IN_PROGRESS` with `retryable: true`, a `retry_after_ms`
+value and a `Retry-After` header instead of a `500`; the page retries the same
+request with the same quote, and the retry replays the order once it is
+published. Without the directory, replay protection stays in process memory and
+a restart can create a second order for a reused quote. Outside `NODE_ENV=development`, the
 fulfillment access secret is not used as a quote-secret fallback; without a
 quote secret the endpoint fails closed with `503 PRICE_QUOTE_UNAVAILABLE` and
 checkout cannot create an order.

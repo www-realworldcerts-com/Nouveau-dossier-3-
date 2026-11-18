@@ -231,6 +231,31 @@ test('quote contract mismatches make the audit unchecked instead of green', asyn
     assert.equal(report.finding.code, 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
 });
 
+test('a wrong top-level quote currency is reported even when amount.currency agrees', async () => {
+    const report = await auditShopifyPriceDrift({
+        catalog,
+        settings,
+        checkoutPayload: { currency: 'USD', prices: { 'course-one': 19, 'course-two': 29 } },
+        fetchImpl: fakeFetch({
+            products: healthyShopify,
+            quoteHandler: url => new URL(url).searchParams.get('product_id') === 'course-one'
+                ? quoteResponse(url, { currency: 'EUR' })
+                : quoteResponse(url)
+        })
+    });
+
+    const currencyIssues = report.unchecked.filter(row => row.reason === 'quote_currency_mismatch');
+    assert.equal(currencyIssues.length, 1);
+    assert.equal(currencyIssues[0].course_id, 'course-one');
+    assert.equal(currencyIssues[0].field, 'currency');
+    assert.equal(currencyIssues[0].expected, 'USD');
+    assert.equal(currencyIssues[0].actual, 'EUR');
+    assert.equal(report.quote.checked_products, 1);
+    assert.equal(report.quote.unchecked_products, 1);
+    assert.equal(report.status, 'unavailable');
+    assert.equal(report.finding.code, 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
+});
+
 test('an unavailable quote endpoint makes the audit unchecked', async () => {
     const report = await auditShopifyPriceDrift({
         catalog,
@@ -346,12 +371,15 @@ test('a missing FX rate is unchecked instead of high-severity drift', async () =
 });
 
 test('an unreadable checkout source is unchecked, not clean or high-severity drift', async () => {
+    const fetchImpl = fakeFetch({
+        products: [product('course-one', 19), product('course-two', 29)]
+    });
     const report = await auditShopifyPriceDrift({
         catalog,
         settings,
-        fetchImpl: fakeFetch({
-            products: [product('course-one', 19), product('course-two', 29)]
-        })
+        dnsResolver: fakeDns(),
+        fetchImpl,
+        originRequestImpl: fakeOriginRequest(fetchImpl)
     });
 
     assert.equal(report.status, 'unavailable');
@@ -467,13 +495,16 @@ test('a stale origin payload is drift even when the edge is fresh', async () => 
 });
 
 test('a missing checkout origin fails closed instead of accepting the edge alone', async () => {
+    const fetchImpl = fakeFetch({
+        products: [product('course-one', 19), product('course-two', 29)],
+        checkout: { currency: 'USD', prices: { 'course-one': 19, 'course-two': 29 } }
+    });
     const report = await auditShopifyPriceDrift({
         catalog,
         settings,
-        fetchImpl: fakeFetch({
-            products: [product('course-one', 19), product('course-two', 29)],
-            checkout: { currency: 'USD', prices: { 'course-one': 19, 'course-two': 29 } }
-        })
+        dnsResolver: fakeDns(),
+        fetchImpl,
+        originRequestImpl: fakeOriginRequest(fetchImpl)
     });
 
     assert.equal(report.status, 'unavailable');
@@ -651,14 +682,19 @@ test('an explicit Cloudflare cache miss proves edge freshness', async () => {
     assert.equal(report.checkout.edge_fresh.freshness.evidence.header, 'cf-cache-status');
 });
 
-test('the verified origin address is pinned into the request and is not resolved again', async () => {
+test('the verified origin and edge addresses are pinned into the request and resolved once', async () => {
     const dnsResolver = fakeDns();
     let originLookups = 0;
+    let edgeLookups = 0;
     const resolve4 = dnsResolver.resolve4;
     dnsResolver.resolve4 = async host => {
         if (host === 'origin.example') {
             originLookups += 1;
             return originLookups === 1 ? ['198.51.100.20'] : ['10.0.0.7'];
+        }
+        if (host === 'store.example') {
+            edgeLookups += 1;
+            return ['203.0.113.10'];
         }
         return resolve4(host);
     };
@@ -673,9 +709,15 @@ test('the verified origin address is pinned into the request and is not resolved
 
     assert.equal(report.status, 'ok');
     assert.equal(originLookups, 1);
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].address, '198.51.100.20');
-    assert.match(requests[0].url, /_price_audit=/);
+    assert.equal(edgeLookups, 1, 'the edge host is resolved once and shared with the origin check');
+    const originRequests = requests.filter(row => row.url.startsWith('https://origin.example/'));
+    const edgeRequests = requests.filter(row => row.url.startsWith('https://store.example/'));
+    assert.equal(originRequests.length, 1);
+    assert.equal(originRequests[0].address, '198.51.100.20');
+    assert.match(originRequests[0].url, /_price_audit=/);
+    assert.equal(edgeRequests.length, 2);
+    assert.ok(edgeRequests.every(row => row.address === '203.0.113.10'));
+    assert.equal(report.checkout.edge.pinned_address, '203.0.113.10');
 });
 
 for (const [name, address, reason] of [
@@ -714,8 +756,11 @@ test('a buyer-facing CDN resolving to a private address is unchecked', async () 
 
     assert.equal(report.status, 'unavailable');
     assert.match(report.unavailable.join('; '), /checkout_origin_dns_unverified/);
+    assert.match(report.unavailable.join('; '), /checkout_edge_private_address/);
     assert.equal(report.checkout.origin.ok, false);
+    assert.equal(report.checkout.edge.ok, false);
     assert.ok(!methods.some(call => call.url.startsWith('https://origin.example/')), 'the origin is never fetched');
+    assert.ok(!methods.some(call => call.url.startsWith('https://store.example/data/store-prices.json')), 'the private CDN is never fetched');
 });
 
 for (const [name, dnsResolver, reason] of [
@@ -754,3 +799,66 @@ for (const [name, dnsResolver, reason] of [
         assert.ok(!methods.some(call => call.url.startsWith('https://alternate-cdn.example/')), 'the untrusted origin is never fetched');
     });
 }
+
+test('a rebinding buyer-facing CDN is pinned to the verified address', async () => {
+    const dnsResolver = fakeDns();
+    let edgeLookups = 0;
+    const resolve4 = dnsResolver.resolve4;
+    dnsResolver.resolve4 = async host => {
+        if (host === 'store.example') {
+            edgeLookups += 1;
+            return edgeLookups === 1 ? ['203.0.113.10'] : ['127.0.0.1'];
+        }
+        return resolve4(host);
+    };
+    const requests = [];
+    const report = await auditShopifyPriceDrift({
+        catalog,
+        settings,
+        dnsResolver,
+        fetchImpl: fakeFetch({ products: healthyShopify, checkout: freshCheckout }),
+        originRequestImpl: async (url, { address } = {}) => {
+            requests.push({ url, address });
+            return response(freshCheckout);
+        }
+    });
+
+    assert.equal(report.checkout.edge_validation.ok, true);
+    assert.equal(report.checkout.edge_validation.address, '203.0.113.10');
+    assert.equal(edgeLookups, 1, 'the edge host is resolved once and not re-resolved for the fetch');
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every(row => row.address === '203.0.113.10'), 'the rebound private answer is never used');
+    assert.ok(!requests.some(row => row.url.includes('127.0.0.1')));
+    assert.equal(report.checkout.edge.ok, true);
+    assert.equal(report.checkout.edge.pinned_address, '203.0.113.10');
+    assert.equal(report.checkout.edge_fresh.ok, true);
+    assert.equal(report.checkout.edge_fresh.pinned_address, '203.0.113.10');
+    assert.deepEqual(report.drift, []);
+});
+
+test('an edge redirect to a private address is rejected without being followed', async () => {
+    const methods = [];
+    const fetchImpl = fakeFetch({
+        products: healthyShopify,
+        methods,
+        checkoutHandler: url => url.startsWith('https://origin.example/')
+            ? response(freshCheckout)
+            : response({}, 302, { location: 'https://127.0.0.1/data/store-prices.json' })
+    });
+    const report = await auditShopifyPriceDrift({
+        catalog,
+        settings: { ...settings, checkoutOriginUrl: 'https://origin.example/data/store-prices.json' },
+        dnsResolver: fakeDns(),
+        fetchImpl,
+        originRequestImpl: fakeOriginRequest(fetchImpl)
+    });
+
+    assert.equal(report.status, 'unavailable');
+    assert.match(report.unavailable.join('; '), /checkout_edge_redirected: HTTP 302/);
+    assert.match(report.checkout.edge.error, /checkout_edge_redirected/);
+    assert.equal(report.checkout.edge.ok, false);
+    assert.equal(report.checkout.edge_fresh.ok, false);
+    assert.deepEqual(report.drift, []);
+    assert.ok(!methods.some(call => call.url.includes('127.0.0.1')), 'the private redirect target is never fetched');
+    assert.equal(report.finding.code, 'SHOPIFY_PRICE_DRIFT_UNCHECKED');
+});

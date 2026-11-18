@@ -41,7 +41,14 @@ const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 let requestHandler = null;
-const checkoutAttempts = createCheckoutAttemptRegistry();
+const checkoutAttempts = createCheckoutAttemptRegistry({
+  // A store directory shared by every instance makes quote replay protection
+  // survive restarts; without one the registry is per process.
+  directory: process.env.CHECKOUT_ATTEMPT_STORE_DIR || null,
+  // How long a request waits for a competing creator before answering with a
+  // retryable conflict instead of starting a second PayPal order.
+  claimTimeoutMs: process.env.CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS || undefined
+});
 
 /**
  * Handler for embedded/serverless runtimes (Vercel). The module initialises the
@@ -1915,23 +1922,43 @@ if (args.check === true || args["config-check"] === true) {
       const customId = String(body.reference ?? body.custom_id ?? body.customId ?? `acp_${Date.now()}`).slice(0, 120);
 
       const requestId = checkoutAttemptKey(quote.qid);
-      const { order } = await checkoutAttempts.run(
-        quote.qid,
-        () => createPayPalCheckoutOrder({
-          amount,
-          currency,
-          description,
-          customId,
-          productId: picked.slug,
-          quoteId: quote.qid,
-          catalogVersion,
-          catalogDigest,
-          returnUrl,
-          cancelUrl,
-          requestId
-        }),
-        { expiresAt: verifiedQuote.expires_at }
-      );
+      let order;
+      try {
+        ({ order } = await checkoutAttempts.run(
+          quote.qid,
+          () => createPayPalCheckoutOrder({
+            amount,
+            currency,
+            description,
+            customId,
+            productId: picked.slug,
+            quoteId: quote.qid,
+            catalogVersion,
+            catalogDigest,
+            returnUrl,
+            cancelUrl,
+            requestId
+          }),
+          { expiresAt: verifiedQuote.expires_at }
+        ));
+      } catch (error) {
+        // Another instance is still creating this quote's order and has not
+        // published it yet. This request created nothing, so the page can retry
+        // the same call; it must not fall through to an order of its own.
+        if (error?.code !== "CHECKOUT_ATTEMPT_IN_PROGRESS") throw error;
+        const retryAfterMs = Number(error.retryAfterMs) > 0 ? Number(error.retryAfterMs) : 2000;
+        res.setHeader("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+        json(res, 409, {
+          ok: false,
+          code: "CHECKOUT_IN_PROGRESS",
+          retryable: true,
+          retry_after_ms: retryAfterMs,
+          error: "Another checkout is already creating this order for this quote. Retry the same request shortly.",
+          quote_id: quote.qid,
+          request_id: requestId
+        });
+        return;
+      }
       const approvalUrl = pickApprovalUrl(order);
       json(res, 200, {
         ok: true,

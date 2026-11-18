@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 const probe = String.raw`
 import handler from './api/index.mjs';
+import fs from 'node:fs/promises';
+import { checkoutAttemptKey } from './src/sales/checkout-attempts.mjs';
 
 globalThis.__orderCreateCalls = 0;
 globalThis.__orderBodies = [];
@@ -102,33 +107,62 @@ const redirectMismatch = await call('/acp/v1/transactions', 'POST', JSON.stringi
 const create = await call('/acp/v1/transactions', 'POST', createBody);
 const replay = await call('/acp/v1/transactions', 'POST', createBody);
 const capture = await call('/acp/v1/transactions/ORDER-TEST/capture', 'POST');
-process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, capture, order_create_calls: globalThis.__orderCreateCalls, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
+const orderCallsBeforeBusy = globalThis.__orderCreateCalls;
+
+// Another instance holds the claim for a fresh quote: the store directory has
+// its lock file but no published order yet.
+const busyQuote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank&return_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/success') + '&cancel_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/cancel'));
+const busyQuoteBody = JSON.parse(busyQuote.body);
+const busyLock = process.env.CHECKOUT_ATTEMPT_STORE_DIR + '/' + checkoutAttemptKey(busyQuoteBody.quote_id) + '.lock';
+await fs.mkdir(process.env.CHECKOUT_ATTEMPT_STORE_DIR, { recursive: true });
+await fs.writeFile(busyLock, '424242');
+const busyBody = JSON.stringify({
+  product_id: 'financial-risk-manager-test-bank',
+  amount: 19,
+  currency: 'USD',
+  price_quote: busyQuoteBody.quote,
+  return_url: 'https://www.realworldcerts.com/buy/success',
+  cancel_url: 'https://www.realworldcerts.com/buy/cancel'
+});
+const busy = await call('/acp/v1/transactions', 'POST', busyBody);
+const busyOrderCalls = globalThis.__orderCreateCalls;
+await fs.unlink(busyLock);
+const busyRetry = await call('/acp/v1/transactions', 'POST', busyBody);
+
+process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, capture, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
 `;
 
 function runProbe() {
-    return spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
-        cwd: process.cwd(),
-        encoding: 'utf8',
-        timeout: 30000,
-        env: {
-            ...process.env,
-            VERCEL: '1',
-            PAYPAL_WEBHOOK_ID: 'WH-TEST',
-            PAYPAL_CLIENT_ID: 'test-client',
-            PAYPAL_CLIENT_SECRET: 'test-secret',
-            PAYPAL_ENABLE_ORDER_CREATE: 'true',
-            FULFILLMENT_ENABLED: 'false',
-            PAYPAL_MODE: 'live',
-            SWARM_LIVE: 'true',
-            NO_PLATFORM_WALLET: 'true',
-            OWNER_PAYPAL_EMAIL: 'owner@example.com',
-            PRICE_QUOTE_SECRET: 'quote-test-secret',
-            STOREFRONT_URL: 'https://www.realworldcerts.com',
-            CHECKOUT_PRICE_ORIGIN_URL: '',
-            PAYPAL_RETURN_URL: '',
-            PAYPAL_CANCEL_URL: ''
-        }
-    });
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'checkout-routes-'));
+    try {
+        return spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+            timeout: 30000,
+            env: {
+                ...process.env,
+                CHECKOUT_ATTEMPT_STORE_DIR: store,
+                CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS: '250',
+                VERCEL: '1',
+                PAYPAL_WEBHOOK_ID: 'WH-TEST',
+                PAYPAL_CLIENT_ID: 'test-client',
+                PAYPAL_CLIENT_SECRET: 'test-secret',
+                PAYPAL_ENABLE_ORDER_CREATE: 'true',
+                FULFILLMENT_ENABLED: 'false',
+                PAYPAL_MODE: 'live',
+                SWARM_LIVE: 'true',
+                NO_PLATFORM_WALLET: 'true',
+                OWNER_PAYPAL_EMAIL: 'owner@example.com',
+                PRICE_QUOTE_SECRET: 'quote-test-secret',
+                STOREFRONT_URL: 'https://www.realworldcerts.com',
+                CHECKOUT_PRICE_ORIGIN_URL: '',
+                PAYPAL_RETURN_URL: '',
+                PAYPAL_CANCEL_URL: ''
+            }
+        });
+    } finally {
+        fs.rmSync(store, { recursive: true, force: true });
+    }
 }
 
 function result() {
@@ -241,6 +275,26 @@ test('replaying a quote returns the same PayPal order without creating another',
     assert.equal(probe.order_create_calls, 1);
     assert.equal(JSON.parse(probe.replay.body).transaction_id, JSON.parse(probe.create.body).transaction_id);
     assert.match(probe.order_headers[0]['PayPal-Request-Id'], /^acp_[a-f0-9]{32}$/);
+});
+
+test('a checkout whose order another instance is still creating returns a retryable conflict', () => {
+    const probe = result();
+    assert.equal(probe.busy.status, 409, 'an in-flight creation is a conflict, not a server error');
+    const body = JSON.parse(probe.busy.body);
+    assert.equal(body.ok, false);
+    assert.equal(body.code, 'CHECKOUT_IN_PROGRESS');
+    assert.equal(body.retryable, true);
+    assert.equal(body.quote_id, probe.busy_quote_id);
+    assert.equal(body.error, 'Another checkout is already creating this order for this quote. Retry the same request shortly.');
+    assert.match(probe.busy.headers['Retry-After'], /^[0-9]+$/);
+    assert.equal(probe.busy_order_calls, probe.order_create_calls, 'the conflict never creates a second order');
+});
+
+test('retrying after the competing creator releases the claim creates the order', () => {
+    const probe = result();
+    assert.equal(probe.busy_retry.status, 200);
+    assert.equal(JSON.parse(probe.busy_retry.body).transaction_id, 'ORDER-NEW');
+    assert.equal(probe.busy_retry_order_calls, probe.order_create_calls + 1, 'the retry creates exactly one order');
 });
 
 test('an approved PayPal order can be captured and reports COMPLETED', () => {

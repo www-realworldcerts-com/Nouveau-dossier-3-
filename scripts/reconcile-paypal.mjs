@@ -60,7 +60,12 @@ Options:
   --json                  Machine-readable report
 
 Exit codes: 0 ok, 1 error. Re-running is safe: fulfilment order ids already in
-the queue are never enqueued twice.`;
+the queue are never enqueued twice.
+
+Legacy quote metadata: set PAYPAL_LEGACY_QUOTE_ORDER_IDS to a comma-separated
+order-id allowlist, or PAYPAL_QUOTE_REQUIRED_AFTER to an ISO timestamp. Missing
+metadata before that timestamp is reported as legacy; malformed/stale metadata is
+always reported. This audit never changes prices or PayPal metadata.`;
 
 async function main() {
     const { command, flags } = parseArgs(process.argv.slice(2));
@@ -103,6 +108,16 @@ async function main() {
     }
     for (const order of report.price_unchecked) {
         console.log(`  PRICE UNCHECKED ${order.order_id}: ${order.reason}`);
+    }
+    if (report.quote_metadata_finding_count) {
+        console.log(`  QUOTE METADATA: ${report.quote_metadata_finding_count} captured order(s)`);
+        for (const order of report.quote_metadata_findings) {
+            console.log(`    ${order.order_id} — ${order.quote_metadata_status}: ${order.quote_metadata_reason}`);
+        }
+        console.log('  metadata and prices were not changed; review or allowlist only genuine legacy orders.');
+    }
+    for (const order of report.quote_metadata_unchecked) {
+        console.log(`  QUOTE METADATA UNCHECKED ${order.order_id}: ${order.quote_metadata_reason}`);
     }
     for (const warning of report.warnings) console.log(`  WARNING ${warning}`);
     if (report.failed.length) for (const failure of report.failed) console.log(`  FAILED ${failure.order_id}: ${failure.error}`);

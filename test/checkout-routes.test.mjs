@@ -7,6 +7,7 @@ import handler from './api/index.mjs';
 
 globalThis.__orderCreateCalls = 0;
 globalThis.__orderBodies = [];
+globalThis.__orderHeaders = [];
 globalThis.fetch = async (url, init = {}) => {
   const target = String(url);
   if (target.includes('/v1/oauth2/token')) {
@@ -18,6 +19,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (target.endsWith('/v2/checkout/orders')) {
     globalThis.__orderCreateCalls += 1;
     globalThis.__orderBodies.push(JSON.parse(init.body || '{}'));
+    globalThis.__orderHeaders.push(init.headers || {});
     return new Response(JSON.stringify({
       id: 'ORDER-NEW',
       status: 'CREATED',
@@ -62,8 +64,10 @@ function call(url, method = 'GET', body = '{}') {
 const buy = await call('/buy');
 const discovery = await call('/acp/v1/discovery');
 const prices = await call('/data/store-prices.json');
-const quote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank');
+const quote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank&return_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/success') + '&cancel_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/cancel'));
 const quoteBody = JSON.parse(quote.body);
+const badOriginQuote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank&return_url=' + encodeURIComponent('https://evil.example/buy/success') + '&cancel_url=' + encodeURIComponent('https://evil.example/buy/cancel'));
+const badPathQuote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank&return_url=' + encodeURIComponent('https://www.realworldcerts.com/checkout/success') + '&cancel_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/cancel'));
 const missing = await call('/acp/v1/transactions', 'POST', JSON.stringify({
   product_id: 'financial-risk-manager-test-bank',
   amount: 19,
@@ -79,16 +83,26 @@ const stale = await call('/acp/v1/transactions', 'POST', JSON.stringify({
   return_url: 'https://www.realworldcerts.com/buy/success',
   cancel_url: 'https://www.realworldcerts.com/buy/cancel'
 }));
-const create = await call('/acp/v1/transactions', 'POST', JSON.stringify({
+const createBody = JSON.stringify({
   product_id: 'financial-risk-manager-test-bank',
   amount: 19,
   currency: 'USD',
   price_quote: quoteBody.quote,
   return_url: 'https://www.realworldcerts.com/buy/success',
   cancel_url: 'https://www.realworldcerts.com/buy/cancel'
+});
+const redirectMismatch = await call('/acp/v1/transactions', 'POST', JSON.stringify({
+  product_id: 'financial-risk-manager-test-bank',
+  amount: 19,
+  currency: 'USD',
+  price_quote: quoteBody.quote,
+  return_url: 'https://evil.example/buy/success',
+  cancel_url: 'https://evil.example/buy/cancel'
 }));
+const create = await call('/acp/v1/transactions', 'POST', createBody);
+const replay = await call('/acp/v1/transactions', 'POST', createBody);
 const capture = await call('/acp/v1/transactions/ORDER-TEST/capture', 'POST');
-process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, missing, stale, create, capture, order_create_calls: globalThis.__orderCreateCalls, order_bodies: globalThis.__orderBodies }) + '\n');
+process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, capture, order_create_calls: globalThis.__orderCreateCalls, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
 `;
 
 function runProbe() {
@@ -108,7 +122,11 @@ function runProbe() {
             SWARM_LIVE: 'true',
             NO_PLATFORM_WALLET: 'true',
             OWNER_PAYPAL_EMAIL: 'owner@example.com',
-            PRICE_QUOTE_SECRET: 'quote-test-secret'
+            PRICE_QUOTE_SECRET: 'quote-test-secret',
+            STOREFRONT_URL: 'https://www.realworldcerts.com',
+            CHECKOUT_PRICE_ORIGIN_URL: '',
+            PAYPAL_RETURN_URL: '',
+            PAYPAL_CANCEL_URL: ''
         }
     });
 }
@@ -130,7 +148,10 @@ test('the checkout page is reachable and calls the order API', () => {
     assert.match(probe.buy.body, /requestBody\.amount = Number/);
     assert.match(probe.buy.body, /requestBody\.currency = String/);
     assert.match(probe.buy.body, /\/acp\/v1\/price-quote/);
+    assert.match(probe.buy.body, /&return_url=/);
+    assert.match(probe.buy.body, /&cancel_url=/);
     assert.match(probe.buy.body, /requestBody\.price_quote = quote\.quote/);
+    assert.match(probe.buy.body, /quoteCache/);
 });
 
 test('checkout discovery and the public payload use the explicit price file', () => {
@@ -150,8 +171,11 @@ test('ACP issues a short-lived quote bound to the catalog price and version', ()
     assert.equal(body.ok, true);
     assert.equal(body.product_id, 'financial-risk-manager-test-bank');
     assert.deepEqual(body.amount, { value: '19.00', currency: 'USD' });
+    assert.equal(body.key_id, 'primary');
     assert.equal(body.catalog_version, '1');
     assert.match(body.catalog_digest, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(body.return_url, 'https://www.realworldcerts.com/buy/success');
+    assert.equal(body.cancel_url, 'https://www.realworldcerts.com/buy/cancel');
     assert.equal(typeof body.quote_id, 'string');
     assert.equal(typeof body.quote, 'string');
     assert.ok(Date.parse(body.expires_at) > Date.now());
@@ -163,6 +187,25 @@ test('ACP rejects checkout without a price quote before calling PayPal', () => {
     const body = JSON.parse(probe.missing.body);
     assert.equal(body.code, 'PRICE_QUOTE_REQUIRED');
     assert.equal(probe.order_create_calls, 1, 'only the quoted checkout may call PayPal');
+});
+
+test('ACP rejects redirect URLs outside the allowed checkout origin or paths', () => {
+    const probe = result();
+    assert.equal(probe.badOriginQuote.status, 400);
+    assert.equal(JSON.parse(probe.badOriginQuote.body).code, 'CHECKOUT_REDIRECT_INVALID');
+    assert.match(JSON.parse(probe.badOriginQuote.body).error, /checkout_redirect_origin/);
+    assert.equal(probe.badPathQuote.status, 400);
+    assert.equal(JSON.parse(probe.badPathQuote.body).code, 'CHECKOUT_REDIRECT_INVALID');
+    assert.match(JSON.parse(probe.badPathQuote.body).error, /checkout_redirect_path/);
+    assert.equal(probe.order_create_calls, 1, 'rejected redirects never call PayPal');
+});
+
+test('ACP rejects a replayed quote with different redirect URLs', () => {
+    const probe = result();
+    assert.equal(probe.redirectMismatch.status, 409);
+    const body = JSON.parse(probe.redirectMismatch.body);
+    assert.equal(body.code, 'QUOTE_REDIRECT_MISMATCH');
+    assert.equal(probe.order_create_calls, 1, 'the mismatched redirect never calls PayPal');
 });
 
 test('ACP checkout rejects a stale displayed amount before creating a PayPal order', () => {
@@ -189,6 +232,15 @@ test('ACP checkout accepts the displayed amount when it matches the catalog', ()
     assert.match(unit.custom_id, /financial-risk-manager-test-bank\|q=q_/);
     assert.match(unit.custom_id, /\|v=1$/);
     assert.equal(unit.invoice_id, `q=${issued.quote_id}|d=${issued.catalog_digest}`);
+});
+
+test('replaying a quote returns the same PayPal order without creating another', () => {
+    const probe = result();
+    assert.equal(probe.create.status, 200);
+    assert.equal(probe.replay.status, 200);
+    assert.equal(probe.order_create_calls, 1);
+    assert.equal(JSON.parse(probe.replay.body).transaction_id, JSON.parse(probe.create.body).transaction_id);
+    assert.match(probe.order_headers[0]['PayPal-Request-Id'], /^acp_[a-f0-9]{32}$/);
 });
 
 test('an approved PayPal order can be captured and reports COMPLETED', () => {

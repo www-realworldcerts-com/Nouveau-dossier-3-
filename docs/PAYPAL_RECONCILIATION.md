@@ -85,6 +85,37 @@ from a different catalog revision than the one currently loaded; it is reported
 separately from a captured amount mismatch, and legacy orders without a digest
 are unchecked rather than treated as clean or as price drift.
 
+## Quote metadata findings
+
+Every paid order is also checked for complete quote metadata. A complete order
+has the quote id and catalog version in `custom_id` and the quote id plus
+catalog digest in `invoice_id`. The report exposes:
+
+- `quote_metadata_checked` — orders whose metadata was evaluated;
+- `quote_metadata_finding_count` / `quote_metadata_findings` — orders with
+  `missing`, `malformed` or `stale` metadata;
+- `quote_metadata_legacy` — orders excluded by the legacy allowlist;
+- `quote_metadata_unchecked` — orders that cannot be compared because the
+  current catalog revision is unavailable.
+
+Each row includes `quote_metadata_status`, `quote_metadata_reason`,
+`quote_id`, `catalog_version`, `catalog_digest` and the expected revision where
+available. Malformed metadata covers partial `custom_id`/`invoice_id` values,
+quote-id disagreement and invalid digest syntax. Stale metadata means the
+version or digest no longer matches the loaded catalog. The check is read-only:
+no PayPal metadata, catalog price, Shopify price or captured amount is changed.
+
+Genuine pre-quote orders can be allowlisted with the comma-separated
+`PAYPAL_LEGACY_QUOTE_ORDER_IDS` environment variable (or the
+`legacyQuoteOrderIds` option), or by setting `PAYPAL_QUOTE_REQUIRED_AFTER` to an
+ISO timestamp; orders paid before that timestamp are treated as legacy. Missing
+metadata on an allowlisted order is not a finding. Malformed or stale metadata
+is never suppressed by the legacy allowlist.
+
+The silent-failure audit maps these rows to the high-severity
+`PAYPAL_QUOTE_METADATA_DRIFT` finding, with the affected order ids and reasons
+in its evidence.
+
 ## Idempotency
 
 1. The queue is read before any write; an order id already present is skipped.

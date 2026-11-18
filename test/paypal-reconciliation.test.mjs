@@ -37,7 +37,7 @@ function paidOrder(overrides = {}) {
     };
 }
 
-function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.00', currency = 'USD', quoteId = null, catalogVersion = null, catalogDigest = null } = {}) {
+function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.00', currency = 'USD', quoteId = null, invoiceQuoteId = null, catalogVersion = null, catalogDigest = null } = {}) {
     return {
         id,
         status: 'COMPLETED',
@@ -45,7 +45,7 @@ function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.
         purchase_units: [{
             custom_id: productId,
             ...(quoteId ? { custom_id: `${productId}|q=${quoteId}|v=${catalogVersion ?? 1}` } : {}),
-            ...(catalogDigest ? { invoice_id: `q=${quoteId || 'q_test'}|d=${catalogDigest}` } : {}),
+            ...(catalogDigest ? { invoice_id: `q=${invoiceQuoteId || quoteId || 'q_test'}|d=${catalogDigest}` } : {}),
             description: 'Course One',
             amount: { value: amount, currency_code: currency },
             payments: {
@@ -62,6 +62,7 @@ function pricedOrder({ id = 'ORD-PRICE', productId = 'course-one', amount = '18.
 
 const CATALOG_DIGEST = `sha256:${'b'.repeat(64)}`;
 const priceCatalog = {
+    version: 1,
     digest: CATALOG_DIGEST,
     currency: 'USD',
     fx: { USD: 1, MAD: 10 },
@@ -207,6 +208,77 @@ test('captured orders prove the catalog revision they were created from', () => 
     assert.equal(legacy.catalog_revision, 'unchecked');
 });
 
+test('quote metadata is reported as missing, malformed, stale or legacy without changing prices', () => {
+    const missing = reconcileOrderPrice(pricedOrder({ amount: '19.00' }), { catalog: priceCatalog });
+    assert.equal(missing.quote_metadata_status, 'missing');
+    assert.equal(missing.quote_metadata_reason, 'missing_quote_metadata');
+
+    const legacy = reconcileOrderPrice(pricedOrder({ amount: '19.00' }), {
+        catalog: priceCatalog,
+        legacyQuoteOrderIds: ['ORD-PRICE']
+    });
+    assert.equal(legacy.quote_metadata_status, 'legacy');
+    assert.equal(legacy.quote_metadata_reason, 'legacy_quote_metadata_allowlisted');
+
+    const cutoffLegacy = reconcileOrderPrice(pricedOrder({ amount: '19.00' }), {
+        catalog: priceCatalog,
+        quoteRequiredAfter: '2026-11-02T00:00:00Z'
+    });
+    assert.equal(cutoffLegacy.quote_metadata_status, 'legacy');
+
+    const malformed = reconcileOrderPrice(pricedOrder({
+        amount: '19.00',
+        quoteId: 'q_partial',
+        catalogVersion: 1
+    }), { catalog: priceCatalog });
+    assert.equal(malformed.quote_metadata_status, 'malformed');
+    assert.match(malformed.quote_metadata_reason, /incomplete_invoice/);
+
+    const quoteIdMismatch = reconcileOrderPrice(pricedOrder({
+        amount: '19.00',
+        quoteId: 'q_custom',
+        invoiceQuoteId: 'q_invoice',
+        catalogVersion: 1,
+        catalogDigest: CATALOG_DIGEST
+    }), { catalog: priceCatalog });
+    assert.equal(quoteIdMismatch.quote_metadata_status, 'malformed');
+    assert.match(quoteIdMismatch.quote_metadata_reason, /quote_id_mismatch/);
+
+    const invalidDigest = reconcileOrderPrice(pricedOrder({
+        amount: '19.00',
+        quoteId: 'q_bad',
+        catalogVersion: 1,
+        catalogDigest: 'not-a-digest'
+    }), { catalog: priceCatalog });
+    assert.equal(invalidDigest.quote_metadata_status, 'malformed');
+    assert.match(invalidDigest.quote_metadata_reason, /invalid_catalog_digest/);
+
+    const staleDigest = reconcileOrderPrice(pricedOrder({
+        amount: '19.00',
+        quoteId: 'q_stale',
+        catalogVersion: 1,
+        catalogDigest: `sha256:${'e'.repeat(64)}`
+    }), { catalog: priceCatalog });
+    assert.equal(staleDigest.quote_metadata_status, 'stale');
+    assert.equal(staleDigest.quote_metadata_reason, 'catalog_digest_mismatch');
+
+    const staleVersion = reconcileOrderPrice(pricedOrder({
+        amount: '19.00',
+        quoteId: 'q_old_version',
+        catalogVersion: 2,
+        catalogDigest: CATALOG_DIGEST
+    }), { catalog: priceCatalog });
+    assert.equal(staleVersion.quote_metadata_status, 'stale');
+    assert.equal(staleVersion.quote_metadata_reason, 'catalog_version_mismatch');
+
+    const untouched = pricedOrder({ amount: '19.00' });
+    reconcileOrderPrice(untouched, { catalog: priceCatalog, legacyQuoteOrderIds: ['ORD-PRICE'] });
+    assert.equal(untouched.purchase_units[0].amount.value, '19.00');
+    assert.equal(untouched.purchase_units[0].custom_id, 'course-one');
+    assert.equal(missing.actual, 19);
+    assert.equal(staleDigest.actual, 19);
+});
+
 test('captured price mismatches are reported by reconciliation and never auto-corrected', async () => {
     const queueFile = tempQueue();
     const { api } = fakePaypal({ orders: { 'ORD-PRICE': pricedOrder() } });
@@ -261,6 +333,45 @@ test('reconciliation reports catalog revision mismatches separately from price m
     assert.equal(report.catalog_revision_mismatches[0].quote_id, 'q_revision');
     assert.equal(report.catalog_revision_mismatches[0].catalog_revision, 'mismatch');
     assert.equal(report.catalog_revision_unchecked.length, 0);
+});
+
+test('reconciliation separates quote metadata findings from price and fulfillment checks', async () => {
+    const queueFile = tempQueue();
+    const { api } = fakePaypal({
+        orders: {
+            'ORD-MISSING': pricedOrder({ id: 'ORD-MISSING', amount: '19.00' }),
+            'ORD-LEGACY': pricedOrder({ id: 'ORD-LEGACY', amount: '19.00' }),
+            'ORD-MALFORMED': pricedOrder({ id: 'ORD-MALFORMED', amount: '19.00', quoteId: 'q_partial', catalogVersion: 1 }),
+            'ORD-STALE': pricedOrder({
+                id: 'ORD-STALE',
+                amount: '19.00',
+                quoteId: 'q_stale',
+                catalogVersion: 1,
+                catalogDigest: `sha256:${'f'.repeat(64)}`
+            })
+        }
+    });
+    const report = await reconcilePayPalOrders({
+        paypal: api,
+        orderIds: ['ORD-MISSING', 'ORD-LEGACY', 'ORD-MALFORMED', 'ORD-STALE'],
+        search: false,
+        now: NOW,
+        queueFile,
+        catalog: priceCatalog,
+        legacyQuoteOrderIds: ['ORD-LEGACY'],
+        fulfill: queueFulfiller(queueFile)
+    });
+
+    assert.equal(report.price_mismatch_count, 0);
+    assert.equal(report.catalog_revision_mismatch_count, 1);
+    assert.equal(report.quote_metadata_finding_count, 3);
+    assert.deepEqual(report.quote_metadata_findings.map(row => `${row.order_id}:${row.quote_metadata_status}`).sort(), [
+        'ORD-MALFORMED:malformed',
+        'ORD-MISSING:missing',
+        'ORD-STALE:stale'
+    ]);
+    assert.deepEqual(report.quote_metadata_legacy.map(row => row.order_id), ['ORD-LEGACY']);
+    assert.equal(report.missing_count, 4);
 });
 
 test('dry run reports missing fulfilment and writes nothing', async () => {

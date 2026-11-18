@@ -50,8 +50,9 @@ The deployment is pinned to Node 22 by `package.json` (`engines.node`).
 the package/config files. `vercel.json` excludes `data/**` and
 `doomsday-vault/**` from the function bundle; without that exclusion the
 function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
-- `PRICE_QUOTE_SECRET` (or `FULFILLMENT_ACCESS_SECRET` as a fallback), `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
+- `PRICE_QUOTE_SECRET` and optional `PRICE_QUOTE_KEY_ID`, `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
 - `SETTLEMENT_LEDGER_PATH`, `FULFILLMENT_QUEUE_FILE` (durable writable paths)
+- Optional legacy quote reconciliation allowlist: `PAYPAL_LEGACY_QUOTE_ORDER_IDS` (comma-separated) or `PAYPAL_QUOTE_REQUIRED_AFTER` (ISO timestamp)
 
 The webhook must be registered in the PayPal dashboard for
 `https://<domain>/api/webhooks/paypal` (or `/paypal/webhook`), using the same
@@ -88,12 +89,32 @@ mismatched quote with `409 PRICE_CHANGED` before creating a PayPal order. The
 quote ID/version are stored in PayPal `custom_id`, and the catalog digest is
 stored in `invoice_id` for reconciliation. If the page also posts the amount and
 currency it displayed, they must match the catalog. Posted values never select
-the charge.
+the charge. A quote identifies one checkout attempt: replaying it returns the
+same PayPal order, and the order create call carries a deterministic
+`PayPal-Request-Id` so a retry handled by another instance is deduplicated by
+PayPal. Failed creations release the attempt for retry; `/buy` reuses its quote
+after a lost response and fetches a new one only after expiry or a catalog price
+rejection.
 
-Set `PRICE_QUOTE_SECRET` to a random value. `FULFILLMENT_ACCESS_SECRET` is used
-as a fallback so existing deployments keep working, but a separate secret is
-preferred. Without either secret the quote endpoint fails closed with
-`503 PRICE_QUOTE_UNAVAILABLE` and checkout cannot create an order.
+The signed quote also binds the PayPal return and cancel URLs. The quote
+endpoint only accepts HTTPS URLs at `/buy/success` and `/buy/cancel` on an
+allowed origin: `STOREFRONT_URL`, `CHECKOUT_PRICE_ORIGIN_URL`, or the origins of
+`PAYPAL_RETURN_URL`/`PAYPAL_CANCEL_URL`. The transaction endpoint uses the
+signed URLs and rejects a body that tries to change either one with
+`409 QUOTE_REDIRECT_MISMATCH`. Configure `STOREFRONT_URL` (and the deployment
+origin, if different) for every buyer-facing domain you operate.
+
+Set `PRICE_QUOTE_SECRET` to a random value and give it a stable name in
+`PRICE_QUOTE_KEY_ID` (default `primary`). Outside `NODE_ENV=development`, the
+fulfillment access secret is not used as a quote-secret fallback; without a
+quote secret the endpoint fails closed with `503 PRICE_QUOTE_UNAVAILABLE` and
+checkout cannot create an order.
+
+To rotate the signing key without breaking checkout, set the new key as
+`PRICE_QUOTE_KEY_ID`/`PRICE_QUOTE_SECRET` and keep the old pair in
+`PRICE_QUOTE_PREVIOUS_KEY_ID`/`PRICE_QUOTE_PREVIOUS_SECRET`. Remove the previous
+pair after the maximum quote TTL has elapsed. Quotes without a key ID from an
+older deployment are accepted by either configured key.
 
 ## Prepaid fulfillment and access delivery
 
@@ -142,8 +163,28 @@ must be the origin buyers use. Set `CHECKOUT_PRICE_ORIGIN_URL` to the direct
 deployment origin as a public HTTPS URL on a host distinct from the CDN (not a
 `www`/CDN alias, localhost, or a URL with credentials/query/fragment) so
 `shopify:price-audit` can compare the buyer-facing edge payload with a
-cache-busted edge and origin response. The audit rejects protected/SSO, HTML,
-redirected, or CDN-cached origin responses and reports them as unchecked. Use
+cache-busted edge and origin response. The audit also resolves DNS for both
+hosts: an origin that CNAMEs to the CDN host, shares its CNAME target, or shares
+its A/AAAA address is a CDN alias and is reported as unchecked. Origins and the
+buyer-facing CDN must resolve to public addresses; private, loopback, link-local
+and IPv4-mapped private addresses are unchecked. The verified origin address is
+pinned through the HTTPS connection, so DNS cannot change between proof and
+request. Missing DNS or failed resolution is also unchecked, and an unverified
+origin is never fetched.
+The cache-busted edge read must prove a miss through
+`x-vercel-cache`/`cf-cache-status`/`x-cache` (`MISS`, `BYPASS`, or `DYNAMIC`)
+with no positive `Age`. A hit, stale or revalidated response, a non-zero `Age`,
+or no cache-miss evidence marks edge freshness unchecked.
+
+The same audit requests a synthetic read-only quote for every catalog product
+from the checkout origin's `/acp/v1/price-quote` (override with
+`CHECKOUT_QUOTE_URL` or `--quote-url`). It verifies the quoted amount, currency,
+catalog digest, expiry, product and `/buy/success`/`/buy/cancel` redirects; an
+unavailable or mismatched quote makes the audit unchecked, and a wrong amount
+is drift.
+
+The audit rejects protected/SSO, HTML, redirected, or CDN-cached origin
+responses and reports them as unchecked. Use
 `npm run checkout:browser-audit` for the browser-level check of the exact `/buy`
 page and the amount/currency it POSTs. Register `https://www.realworldcerts.com/buy/success`
 as the PayPal return URL only if using a static PayPal button; the `/buy` flow

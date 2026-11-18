@@ -1,6 +1,38 @@
 # Changelog
 
 ## 2026-11-17
+- Required the cache-busted edge read to prove it was a cache miss. The audit
+  accepts explicit `MISS`/`BYPASS`/`DYNAMIC` cache status with no non-zero
+  `Age`; a `HIT`/`STALE`/`REVALIDATED` status, a positive `Age`, or missing
+  cache-miss evidence marks edge freshness unchecked instead of clean.
+- Added a synthetic, read-only quote audit to `shopify:price-audit`. It requests
+  a quote for every catalog product and checks the quoted amount, currency,
+  catalog digest, expiry, product and bound return/cancel URLs. A wrong quoted
+  amount is reported as price drift; an unavailable or contract-breaking quote
+  path makes the audit unchecked, so quote regressions cannot leave it green.
+- Added key IDs to signed price quotes. `PRICE_QUOTE_KEY_ID` names the current
+  signing key, and `PRICE_QUOTE_PREVIOUS_KEY_ID`/`PRICE_QUOTE_PREVIOUS_SECRET`
+  let quotes signed before a rotation continue to verify for their short TTL.
+  Legacy quotes without a key ID are tried against both keys. The fulfillment
+  access secret is no longer a quote-secret fallback outside
+  `NODE_ENV=development`.
+- Pinned the DNS-verified origin address through the HTTPS origin request, so a
+  DNS change between verification and fetch cannot redirect the audit to another
+  host. Origins or buyer-facing CDN hosts resolving to private IPv4/IPv6
+  addresses (including loopback and IPv4-mapped forms) are reported as unchecked
+  and are never fetched.
+- Bound PayPal return and cancel URLs into signed price quotes. `/acp/v1/price-quote` accepts optional `return_url`/`cancel_url`, requires HTTPS and the exact `/buy/success` and `/buy/cancel` paths, and only allows configured checkout origins (`STOREFRONT_URL`, `CHECKOUT_PRICE_ORIGIN_URL`, or the PayPal URL origins). `/acp/v1/transactions` uses the signed URLs and rejects a replayed quote whose body redirects differ with `409 QUOTE_REDIRECT_MISMATCH` before PayPal is called. Quotes without redirect binding are rejected; `/buy` now includes its success and cancel URLs in the quote request.
+- Made each price quote idempotent per checkout attempt. Replaying a quote now
+  returns the PayPal order created by the first request instead of creating a
+  second one, concurrent replays share one in-flight creation, and a deterministic
+  `PayPal-Request-Id` deduplicates retries handled by another serverless instance.
+  Failed creations release the attempt for retry, while `/buy` reuses its quote
+  after a lost response and refreshes only after expiry or catalog rejection.
+- Strengthened the price audit's origin proof with DNS. The configured origin
+  must not resolve through the buyer-facing CDN host, share its CNAME target, or
+  share its A/AAAA address. DNS failures, unresolvable hosts and shared
+  infrastructure are reported as unchecked, and the unverified origin is never
+  fetched.
 - Hardened the price audit's direct-origin check. `CHECKOUT_PRICE_ORIGIN_URL`
   must now be a public HTTPS URL for `/data/store-prices.json` on a host distinct
   from the buyer-facing CDN; non-HTTPS or malformed URLs, credentials, queries,
@@ -18,9 +50,12 @@
   immediately before ordering. The quote ID and catalog version are stored in
   the PayPal order's `custom_id`, and the catalog digest is stored in
   `invoice_id`; reconciliation reports catalog revision matches, mismatches and
-  unchecked legacy orders. The endpoint fails closed when
-  `PRICE_QUOTE_SECRET` (or the existing `FULFILLMENT_ACCESS_SECRET` fallback)
-  is not configured.
+  unchecked legacy orders. Reconciliation also reports missing, malformed and
+  stale quote metadata without changing prices; genuine pre-quote orders can be
+  allowlisted by id or by `PAYPAL_QUOTE_REQUIRED_AFTER`, and the silent-failure
+  audit raises `PAYPAL_QUOTE_METADATA_DRIFT` for the rest. The endpoint fails closed when
+  `PRICE_QUOTE_SECRET` is not configured; `FULFILLMENT_ACCESS_SECRET` is only a
+  fallback in development.
 - Added a read-only Shopify price-drift audit (`shopify:price-audit`) that
   compares the canonical catalog, the public checkout payload and live Shopify
   variant/presentment prices. It raises `SHOPIFY_PRICE_DRIFT` through the

@@ -18,6 +18,66 @@ import { FulfillmentManager } from './FulfillmentManager.mjs';
 
 export const DEFAULT_QUEUE_FILE = path.join('logs', 'fulfillment_queue.log');
 export const DEFAULT_LOOKBACK_DAYS = 30;
+const CATALOG_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
+
+function legacyOrderIdSet(value) {
+    const values = value instanceof Set
+        ? [...value]
+        : (Array.isArray(value) ? value : String(value || '').split(','));
+    return new Set(values.map(item => String(item || '').trim()).filter(Boolean));
+}
+
+function quoteMetadataStatus({ orderId, paidAt, custom, invoice, catalog, legacyOrderIds, quoteRequiredAfter }) {
+    const quoteId = custom.quoteId || invoice.quoteId || null;
+    const catalogVersion = custom.catalogVersion || null;
+    const catalogDigest = invoice.catalogDigest || null;
+    const hasMetadata = Boolean(quoteId || catalogVersion || catalogDigest);
+    const cutoff = quoteRequiredAfter ? Date.parse(quoteRequiredAfter) : NaN;
+    const paidTime = paidAt ? Date.parse(paidAt) : NaN;
+    const legacy = legacyOrderIds.has(String(orderId || ''))
+        || (Number.isFinite(cutoff) && Number.isFinite(paidTime) && paidTime < cutoff);
+    const base = { quote_id: quoteId, catalog_version: catalogVersion, catalog_digest: catalogDigest };
+
+    if (!hasMetadata) {
+        return {
+            ...base,
+            status: legacy ? 'legacy' : 'missing',
+            reason: legacy ? 'legacy_quote_metadata_allowlisted' : 'missing_quote_metadata'
+        };
+    }
+
+    const reasons = [];
+    if (!custom.quoteId || !custom.catalogVersion) reasons.push('incomplete_custom_id_quote_metadata');
+    if (!invoice.quoteId || !invoice.catalogDigest) reasons.push('incomplete_invoice_quote_metadata');
+    if (custom.quoteId && invoice.quoteId && custom.quoteId !== invoice.quoteId) reasons.push('quote_id_mismatch');
+    if (catalogDigest && !CATALOG_DIGEST_PATTERN.test(catalogDigest)) reasons.push('invalid_catalog_digest');
+    if (reasons.length) return { ...base, status: 'malformed', reason: reasons.join(','), reasons };
+
+    const expectedVersion = catalog?.version === undefined || catalog?.version === null
+        ? null
+        : String(catalog.version);
+    const expectedDigest = catalog?.digest || null;
+    if (!expectedVersion || !expectedDigest) {
+        return {
+            ...base,
+            status: 'unchecked',
+            reason: 'catalog_revision_unavailable',
+            catalog_version_expected: expectedVersion,
+            catalog_digest_expected: expectedDigest
+        };
+    }
+
+    const stale = [];
+    if (String(catalogVersion) !== expectedVersion) stale.push('catalog_version_mismatch');
+    if (catalogDigest !== expectedDigest) stale.push('catalog_digest_mismatch');
+    return {
+        ...base,
+        status: stale.length ? 'stale' : 'ok',
+        ...(stale.length ? { reason: stale.join(','), reasons: stale } : {}),
+        catalog_version_expected: expectedVersion,
+        catalog_digest_expected: expectedDigest
+    };
+}
 
 export function readFulfillmentQueue(queueFile = DEFAULT_QUEUE_FILE) {
     if (!fs.existsSync(queueFile)) return [];
@@ -96,7 +156,12 @@ export function orderToFulfillment(order) {
  * read-only: it reports a mismatch for an owner to refund or resolve and never
  * changes the catalog, Shopify or PayPal price.
  */
-export function reconcileOrderPrice(order, { catalog = null, catalogError = null } = {}) {
+export function reconcileOrderPrice(order, {
+    catalog = null,
+    catalogError = null,
+    legacyQuoteOrderIds = [],
+    quoteRequiredAfter = null
+} = {}) {
     const unit = Array.isArray(order?.purchase_units) ? order.purchase_units[0] || {} : {};
     const captures = Array.isArray(unit?.payments?.captures) ? unit.payments.captures : [];
     const capture = captures.find(item => String(item?.status || '').toUpperCase() === 'COMPLETED') || captures[0] || {};
@@ -105,6 +170,15 @@ export function reconcileOrderPrice(order, { catalog = null, catalogError = null
     const custom = parsePayPalCustomId(unit?.custom_id);
     const invoice = parsePayPalInvoiceId(unit?.invoice_id);
     const productId = custom.productId;
+    const quoteMetadata = quoteMetadataStatus({
+        orderId: order?.id,
+        paidAt: capture?.create_time || order?.update_time || null,
+        custom,
+        invoice,
+        catalog,
+        legacyOrderIds: legacyOrderIdSet(legacyQuoteOrderIds),
+        quoteRequiredAfter
+    });
     const expectedCatalogDigest = catalog?.digest || null;
     const catalogRevision = invoice.catalogDigest && expectedCatalogDigest
         ? (invoice.catalogDigest === expectedCatalogDigest ? 'ok' : 'mismatch')
@@ -116,11 +190,14 @@ export function reconcileOrderPrice(order, { catalog = null, catalogError = null
         capture_id: capture?.id || null,
         paid_at: capture?.create_time || order?.update_time || null,
         currency: currency || null,
-        quote_id: custom.quoteId || invoice.quoteId || null,
-        catalog_version: custom.catalogVersion || null,
-        catalog_digest: invoice.catalogDigest || null,
+        quote_id: quoteMetadata.quote_id || null,
+        catalog_version: quoteMetadata.catalog_version || null,
+        catalog_digest: quoteMetadata.catalog_digest || null,
         catalog_digest_expected: expectedCatalogDigest,
-        catalog_revision: catalogRevision
+        catalog_revision: catalogRevision,
+        quote_metadata_status: quoteMetadata.status,
+        quote_metadata_reason: quoteMetadata.reason || null,
+        quote_metadata: quoteMetadata
     };
 
     if (!productId) return { ...base, status: 'unchecked', reason: 'missing_product_id' };
@@ -162,18 +239,27 @@ export async function reconcilePayPalOrders({
     search = true,
     catalog = null,
     catalogFile = undefined,
-    checkPrices = true
+    checkPrices = true,
+    legacyQuoteOrderIds = process.env.PAYPAL_LEGACY_QUOTE_ORDER_IDS || process.env.PAYPAL_LEGACY_ORDER_IDS || [],
+    legacyOrderIds = [],
+    quoteRequiredAfter = process.env.PAYPAL_QUOTE_REQUIRED_AFTER || null
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const from = new Date(at.getTime() - Number(lookbackDays) * 86400000);
     const candidates = new Set(orderIds.map(String).filter(Boolean));
+    const legacyIds = legacyOrderIdSet(legacyQuoteOrderIds);
+    for (const id of legacyOrderIdSet(legacyOrderIds)) legacyIds.add(id);
     const skipped = [];
     const priceMismatches = [];
     const priceUnchecked = [];
     const catalogRevisionMismatches = [];
     const catalogRevisionUnchecked = [];
+    const quoteMetadataFindings = [];
+    const quoteMetadataLegacy = [];
+    const quoteMetadataUnchecked = [];
     let priceChecked = 0;
     let catalogRevisionChecked = 0;
+    let quoteMetadataChecked = 0;
     let priceCatalogError = null;
     let searchError = null;
 
@@ -236,7 +322,12 @@ export async function reconcilePayPalOrders({
         });
 
         if (checkPrices) {
-            const price = reconcileOrderPrice(order, { catalog: priceCatalog, catalogError: priceCatalogError });
+            const price = reconcileOrderPrice(order, {
+                catalog: priceCatalog,
+                catalogError: priceCatalogError,
+                legacyQuoteOrderIds: legacyIds,
+                quoteRequiredAfter
+            });
             if (price.status === 'mismatch') {
                 priceMismatches.push(price);
                 priceChecked += 1;
@@ -252,6 +343,16 @@ export async function reconcilePayPalOrders({
                 catalogRevisionUnchecked.push(price);
             } else {
                 catalogRevisionChecked += 1;
+            }
+            if (['missing', 'malformed', 'stale'].includes(price.quote_metadata_status)) {
+                quoteMetadataFindings.push(price);
+                quoteMetadataChecked += 1;
+            } else if (price.quote_metadata_status === 'legacy') {
+                quoteMetadataLegacy.push(price);
+            } else if (price.quote_metadata_status === 'unchecked') {
+                quoteMetadataUnchecked.push(price);
+            } else {
+                quoteMetadataChecked += 1;
             }
         }
 
@@ -301,6 +402,11 @@ export async function reconcilePayPalOrders({
         catalog_revision_mismatch_count: catalogRevisionMismatches.length,
         catalog_revision_mismatches: catalogRevisionMismatches,
         catalog_revision_unchecked: catalogRevisionUnchecked,
+        quote_metadata_checked: quoteMetadataChecked,
+        quote_metadata_finding_count: quoteMetadataFindings.length,
+        quote_metadata_findings: quoteMetadataFindings,
+        quote_metadata_legacy: quoteMetadataLegacy,
+        quote_metadata_unchecked: quoteMetadataUnchecked,
         enqueued,
         failed,
         skipped,

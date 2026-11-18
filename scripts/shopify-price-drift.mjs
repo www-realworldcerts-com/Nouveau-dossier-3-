@@ -32,6 +32,8 @@ Options:
   --checkout-url <url>          Buyer-facing edge payload (default <storefront>/data/store-prices.json)
   --checkout-origin-url <url>   Direct origin payload or origin base URL
                                 (default CHECKOUT_PRICE_ORIGIN_URL)
+  --quote-url <url>             Quote endpoint (default checkout origin +
+                                /acp/v1/price-quote, or CHECKOUT_QUOTE_URL)
   --json                        Print the full report as JSON
   --help                        Show this help
 
@@ -48,12 +50,14 @@ async function main() {
     if (flags.help) return console.log(HELP);
     if (flags['checkout-url'] === true) throw new Error('--checkout-url requires a value');
     if (flags['checkout-origin-url'] === true) throw new Error('--checkout-origin-url requires a value');
+    if (flags['quote-url'] === true) throw new Error('--quote-url requires a value');
     if (flags.catalog === true) throw new Error('--catalog requires a value');
 
     const report = await auditShopifyPriceDrift({
         catalogFile: typeof flags.catalog === 'string' ? flags.catalog : undefined,
         checkoutUrl: typeof flags['checkout-url'] === 'string' ? flags['checkout-url'] : undefined,
-        checkoutOriginUrl: typeof flags['checkout-origin-url'] === 'string' ? flags['checkout-origin-url'] : undefined
+        checkoutOriginUrl: typeof flags['checkout-origin-url'] === 'string' ? flags['checkout-origin-url'] : undefined,
+        quoteUrl: typeof flags['quote-url'] === 'string' ? flags['quote-url'] : undefined
     });
 
     if (flags.json) {
@@ -73,6 +77,7 @@ async function main() {
                     : '');
             console.log(`    ${name}${view.cache_bust ? ' (cache-busted)' : ''}: ${state} at ${view.url || 'not checked'}${stale}`);
         }
+        console.log(`  quotes: ${report.quote.checked_products} checked, ${report.quote.failed_products} unavailable at ${report.quote.url || 'not checked'}`);
         console.log(`  Shopify: ${report.checked.shopify_products} product(s), ${report.checked.shopify_variants} variant(s) in ${report.store_currency || 'unknown currency'}`);
         for (const row of report.drift) {
             console.log(`  ${row.course_id || 'catalog'} [${row.sources.join(', ')}]: ${row.reasons.join(', ')}`);

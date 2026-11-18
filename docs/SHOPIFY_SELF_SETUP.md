@@ -231,9 +231,22 @@ buster and `cache-control: no-cache` without following redirects. A redirect,
 HTTP 401/403/407/511 protection challenge, SSO login page, authentication
 cookie, HTML response, or CDN cache hit is treated as an unverifiable origin.
 This catches a stale CDN copy even when the cache-busted edge and origin agree
-with the catalog. If the origin is not configured, fails validation or cannot
-be read, the audit is `unavailable` (`SHOPIFY_PRICE_DRIFT_UNCHECKED`) and cannot
-report a clean result from the edge alone.
+with the catalog. The cache-busted edge must also prove it was a miss: it needs
+an explicit `MISS`, `BYPASS`, or `DYNAMIC` status from
+`x-vercel-cache`/`cf-cache-status`/`x-cache` and no positive `Age`. A
+`HIT`/`STALE`/`REVALIDATED` status, a non-zero `Age`, or no cache-miss evidence
+leaves edge freshness unchecked. If the origin is not configured, fails
+validation or cannot be read, the audit is `unavailable`
+(`SHOPIFY_PRICE_DRIFT_UNCHECKED`) and cannot report a clean result from the edge
+alone.
+
+The audit also requests a synthetic quote for every catalog product from
+`<checkout origin>/acp/v1/price-quote` (or `CHECKOUT_QUOTE_URL`/`--quote-url`).
+It checks that each quote is fresh, matches the product and catalog digest, has
+the expected amount and currency, and carries the exact `/buy/success` and
+`/buy/cancel` redirects for the storefront. A wrong quoted amount is price
+drift; an unavailable endpoint or any other quote-contract mismatch makes the
+audit unchecked.
 
 The audit only issues GET requests. It fails closed with a high-severity
 `SHOPIFY_PRICE_DRIFT` only when a comparable amount actually differs:
@@ -241,6 +254,7 @@ The audit only issues GET requests. It fails closed with a high-severity
 - the buyer-facing edge checkout price differs from the catalog, even if the
   cache-busted edge or origin is fresh;
 - the cache-busted edge or direct origin price differs from the catalog;
+- a synthetic price quote differs from the catalog;
 - a Shopify variant or presentment price differs in the store currency.
 
 Those findings are grouped by affected course, so a variant and its presentment

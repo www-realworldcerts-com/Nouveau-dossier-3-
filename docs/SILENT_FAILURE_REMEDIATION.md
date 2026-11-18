@@ -46,7 +46,7 @@ owner authorization and is never inferred by the swarm.
 | `PAYPAL_UNFULFILLED_ORDERS` | critical | A dry-run reconciliation finds captured orders missing from the queue |
 | `PAYPAL_ORDER_PRICE_DRIFT` | high | A captured order amount differs from the canonical catalog price |
 | `PAYPAL_RECONCILIATION_UNAVAILABLE` | medium | The reconciliation itself failed, so drift is unknown |
-| `SHOPIFY_PRICE_DRIFT` | high | Edge, cache-busted edge, origin or Shopify price differs from the catalog |
+| `SHOPIFY_PRICE_DRIFT` | high | Edge, cache-busted edge, origin, quote or Shopify price differs from the catalog |
 | `SHOPIFY_PRICE_DRIFT_UNCHECKED` | medium | A price source or the direct checkout origin could not be verified |
 
 Findings that stay unresolved past the **silence budget** (`--silence-budget-hours`,
@@ -76,9 +76,22 @@ cache hits. It reports `edge.stale_vs_fresh` when the buyer edge differs from
 the cache-busted edge, `edge.differs_from_origin` when the two routes disagree,
 and `origin.differs_from_fresh` when the direct origin is not the cache-busted
 payload. A missing, invalid, protected or otherwise unverifiable origin is
-`SHOPIFY_PRICE_DRIFT_UNCHECKED`, not a clean result from the edge alone.
+`SHOPIFY_PRICE_DRIFT_UNCHECKED`, not a clean result from the edge alone. The
+cache-busted edge must prove a cache miss with an explicit
+`MISS`/`BYPASS`/`DYNAMIC` status and no positive `Age`; a hit, stale, revalidated,
+aged, or status-less response also leaves freshness unchecked. The
+audit also requests a synthetic quote for every catalog product and verifies its
+amount, currency, catalog digest, expiry, product and bound redirects. An
+unavailable quote endpoint or a contract mismatch is also unchecked; a wrong
+quoted amount is drift.
 
 ### Payment webhook (P8)
+
+PayPal reconciliation also raises `PAYPAL_QUOTE_METADATA_DRIFT` (high) when a
+captured order has missing, malformed or stale quote metadata. Legacy orders can
+be allowlisted by id or by `PAYPAL_QUOTE_REQUIRED_AFTER`; malformed or stale
+metadata cannot be suppressed. The finding is read-only and never changes
+prices or PayPal metadata.
 
 A paid order whose webhook never arrives is silent revenue loss: the buyer is
 charged, fulfilment never runs, and PayPal stops retrying. `--webhook-url`

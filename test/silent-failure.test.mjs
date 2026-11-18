@@ -321,6 +321,26 @@ test('a captured order priced below the catalog is a high finding', () => {
     assert.equal(finding.evidence.mismatches[0].actual, 18);
 });
 
+test('captured orders with quote metadata gaps are a high finding', () => {
+    const paypalReconciliation = {
+        report: {
+            missing_count: 0,
+            quote_metadata_finding_count: 2,
+            quote_metadata_findings: [
+                { order_id: 'ORD-MISSING', quote_metadata_status: 'missing', quote_metadata_reason: 'missing_quote_metadata' },
+                { order_id: 'ORD-STALE', quote_metadata_status: 'stale', quote_metadata_reason: 'catalog_digest_mismatch' }
+            ],
+            quote_metadata_legacy: []
+        }
+    };
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });
+    const finding = findings.find(item => item.code === 'PAYPAL_QUOTE_METADATA_DRIFT');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'high');
+    assert.deepEqual(finding.evidence.order_ids, ['ORD-MISSING', 'ORD-STALE']);
+    assert.equal(finding.evidence.findings[1].quote_metadata_status, 'stale');
+});
+
 test('a clean reconciliation adds no finding', () => {
     const paypalReconciliation = { report: { missing_count: 0, missing: [] } };
     const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ paypalReconciliation }) });

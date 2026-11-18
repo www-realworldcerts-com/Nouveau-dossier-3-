@@ -29,15 +29,19 @@ import {
   createPriceQuote,
   encodePayPalCustomId,
   encodePayPalInvoiceId,
+  normalizeQuoteRedirectUrl,
   parsePayPalCustomId,
   parsePayPalInvoiceId,
+  resolvePriceQuoteKeys,
   verifyPriceQuote
 } from "./sales/price-quote.mjs";
+import { checkoutAttemptKey, createCheckoutAttemptRegistry } from "./sales/checkout-attempts.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 let requestHandler = null;
+const checkoutAttempts = createCheckoutAttemptRegistry();
 
 /**
  * Handler for embedded/serverless runtimes (Vercel). The module initialises the
@@ -126,8 +130,59 @@ function getSearchParams(req) {
   }
 }
 
-function priceQuoteSecret() {
-  return process.env.PRICE_QUOTE_SECRET || process.env.FULFILLMENT_ACCESS_SECRET || "";
+const DEFAULT_STOREFRONT_ORIGIN = "https://www.realworldcerts.com";
+
+function checkoutOrigin(value) {
+  try {
+    return new URL(String(value || "")).origin;
+  } catch {
+    return null;
+  }
+}
+
+function allowedCheckoutOrigins() {
+  const origins = new Set([
+    checkoutOrigin(process.env.STOREFRONT_URL) || DEFAULT_STOREFRONT_ORIGIN
+  ]);
+  for (const value of [
+    process.env.CHECKOUT_PRICE_ORIGIN_URL,
+    process.env.PAYPAL_RETURN_URL,
+    process.env.PAYPAL_CANCEL_URL
+  ]) {
+    const origin = checkoutOrigin(value);
+    if (origin) origins.add(origin);
+  }
+  return origins;
+}
+
+function resolveCheckoutRedirects({ returnUrl = null, cancelUrl = null } = {}) {
+  const storefront = checkoutOrigin(process.env.STOREFRONT_URL || DEFAULT_STOREFRONT_ORIGIN) || DEFAULT_STOREFRONT_ORIGIN;
+  const defaults = {
+    returnUrl: process.env.PAYPAL_RETURN_URL || `${storefront}/buy/success`,
+    cancelUrl: process.env.PAYPAL_CANCEL_URL || `${storefront}/buy/cancel`
+  };
+  let resolvedReturn;
+  let resolvedCancel;
+  try {
+    resolvedReturn = normalizeQuoteRedirectUrl(returnUrl || defaults.returnUrl);
+    resolvedCancel = normalizeQuoteRedirectUrl(cancelUrl || defaults.cancelUrl);
+  } catch (error) {
+    return { ok: false, reason: `checkout_redirect_invalid: ${error.message}` };
+  }
+  const returnPath = new URL(resolvedReturn).pathname;
+  const cancelPath = new URL(resolvedCancel).pathname;
+  if (returnPath !== "/buy/success" || cancelPath !== "/buy/cancel") {
+    return { ok: false, reason: "checkout_redirect_path: return_url must be /buy/success and cancel_url must be /buy/cancel" };
+  }
+  const allowed = allowedCheckoutOrigins();
+  if (!allowed.has(new URL(resolvedReturn).origin) || !allowed.has(new URL(resolvedCancel).origin)) {
+    return { ok: false, reason: "checkout_redirect_origin: return_url and cancel_url must use an allowed checkout origin" };
+  }
+  return {
+    ok: true,
+    returnUrl: resolvedReturn,
+    cancelUrl: resolvedCancel
+  };
 }
 
 function bufferToText(value) {
@@ -245,7 +300,7 @@ function shouldCreatePayPalOrders() {
   return (process.env.PAYPAL_ENABLE_ORDER_CREATE ?? "false").toLowerCase() === "true";
 }
 
-async function createPayPalCheckoutOrder({ amount, currency, description, customId, productId, quoteId, catalogVersion, catalogDigest, returnUrl, cancelUrl }) {
+async function createPayPalCheckoutOrder({ amount, currency, description, customId, productId, quoteId, catalogVersion, catalogDigest, returnUrl, cancelUrl, requestId = null }) {
   const token = await getPayPalAccessToken();
   const customIdValue = quoteId
     ? encodePayPalCustomId({ productId: productId || customId, quoteId, catalogVersion })
@@ -270,7 +325,12 @@ async function createPayPalCheckoutOrder({ amount, currency, description, custom
       cancel_url: cancelUrl
     }
   };
-  return paypalRequest("/v2/checkout/orders", { method: "POST", token, body });
+  return paypalRequest("/v2/checkout/orders", {
+    method: "POST",
+    token,
+    body,
+    ...(requestId ? { headers: { "PayPal-Request-Id": requestId } } : {})
+  });
 }
 
 function shouldFulfillPaidOrders() {
@@ -326,9 +386,28 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
   var button = document.getElementById('pay');
   var error = document.getElementById('error');
   var productsById = {};
+  var quoteCache = null;
   var requested = q.get('product_id') || '';
   function show(message){ error.textContent = message; error.style.display = 'block'; }
   function clear(){ error.textContent = ''; error.style.display = 'none'; }
+  function loadQuote(productId, returnUrl, cancelUrl){
+    var cacheKey = productId + '|' + returnUrl + '|' + cancelUrl;
+    if (quoteCache && quoteCache.key === cacheKey && Date.now() < quoteCache.expiresAt - 30000) {
+      return Promise.resolve({status:200, body:quoteCache.body});
+    }
+    var quotePath = '/acp/v1/price-quote?product_id=' + encodeURIComponent(productId)
+      + '&return_url=' + encodeURIComponent(returnUrl)
+      + '&cancel_url=' + encodeURIComponent(cancelUrl);
+    return fetch(quotePath, {cache:'no-store'})
+      .then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); })
+      .then(function(result){
+        var quote = result.body || {};
+        if (result.status === 200 && quote.ok === true && quote.quote) {
+          quoteCache = {key:cacheKey, body:quote, expiresAt:Date.parse(quote.expires_at) || 0};
+        }
+        return result;
+      });
+  }
   function reference(){
     var ref = q.get('ref');
     if (ref && /^[A-Za-z0-9._-]{1,64}$/.test(ref)) return ref;
@@ -365,18 +444,19 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
     button.disabled = true;
     button.textContent = 'Starting secure checkout…';
     var selected = productsById[String(productId)] || null;
+    var returnUrl = location.origin + '/buy/success';
+    var cancelUrl = location.origin + '/buy/cancel';
     var requestBody = {
       product_id: productId,
       reference: reference(),
-      return_url: location.origin + '/buy/success',
-      cancel_url: location.origin + '/buy/cancel'
+      return_url: returnUrl,
+      cancel_url: cancelUrl
     };
     if (selected && selected.price != null) {
       requestBody.amount = Number(selected.price);
       requestBody.currency = String(selected.currency || 'USD');
     }
-    fetch('/acp/v1/price-quote?product_id=' + encodeURIComponent(productId), {cache:'no-store'})
-      .then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); })
+    loadQuote(productId, returnUrl, cancelUrl)
       .then(function(result){
         var quote = result.body || {};
         if (result.status >= 300 || quote.ok !== true || !quote.quote) {
@@ -391,6 +471,7 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
       })
       .then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); }).then(function(result){
       var body = result.body || {};
+      if (result.status === 409) quoteCache = null;
       if (result.status >= 300 || body.ok !== true) throw new Error(body.error || ('Checkout failed (HTTP ' + result.status + ')'));
       var approval = body.payment_instructions && body.payment_instructions.approval_url;
       if (!approval) throw new Error('PayPal did not return an approval link. Nothing was charged.');
@@ -1459,13 +1540,28 @@ if (args.check === true || args["config-check"] === true) {
         json(res, 405, { ok: false, error: "Method not allowed" });
         return;
       }
-      const productId = getSearchParams(req).get("product_id");
+      const searchParams = getSearchParams(req);
+      const productId = searchParams.get("product_id");
       if (!productId) {
         json(res, 400, { ok: false, error: "product_id is required" });
         return;
       }
-      const secret = priceQuoteSecret();
-      if (!secret) {
+      const redirects = resolveCheckoutRedirects({
+        returnUrl: searchParams.get("return_url"),
+        cancelUrl: searchParams.get("cancel_url")
+      });
+      if (!redirects.ok) {
+        json(res, 400, { ok: false, code: "CHECKOUT_REDIRECT_INVALID", error: redirects.reason });
+        return;
+      }
+      let quoteKeys;
+      try {
+        quoteKeys = resolvePriceQuoteKeys();
+      } catch (error) {
+        json(res, 503, { ok: false, code: "PRICE_QUOTE_UNAVAILABLE", error: error?.message ?? String(error) });
+        return;
+      }
+      if (!quoteKeys.current) {
         json(res, 503, { ok: false, code: "PRICE_QUOTE_UNAVAILABLE", error: "Price quoting is not configured (set PRICE_QUOTE_SECRET)" });
         return;
       }
@@ -1483,18 +1579,23 @@ if (args.check === true || args["config-check"] === true) {
           currency,
           catalogVersion: catalog.version,
           catalogDigest: catalog.digest,
+          returnUrl: redirects.returnUrl,
+          cancelUrl: redirects.cancelUrl,
           ttlSeconds: process.env.PRICE_QUOTE_TTL_SECONDS
-        }, secret);
+        }, quoteKeys.current.secret, { keyId: quoteKeys.current.keyId });
         json(res, 200, {
           ok: true,
           protocol: "ACP-1.0",
           quote: quote.token,
+          key_id: quote.key_id,
           quote_id: quote.quote_id,
           product_id: course.slug,
           amount: { value: (course.price_cents / 100).toFixed(2), currency },
           currency,
           catalog_version: String(catalog.version),
           catalog_digest: quote.catalog_digest,
+          return_url: quote.return_url,
+          cancel_url: quote.cancel_url,
           expires_at: quote.expires_at
         });
       } catch (error) {
@@ -1663,12 +1764,18 @@ if (args.check === true || args["config-check"] === true) {
         });
         return;
       }
-      const quoteSecret = priceQuoteSecret();
-      if (!quoteSecret) {
+      let quoteKeys;
+      try {
+        quoteKeys = resolvePriceQuoteKeys();
+      } catch (error) {
+        json(res, 503, { ok: false, code: "PRICE_QUOTE_UNAVAILABLE", error: error?.message ?? String(error) });
+        return;
+      }
+      if (!quoteKeys.current) {
         json(res, 503, { ok: false, code: "PRICE_QUOTE_UNAVAILABLE", error: "Price quoting is not configured (set PRICE_QUOTE_SECRET)" });
         return;
       }
-      const verifiedQuote = verifyPriceQuote(quoteToken, quoteSecret);
+      const verifiedQuote = verifyPriceQuote(quoteToken, quoteKeys);
       if (!verifiedQuote.ok) {
         json(res, 409, {
           ok: false,
@@ -1762,27 +1869,69 @@ if (args.check === true || args["config-check"] === true) {
         });
         return;
       }
-      const description = String(picked.title || "").trim() || null;
-      const customId = String(body.reference ?? body.custom_id ?? body.customId ?? `acp_${Date.now()}`).slice(0, 120);
-      const returnUrl = String(body.return_url ?? body.returnUrl ?? process.env.PAYPAL_RETURN_URL ?? "").trim();
-      const cancelUrl = String(body.cancel_url ?? body.cancelUrl ?? process.env.PAYPAL_CANCEL_URL ?? "").trim();
-      if (!returnUrl || !cancelUrl) {
-        json(res, 400, { ok: false, error: "Missing return_url/cancel_url" });
+      if (!quote.ru || !quote.cu) {
+        json(res, 409, {
+          ok: false,
+          code: "QUOTE_REDIRECT_REQUIRED",
+          error: "The price quote does not bind return and cancel URLs. Refresh checkout and try again."
+        });
         return;
       }
+      const signedRedirects = resolveCheckoutRedirects({ returnUrl: quote.ru, cancelUrl: quote.cu });
+      if (!signedRedirects.ok) {
+        json(res, 409, {
+          ok: false,
+          code: "QUOTE_REDIRECT_MISMATCH",
+          error: `The signed checkout redirect URLs are not allowed: ${signedRedirects.reason}`
+        });
+        return;
+      }
+      const submittedReturn = body.return_url ?? body.returnUrl ?? null;
+      const submittedCancel = body.cancel_url ?? body.cancelUrl ?? null;
+      let normalizedReturn = signedRedirects.returnUrl;
+      let normalizedCancel = signedRedirects.cancelUrl;
+      try {
+        if (submittedReturn !== null) normalizedReturn = normalizeQuoteRedirectUrl(submittedReturn);
+        if (submittedCancel !== null) normalizedCancel = normalizeQuoteRedirectUrl(submittedCancel);
+      } catch (error) {
+        json(res, 409, {
+          ok: false,
+          code: "QUOTE_REDIRECT_MISMATCH",
+          error: `The checkout redirect URL is invalid: ${error.message}`
+        });
+        return;
+      }
+      if (normalizedReturn !== signedRedirects.returnUrl || normalizedCancel !== signedRedirects.cancelUrl) {
+        json(res, 409, {
+          ok: false,
+          code: "QUOTE_REDIRECT_MISMATCH",
+          error: "The checkout redirect URLs do not match the signed price quote. Refresh checkout and try again."
+        });
+        return;
+      }
+      const returnUrl = signedRedirects.returnUrl;
+      const cancelUrl = signedRedirects.cancelUrl;
+      const description = String(picked.title || "").trim() || null;
+      const customId = String(body.reference ?? body.custom_id ?? body.customId ?? `acp_${Date.now()}`).slice(0, 120);
 
-      const order = await createPayPalCheckoutOrder({
-        amount,
-        currency,
-        description,
-        customId,
-        productId: picked.slug,
-        quoteId: quote.qid,
-        catalogVersion,
-        catalogDigest,
-        returnUrl,
-        cancelUrl
-      });
+      const requestId = checkoutAttemptKey(quote.qid);
+      const { order } = await checkoutAttempts.run(
+        quote.qid,
+        () => createPayPalCheckoutOrder({
+          amount,
+          currency,
+          description,
+          customId,
+          productId: picked.slug,
+          quoteId: quote.qid,
+          catalogVersion,
+          catalogDigest,
+          returnUrl,
+          cancelUrl,
+          requestId
+        }),
+        { expiresAt: verifiedQuote.expires_at }
+      );
       const approvalUrl = pickApprovalUrl(order);
       json(res, 200, {
         ok: true,

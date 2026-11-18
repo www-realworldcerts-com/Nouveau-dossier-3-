@@ -150,7 +150,7 @@ The page lookup only fixes what the customer sees. The payment-intent endpoint m
 - `src/paypal-webhook-server.mjs` reads `config/course-catalog.json`.
 - `/buy` renders server-owned products and posts the amount/currency it displayed.
 - `/buy` first requests a short-lived signed quote from `/acp/v1/price-quote?product_id=...`, binding the product, amount, currency, catalog version and content-addressed catalog digest.
-- `/acp/v1/transactions` requires a known `product_id` and charges `product.price`; a missing, expired or mismatched quote, or a posted `amount`/`currency` that does not match the catalog, is rejected with `409 PRICE_CHANGED` before PayPal is called. The quote ID and catalog version are stored in PayPal `custom_id`; the catalog digest is stored in `invoice_id` so reconciliation can prove the exact catalog revision.
+- `/acp/v1/transactions` requires a known `product_id` and charges `product.price`; a missing, expired or mismatched quote, or a posted `amount`/`currency` that does not match the catalog, is rejected with `409 PRICE_CHANGED` before PayPal is called. The quote ID and catalog version are stored in PayPal `custom_id`; the catalog digest is stored in `invoice_id` so reconciliation can prove the exact catalog revision. A quote is idempotent per checkout attempt: replaying it returns the original PayPal order, and the order-create request uses a deterministic `PayPal-Request-Id` to suppress duplicate orders across retries. The quote also binds the allowed `/buy/success` and `/buy/cancel` URLs on a configured checkout origin; a transaction that tries to change either redirect is rejected with `409 QUOTE_REDIRECT_MISMATCH` before PayPal is called.
 - `/acp/v1/transactions/:id/capture` captures the server-created order.
 - `npm run reconcile:paypal` compares captured orders with the catalog in a read-only report and never changes a price.
 
@@ -166,7 +166,7 @@ Deploy the static site and `/data/store-prices.json` together, then purge `/cata
 4. A stale displayed amount is rejected with `409 PRICE_CHANGED` before a PayPal order exists.
 5. An unknown slug shows “Price unavailable” and cannot submit.
 6. A capture creates a `$19.00` capture, credits revenue, prepays fulfillment, and sends the access email.
-7. `shopify:price-audit` reads the buyer edge route, a cache-busted edge route and a validated public-HTTPS `CHECKOUT_PRICE_ORIGIN_URL` on a host distinct from the CDN; all agree, the report includes the canonical `catalog_digest`, the origin is not redirected/protected/SSO/HTML/cache-hit, and no edge/origin stale marker is reported.
+7. `shopify:price-audit` reads the buyer edge route, a cache-busted edge route and a validated public-HTTPS `CHECKOUT_PRICE_ORIGIN_URL` on a host distinct from the CDN. DNS must also prove the origin is not a CDN alias: it must not CNAME to the CDN host, share its CNAME target, or share its A/AAAA address; DNS failures, shared infrastructure, and private/loopback addresses are unchecked; the verified origin address is pinned into the HTTPS request so DNS cannot change between proof and fetch. All views agree, the cache-busted edge proves a cache miss (`MISS`/`BYPASS`/`DYNAMIC` with no positive `Age`), the report includes the canonical `catalog_digest`, the origin is not redirected/protected/SSO/HTML/cache-hit, and no edge/origin stale marker is reported.
 
 ## Known limitations
 

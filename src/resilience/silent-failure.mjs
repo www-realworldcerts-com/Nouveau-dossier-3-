@@ -243,6 +243,19 @@ export const FINDING_CATALOG = {
         owner_action: 'Review the affected orders and decide whether to refund, collect the difference or accept the captured amount.',
         sla_hours: 4
     },
+    PAYPAL_QUOTE_METADATA_DRIFT: {
+        domain: 'revenue',
+        severity: 'high',
+        title: 'Captured order has missing, malformed or stale quote metadata',
+        impact: 'A captured order cannot prove which signed catalog revision authorized its checkout. A legacy or bypassed checkout, a corrupted metadata field, or a price book change after order creation is invisible without this evidence.',
+        containment: 'Do not rewrite order metadata or prices automatically; treat the affected orders as unverified until the quote or catalog revision is reviewed.',
+        obligation: 'Identify why each order lacks valid quote metadata or references a different catalog revision, and decide whether its capture is acceptable.',
+        remedy: 'Review the listed order ids, allowlist only genuine pre-quote legacy orders, repair the checkout or deployment that omitted/corrupted the metadata, and rerun reconciliation.',
+        mitigation: 'ACP checkout requires a signed quote, stores its id/version/digest in PayPal metadata, and reconciliation reports missing, malformed and stale metadata without changing prices.',
+        verification: 'A later reconciliation reports quote_metadata_finding_count 0 for the affected orders, with genuine legacy orders explicitly allowlisted.',
+        owner_action: 'Review the quote metadata findings and allowlist only orders created before quote enforcement.',
+        sla_hours: 4
+    },
     PAYMENT_WEBHOOK_UNREACHABLE: {
         domain: 'revenue',
         severity: 'critical',
@@ -681,6 +694,15 @@ export function detectSilentFailures({
                     mismatches: report.price_mismatches || [],
                     price_unchecked: report.price_unchecked || [],
                     price_catalog_error: report.price_catalog_error || null,
+                    window: report.window || null
+                });
+            }
+            if (Number(report.quote_metadata_finding_count) > 0) {
+                const rows = report.quote_metadata_findings || [];
+                add('PAYPAL_QUOTE_METADATA_DRIFT', `${rows.length} captured order(s) have missing, malformed or stale quote metadata.`, {
+                    order_ids: rows.map(order => order.order_id),
+                    findings: rows,
+                    legacy_order_ids: (report.quote_metadata_legacy || []).map(order => order.order_id),
                     window: report.window || null
                 });
             }

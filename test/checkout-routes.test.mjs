@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import vm from 'node:vm';
 
 const probe = String.raw`
 import handler from './api/index.mjs';
@@ -295,6 +296,92 @@ test('retrying after the competing creator releases the claim creates the order'
     assert.equal(probe.busy_retry.status, 200);
     assert.equal(JSON.parse(probe.busy_retry.body).transaction_id, 'ORDER-NEW');
     assert.equal(probe.busy_retry_order_calls, probe.order_create_calls + 1, 'the retry creates exactly one order');
+});
+
+function pageElement() {
+    return {
+        innerHTML: '',
+        textContent: '',
+        value: '',
+        disabled: false,
+        style: {},
+        children: [],
+        appendChild(child) { this.children.push(child); },
+        addEventListener(type, listener) { this.listeners = { ...(this.listeners || {}), [type]: listener }; }
+    };
+}
+
+async function waitFor(check, label) {
+    for (let i = 0; i < 400; i += 1) {
+        if (check()) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+}
+
+// Runs the /buy page script as served, so the retry path is exercised the way a
+// browser would run it, not by pattern-matching the HTML.
+test('the checkout page keeps its quote and retries a retryable in-progress conflict', async () => {
+    const html = result().buy.body;
+    const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
+    assert.match(script, /CHECKOUT_IN_PROGRESS/, 'the page must recognise the retryable conflict');
+
+    const elements = {};
+    for (const id of ['product', 'pay', 'error', 'checkout']) elements[id] = pageElement();
+    const document = { getElementById: (id) => elements[id], createElement: () => pageElement() };
+    const location = { search: '?product_id=course-one', origin: 'https://store.example', href: 'https://store.example/buy' };
+
+    const quoteCalls = [];
+    const posts = [];
+    const fetch = async (url, init = {}) => {
+        const target = String(url);
+        if (target.startsWith('/acp/v1/discovery')) {
+            return {
+                status: 200,
+                json: async () => ({ products: [{ id: 'course-one', name: 'Course One', price: 19, currency: 'USD' }] })
+            };
+        }
+        if (target.startsWith('/acp/v1/price-quote')) {
+            quoteCalls.push(target);
+            return {
+                status: 200,
+                json: async () => ({ ok: true, quote: 'QUOTE-ONE', expires_at: new Date(Date.now() + 600000).toISOString() })
+            };
+        }
+        if (target === '/acp/v1/transactions') {
+            posts.push({ at: Date.now(), body: JSON.parse(init.body) });
+            if (posts.length === 1) {
+                return {
+                    status: 409,
+                    json: async () => ({
+                        ok: false,
+                        code: 'CHECKOUT_IN_PROGRESS',
+                        retryable: true,
+                        retry_after_ms: 40,
+                        error: 'Another checkout is already creating this order for this quote. Retry the same request shortly.'
+                    })
+                };
+            }
+            return {
+                status: 200,
+                json: async () => ({ ok: true, payment_instructions: { approval_url: 'https://www.paypal.com/approve' } })
+            };
+        }
+        throw new Error('unexpected fetch: ' + target);
+    };
+
+    vm.runInNewContext(script, { document, location, fetch, URLSearchParams, setTimeout, clearTimeout });
+    await waitFor(() => elements.product.value === 'course-one', 'course discovery');
+    elements.checkout.listeners.submit({ preventDefault() {} });
+    await waitFor(() => location.href.includes('paypal.com/approve') || elements.error.textContent, 'checkout result');
+
+    assert.equal(posts.length, 2, 'the conflict is retried once');
+    assert.deepEqual(posts[1].body, posts[0].body, 'the retry sends the identical request');
+    assert.equal(posts[1].body.price_quote, 'QUOTE-ONE', 'the retry keeps the same signed quote');
+    assert.equal(quoteCalls.length, 1, 'the page never re-quotes the buyer mid-conflict');
+    assert.ok(posts[1].at - posts[0].at >= 30, 'the retry waits for retry_after_ms');
+    assert.equal(location.href, 'https://www.paypal.com/approve');
+    assert.equal(elements.error.textContent, '');
 });
 
 test('an approved PayPal order can be captured and reports COMPLETED', () => {

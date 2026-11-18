@@ -1,6 +1,15 @@
 # Changelog
 
 ## 2026-11-18
+- Warned operators when checkout replay protection silently degrades to per
+  process memory. If `CHECKOUT_ATTEMPT_STORE_DIR` is unset the server now writes
+  a `checkout_attempt_store_not_durable` warning to stderr at startup, lists it
+  in `--check` output and `/health` (`config.warnings`,
+  `config.checkout_attempts.durable`), so a restart can no longer quietly lose
+  duplicate-order protection. The warning does not fail the config check.
+- Made `/buy` retry the retryable `409 CHECKOUT_IN_PROGRESS` itself: it waits
+  `retry_after_ms` and resends the identical request with the same signed quote
+  instead of showing the buyer a generic failure.
 - Returned a retryable `409 CHECKOUT_IN_PROGRESS` when another instance is still
   creating the order for a quote instead of letting the attempt registry's
   conflict surface as an unhandled `500`. The response carries `retryable`,

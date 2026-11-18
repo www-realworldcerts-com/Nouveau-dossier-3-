@@ -50,6 +50,23 @@ const checkoutAttempts = createCheckoutAttemptRegistry({
   claimTimeoutMs: process.env.CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS || undefined
 });
 
+// Without a shared store directory the registry is per process, so a restart or
+// a second instance can create a second PayPal order for a reused quote. That
+// is a durability regression, not a fatal error, but operators must see it.
+const checkoutAttemptStoreWarning = checkoutAttempts.durable
+  ? null
+  : "CHECKOUT_ATTEMPT_STORE_DIR is not set: checkout replay protection is per process only, so a restart or another instance can create a duplicate PayPal order for a reused quote.";
+if (checkoutAttemptStoreWarning) {
+  process.stderr.write(
+    `${JSON.stringify({
+      ok: false,
+      warning: "checkout_attempt_store_not_durable",
+      error: checkoutAttemptStoreWarning,
+      checkout_attempts: { durable: false }
+    })}\n`
+  );
+}
+
 /**
  * Handler for embedded/serverless runtimes (Vercel). The module initialises the
  * dedupe store and config check on import, then registers this handler instead
@@ -394,9 +411,16 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
   var error = document.getElementById('error');
   var productsById = {};
   var quoteCache = null;
+  var CHECKOUT_MAX_ATTEMPTS = 3;
   var requested = q.get('product_id') || '';
   function show(message){ error.textContent = message; error.style.display = 'block'; }
   function clear(){ error.textContent = ''; error.style.display = 'none'; }
+  function sleep(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
+  function retryDelayMs(value){
+    var ms = Number(value);
+    if (!isFinite(ms) || ms < 0) ms = 1000;
+    return Math.min(ms, 10000);
+  }
   function loadQuote(productId, returnUrl, cancelUrl){
     var cacheKey = productId + '|' + returnUrl + '|' + cancelUrl;
     if (quoteCache && quoteCache.key === cacheKey && Date.now() < quoteCache.expiresAt - 30000) {
@@ -413,6 +437,27 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
           quoteCache = {key:cacheKey, body:quote, expiresAt:Date.parse(quote.expires_at) || 0};
         }
         return result;
+      });
+  }
+  function sendTransaction(body, attempt){
+    return fetch('/acp/v1/transactions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    })
+      .then(function(r){ return r.json().then(function(data){ return {status:r.status, body:data}; }); })
+      .then(function(result){
+        var payload = result.body || {};
+        if (result.status !== 409) return result;
+        if (payload.code !== 'CHECKOUT_IN_PROGRESS' || payload.retryable !== true) {
+          quoteCache = null;
+          return result;
+        }
+        if (attempt >= CHECKOUT_MAX_ATTEMPTS) return result;
+        button.textContent = 'Another checkout is finishing — retrying…';
+        return sleep(retryDelayMs(payload.retry_after_ms)).then(function(){
+          return sendTransaction(body, attempt + 1);
+        });
       });
   }
   function reference(){
@@ -470,19 +515,19 @@ a{color:#8ab4ff}h1{font-size:24px;margin:0 0 8px}p{line-height:1.55;color:#b8c1c
           throw new Error(quote.error || ('Price quote failed (HTTP ' + result.status + ')'));
         }
         requestBody.price_quote = quote.quote;
-        return fetch('/acp/v1/transactions', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify(requestBody)
-        });
+        return sendTransaction(requestBody, 1);
       })
-      .then(function(r){ return r.json().then(function(body){ return {status:r.status, body:body}; }); }).then(function(result){
-      var body = result.body || {};
-      if (result.status === 409) quoteCache = null;
-      if (result.status >= 300 || body.ok !== true) throw new Error(body.error || ('Checkout failed (HTTP ' + result.status + ')'));
-      var approval = body.payment_instructions && body.payment_instructions.approval_url;
-      if (!approval) throw new Error('PayPal did not return an approval link. Nothing was charged.');
-      location.href = approval;
+      .then(function(result){
+        var body = result.body || {};
+        if (result.status >= 300 || body.ok !== true) {
+          if (body.code === 'CHECKOUT_IN_PROGRESS') {
+            throw new Error('Checkout is still finishing in another tab. Press "Continue to PayPal" again in a moment — your price is held.');
+          }
+          throw new Error(body.error || ('Checkout failed (HTTP ' + result.status + ')'));
+        }
+        var approval = body.payment_instructions && body.payment_instructions.approval_url;
+        if (!approval) throw new Error('PayPal did not return an approval link. Nothing was charged.');
+        location.href = approval;
     }).catch(function(e){
       button.disabled = false;
       button.textContent = 'Continue to PayPal';
@@ -682,6 +727,8 @@ function validateConfig() {
 
 function getConfigCheck() {
   const missing = [];
+  const warnings = [];
+  if (checkoutAttemptStoreWarning) warnings.push(checkoutAttemptStoreWarning);
   const have = (name) => {
     const v = process.env[name];
     return v != null && String(v).trim() !== "" && !isPlaceholderValue(v);
@@ -705,6 +752,8 @@ function getConfigCheck() {
   return {
     ok: missing.length === 0,
     missing,
+    warnings,
+    checkout_attempts: { durable: checkoutAttempts.durable === true },
     flags: {
       SWARM_LIVE: String(process.env.SWARM_LIVE ?? "false").toLowerCase() === "true",
       BASE44_ENABLE_PAYPAL_WEBHOOK_WRITE: wantWriteEvent,

@@ -41,16 +41,40 @@ import {
   createCheckoutAttemptRegistry,
   probeCheckoutAttemptStore
 } from "./sales/checkout-attempts.mjs";
+import { checkoutClientKey, createCheckoutRateLimiter } from "./sales/checkout-rate-limit.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 let requestHandler = null;
 const checkoutAttemptStoreDirectory = process.env.CHECKOUT_ATTEMPT_STORE_DIR || null;
+
+/**
+ * Key that signs stored attempt records. An explicit attempt secret wins;
+ * otherwise reuse the quote key resolution the endpoint already trusts, so
+ * attempt signing cannot disagree with the key quotes are verified against
+ * (including its development-only fallback).
+ */
+function checkoutAttemptSigningSecret() {
+  const explicit = String(process.env.CHECKOUT_ATTEMPT_SIGNING_SECRET || "").trim();
+  if (explicit) return explicit;
+  try {
+    return resolvePriceQuoteKeys()?.current?.secret || null;
+  } catch {
+    // An invalid quote key configuration already fails closed at the quote and
+    // transaction endpoints. Do not turn it into a startup crash here: the
+    // store stays unsigned and /health reports that instead.
+    return null;
+  }
+}
+
 const checkoutAttempts = createCheckoutAttemptRegistry({
   // A store directory shared by every instance makes quote replay protection
   // survive restarts; without one the registry is per process.
   directory: checkoutAttemptStoreDirectory,
+  // Sign stored records so a writable shared volume cannot swap an order id
+  // between an order's creation and a replay.
+  signingSecret: checkoutAttemptSigningSecret(),
   // How long a request waits for a competing creator before answering with a
   // retryable conflict instead of starting a second PayPal order.
   claimTimeoutMs: process.env.CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS || undefined
@@ -58,6 +82,14 @@ const checkoutAttempts = createCheckoutAttemptRegistry({
 // Clear artifacts a crashed creator left behind (expired records, abandoned
 // claims, truncated temp files). Best effort: it must never block startup.
 void checkoutAttempts.sweep?.().catch(() => {});
+
+// Bound how many PayPal orders one source can start. The default is generous
+// because a client key is a network address and shared-NAT buyers share one
+// bucket; `CHECKOUT_RATE_LIMIT_MAX=0` turns it off when an edge already limits.
+const checkoutRateLimiter = createCheckoutRateLimiter({
+  windowMs: process.env.CHECKOUT_RATE_LIMIT_WINDOW_MS,
+  max: process.env.CHECKOUT_RATE_LIMIT_MAX
+});
 
 // A configured directory only protects restarts if it can actually be written
 // and is visible to every instance. Probe it instead of trusting the setting, so
@@ -108,6 +140,11 @@ function instanceLocalStorageReason(storage) {
 function checkoutAttemptStoreReport({ store, storage }) {
   return {
     durable: store.ok === true && storage.storage !== "instance_local",
+    // True only when records are actually persisted and this process signs
+    // them. Without a store there are no stored records; without a secret the
+    // files on a writable volume are plain JSON that anyone with write access
+    // can edit.
+    signed: checkoutAttempts.signed === true,
     directory: store.directory,
     writable: store.ok === true,
     storage: storage.storage,
@@ -133,6 +170,12 @@ function checkoutAttemptStoreWarningFor({ store, storage }) {
     return {
       code: "checkout_attempt_store_instance_local",
       error: `CHECKOUT_ATTEMPT_STORE_DIR (${store.directory}) is on instance-local storage (${instanceLocalStorageReason(storage)}): every instance keeps its own store, so a restart or another instance can still create a duplicate PayPal order for a reused quote. Point it at a volume shared by every instance, or leave it unset (per-process protection) instead of assuming it is durable.`
+    };
+  }
+  if (checkoutAttempts.signed !== true) {
+    return {
+      code: "checkout_attempt_store_unsigned",
+      error: `CHECKOUT_ATTEMPT_STORE_DIR (${store.directory}) is set but no attempt or quote signing secret is: stored checkout attempt records are unsigned, so anything that can write to that directory can swap a stored order id and have a replay return it. Set CHECKOUT_ATTEMPT_SIGNING_SECRET (or PRICE_QUOTE_SECRET) to sign the records.`
     };
   }
   return null;
@@ -1877,6 +1920,22 @@ if (args.check === true || args["config-check"] === true) {
     if (pathname === "/acp/v1/transactions") {
       if (req.method !== "POST") {
         json(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      // Counted before any validation, so a loop of failing attempts is bounded
+      // too and never reaches PayPal. A retry of an existing attempt costs one
+      // slot but no order.
+      const rate = checkoutRateLimiter.check(checkoutClientKey(req));
+      if (!rate.allowed) {
+        const retryAfterMs = Number(rate.retryAfterMs) > 0 ? Number(rate.retryAfterMs) : 1000;
+        res.setHeader("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+        json(res, 429, {
+          ok: false,
+          code: "CHECKOUT_RATE_LIMITED",
+          retryable: true,
+          retry_after_ms: retryAfterMs,
+          error: "Too many checkout attempts from this client. Retry shortly."
+        });
         return;
       }
       if (!shouldCreatePayPalOrders()) {

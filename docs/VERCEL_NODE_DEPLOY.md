@@ -60,6 +60,24 @@ function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
   checkout runs on a host with a mounted shared volume.
 - Optional `CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS` (how long a checkout waits for a
   competing creator before answering `409 CHECKOUT_IN_PROGRESS`; default 10000)
+- Optional `CHECKOUT_ATTEMPT_SIGNING_SECRET` (HMAC key for stored attempt
+  records; otherwise the price quote signing key from `resolvePriceQuoteKeys`,
+  including its development-only fallback). A record whose signature does not
+  verify is ignored, so a writable shared volume cannot swap an order id. The
+  config check and `/health` report `config.checkout_attempts.signed`, and a
+  configured store with no attempt or quote key raises the
+  `checkout_attempt_store_unsigned` warning: without a key, anyone who can write
+  to the volume can still edit a record that a replay trusts. Rotating the key
+  that signs attempt records makes records written under the old key
+  unverifiable for the rest of their TTL; the retry reuses the same deterministic
+  `PayPal-Request-Id`, so within that window PayPal returns the existing order
+  instead of creating a second one. Set `CHECKOUT_ATTEMPT_SIGNING_SECRET` to
+  rotate it independently of quotes.
+- Optional `CHECKOUT_RATE_LIMIT_MAX` (checkout attempts per client address per
+  window before `429 CHECKOUT_RATE_LIMITED`; default 60, `0` disables) and
+  `CHECKOUT_RATE_LIMIT_WINDOW_MS` (window length; default 600000). The counter is
+  per function instance and keyed by client address, so buyers behind one NAT
+  share an allowance: keep the default generous rather than tightening it.
 - Optional legacy quote reconciliation allowlist: `PAYPAL_LEGACY_QUOTE_ORDER_IDS` (comma-separated) or `PAYPAL_QUOTE_REQUIRED_AFTER` (ISO timestamp)
 
 The webhook must be registered in the PayPal dashboard for
@@ -129,8 +147,11 @@ also reports where the directory lives (`config.checkout_attempts.storage` is
 proves sharing, while a serverless runtime or a memory-backed filesystem proves
 per-instance storage and raises `checkout_attempt_store_instance_local` with
 `durable: false`. On Vercel, every path is instance-local, so the directory
-cannot make replay protection survive a restart there. These are warnings, so the
-config check still exits `0`. While another instance still holds that claim, the create endpoint
+cannot make replay protection survive a restart there. A configured store with
+neither `CHECKOUT_ATTEMPT_SIGNING_SECRET` nor `PRICE_QUOTE_SECRET` is reported as
+`config.checkout_attempts.signed: false` and raises
+`checkout_attempt_store_unsigned`, so an unsigned store is not mistaken for a
+signed one. These are warnings, so the config check still exits `0`. While another instance still holds that claim, the create endpoint
 answers `409 CHECKOUT_IN_PROGRESS` with `retryable: true`, a `retry_after_ms`
 value and a `Retry-After` header instead of a `500`; the page retries the same
 request with the same quote, and the retry replays the order once it is

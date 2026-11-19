@@ -151,10 +151,59 @@ const busyRetry = await call('/acp/v1/transactions', 'POST', busyBody);
 process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, duplicate, dup_quote_id: dupQuoteBody.quote_id, duplicate_order_calls: duplicateOrderCalls, order_calls_after_replay: orderCallsAfterReplay, capture, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
 `;
 
-function runProbe() {
+const rateLimitProbe = String.raw`
+import handler from './api/index.mjs';
+
+globalThis.__orderCreateCalls = 0;
+globalThis.fetch = async (url) => {
+  if (String(url).includes('/v2/checkout/orders')) {
+    globalThis.__orderCreateCalls += 1;
+    return new Response(JSON.stringify({ id: 'ORDER-RATE', status: 'CREATED', links: [] }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' }
+    });
+  }
+  throw new Error('unexpected fetch: ' + url);
+};
+
+function call(body, clientIp) {
+  return new Promise((resolve) => {
+    const req = {
+      method: 'POST',
+      url: '/acp/v1/transactions',
+      headers: { host: 'localhost', 'x-forwarded-for': clientIp, 'user-agent': 'test' },
+      socket: { remoteAddress: '10.0.0.7' },
+      readableEnded: true,
+      rawBody: body
+    };
+    const res = {
+      statusCode: 200,
+      headers: {},
+      setHeader(key, value) { this.headers[key] = value; },
+      getHeader(key) { return this.headers[key]; },
+      writeHead(status, headers) { this.statusCode = status; Object.assign(this.headers, headers || {}); return this; },
+      end(payload) { resolve({ status: this.statusCode, headers: this.headers, body: String(payload) }); }
+    };
+    handler(req, res).catch((error) => resolve({ status: 0, error: error.message }));
+  });
+}
+
+// These attempts carry no price quote, so they fail before PayPal is called, and
+// they still count against the client: an endless loop is cut off either way.
+const body = JSON.stringify({ product_id: 'financial-risk-manager-test-bank', amount: 19, currency: 'USD' });
+const first = await call(body, '203.0.113.9');
+const second = await call(body, '203.0.113.9');
+const limited = await call(body, '203.0.113.9');
+// A buyer on another address keeps a bucket of their own.
+const other = await call(body, '203.0.113.10');
+
+process.stdout.write(JSON.stringify({ first, second, limited, other, order_create_calls: globalThis.__orderCreateCalls }) + '\n');
+`;
+
+function runProbe(script = probe, envOverrides = {}) {
     const store = fs.mkdtempSync(path.join(os.tmpdir(), 'checkout-routes-'));
     try {
-        return spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+        return spawnSync(process.execPath, ['--input-type=module', '-e', script], {
             cwd: process.cwd(),
             encoding: 'utf8',
             timeout: 30000,
@@ -176,7 +225,8 @@ function runProbe() {
                 STOREFRONT_URL: 'https://www.realworldcerts.com',
                 CHECKOUT_PRICE_ORIGIN_URL: '',
                 PAYPAL_RETURN_URL: '',
-                PAYPAL_CANCEL_URL: ''
+                PAYPAL_CANCEL_URL: '',
+                ...envOverrides
             }
         });
     } finally {
@@ -294,6 +344,34 @@ test('replaying a quote returns the same PayPal order without creating another',
     assert.equal(probe.order_calls_after_replay, 1);
     assert.equal(JSON.parse(probe.replay.body).transaction_id, JSON.parse(probe.create.body).transaction_id);
     assert.match(probe.order_headers[0]['PayPal-Request-Id'], /^acp_[a-f0-9]{32}$/);
+});
+
+test('a client over the checkout rate limit gets a retryable 429 without reaching PayPal', () => {
+    const run = runProbe(rateLimitProbe, {
+        CHECKOUT_RATE_LIMIT_MAX: '2',
+        CHECKOUT_RATE_LIMIT_WINDOW_MS: '60000'
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const limited = JSON.parse(run.stdout.trim().split('\n').at(-1));
+
+    assert.equal(limited.first.status, 400, 'the first two attempts are still served');
+    assert.equal(limited.second.status, 400);
+    assert.equal(limited.limited.status, 429);
+    const body = JSON.parse(limited.limited.body);
+    assert.equal(body.ok, false);
+    assert.equal(body.code, 'CHECKOUT_RATE_LIMITED');
+    assert.equal(body.retryable, true);
+    assert.ok(body.retry_after_ms > 0, 'the client is told when to retry');
+    assert.match(limited.limited.headers['Retry-After'], /^[0-9]+$/);
+    assert.equal(limited.order_create_calls, 0, 'a limited client never creates a PayPal order');
+    assert.equal(limited.other.status, 400, 'another address keeps its own allowance');
+});
+
+test('the default allowance does not block normal checkout traffic from one address', () => {
+    const probe = result();
+    for (const response of [probe.missing, probe.stale, probe.create, probe.replay, probe.duplicate]) {
+        assert.notEqual(response.status, 429, 'shared-NAT buyers are not rate limited by default');
+    }
 });
 
 test('a second quote for the same cart is a separate attempt, not a replay', () => {

@@ -295,6 +295,90 @@ test('a failed durable creation releases the claim for a retry', async (t) => {
     assert.equal(retry.order.id, 'ORDER-RETRY');
 });
 
+const SIGNING_SECRET = 'attempt-signing-secret';
+
+test('an in-memory registry reports that it signs nothing', () => {
+    const registry = createCheckoutAttemptRegistry({ signingSecret: SIGNING_SECRET });
+    assert.equal(registry.durable, false);
+    assert.equal(registry.signed, false, 'memory attempts never reach a store another writer could tamper with');
+});
+
+test('a signed record replays the same order after a restart', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+
+    const first = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    assert.equal(first.signed, true);
+    const created = await first.run('q_signed', async () => ({ id: 'ORDER-SIGNED', status: 'CREATED' }));
+    assert.equal(created.replayed, false);
+    const stored = JSON.parse(await fs.readFile(path.join(dir, `${checkoutAttemptKey('q_signed')}.json`), 'utf8'));
+    assert.match(stored.sig, /^[a-f0-9]{64}$/, 'the record is signed on disk');
+
+    const restarted = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    let calls = 0;
+    const replay = await restarted.run('q_signed', async () => {
+        calls += 1;
+        return { id: 'ORDER-OTHER' };
+    });
+    assert.equal(calls, 0);
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.order.id, 'ORDER-SIGNED');
+});
+
+test('a tampered order id fails verification and is replaced by a fresh order', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+
+    const first = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    await first.run('q_tampered', async () => ({ id: 'ORDER-REAL', status: 'CREATED' }));
+
+    // Someone with write access to the shared volume swaps the order a replay
+    // would return for another one.
+    const file = path.join(dir, `${checkoutAttemptKey('q_tampered')}.json`);
+    const stored = JSON.parse(await fs.readFile(file, 'utf8'));
+    await fs.writeFile(file, JSON.stringify({ ...stored, order: { id: 'ORDER-ATTACKER' } }), 'utf8');
+
+    const restarted = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    const result = await restarted.run('q_tampered', async () => ({ id: 'ORDER-FRESH' }));
+
+    assert.equal(result.replayed, false, 'a swapped order is never replayed');
+    assert.equal(result.order.id, 'ORDER-FRESH');
+});
+
+test('an unsigned record is rejected once records are signed', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+    const key = checkoutAttemptKey('q_unsigned');
+    await fs.writeFile(path.join(dir, `${key}.json`), JSON.stringify({
+        v: 1,
+        quote_id: 'q_unsigned',
+        key,
+        order: { id: 'ORDER-UNSIGNED' },
+        created_at: new Date().toISOString(),
+        expires_at: Date.now() + 600_000
+    }), 'utf8');
+
+    const registry = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    const result = await registry.run('q_unsigned', async () => ({ id: 'ORDER-NEW' }));
+
+    assert.equal(result.replayed, false, 'stripping the signature does not skip the check');
+    assert.equal(result.order.id, 'ORDER-NEW');
+});
+
+test('a record signed with a different secret is rejected', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+
+    const writer = createCheckoutAttemptRegistry({ directory: dir, signingSecret: 'another-secret' });
+    await writer.run('q_rotated', async () => ({ id: 'ORDER-OTHER-KEY' }));
+
+    const registry = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    const result = await registry.run('q_rotated', async () => ({ id: 'ORDER-CURRENT-KEY' }));
+
+    assert.equal(result.replayed, false);
+    assert.equal(result.order.id, 'ORDER-CURRENT-KEY');
+});
+
 test('two quotes for the same cart stay separate attempts', async () => {
     // A quote carries no buyer identity: two customers buying the same course at
     // the same price produce identical product, amount, currency and redirect

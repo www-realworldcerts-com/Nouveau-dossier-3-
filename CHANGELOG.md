@@ -1,6 +1,27 @@
 # Changelog
 
 ## 2026-11-19
+- Signed stored checkout attempt records. When `CHECKOUT_ATTEMPT_SIGNING_SECRET`
+  (or the configured price quote key) is set, every record in
+  `CHECKOUT_ATTEMPT_STORE_DIR` carries an HMAC over its quote id, key, order and
+  expiry. A record that does not verify — swapped order id, stripped signature
+  or a signature from another key — is treated as absent, so a replay creates a
+  fresh PayPal order instead of trusting it. The signing key is derived and never
+  written to the store. The config check and `/health` now report whether that
+  protection is real as `config.checkout_attempts.signed`, and a configured
+  `CHECKOUT_ATTEMPT_STORE_DIR` with neither signing secret raises a
+  `checkout_attempt_store_unsigned` warning instead of leaving an operator to
+  assume the records are signed.
+- Limited checkout order creation per client. `POST /acp/v1/transactions` now
+  accepts 60 attempts per 10 minutes from one client address and answers
+  `429 CHECKOUT_RATE_LIMITED` with `retryable: true`, `retry_after_ms` and a
+  `Retry-After` header beyond that, before any quote check or PayPal call. The
+  default is deliberately generous because the key is a network address and
+  buyers behind one NAT share it; `CHECKOUT_RATE_LIMIT_MAX` and
+  `CHECKOUT_RATE_LIMIT_WINDOW_MS` tune it and `0` disables it. Forwarding
+  headers are read only when the request already arrived through a local proxy,
+  so a direct caller cannot mint a fresh bucket per request. The counter is per
+  process, so it bounds what one source can make one instance do.
 - Swept stale `CHECKOUT_ATTEMPT_STORE_DIR` artifacts at startup: expired order
   records, abandoned claim locks, truncated temp files and unreadable records
   older than the stale window are removed, so a crashed creator cannot leave

@@ -262,15 +262,68 @@ function createMemoryRegistry({ ttlMs, now }) {
 
     return {
         durable: false,
+        // Stored records do not exist without a directory, and nothing here is
+        // signed, so the reported state matches the durable registry's shape.
+        signed: false,
         run,
         clear: () => attempts.clear(),
         size: () => attempts.size
     };
 }
 
-function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimStaleMs, pollIntervalMs }) {
+/**
+ * Records live in a directory that may be shared, so whoever can write there
+ * could swap an order id and have a replay hand a customer an order that is not
+ * theirs. Every record therefore carries an HMAC over its own fields, keyed by a
+ * secret that never touches the store. A record whose signature does not verify
+ * is treated as absent: a fresh order is created instead of trusting it.
+ */
+function signingKeyFor(secret) {
+    // Derived, so the attempt store never uses the quote secret directly.
+    return crypto.createHmac('sha256', secret).update('acp-attempt-record:v1').digest();
+}
+
+/** Stable across key order, so a record signs and verifies to the same bytes. */
+function stableStringify(value) {
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+    if (value && typeof value === 'object') {
+        const fields = Object.keys(value).sort()
+            .map(field => `${JSON.stringify(field)}:${stableStringify(value[field])}`);
+        return `{${fields.join(',')}}`;
+    }
+    return JSON.stringify(value ?? null);
+}
+
+function signedPayload(record) {
+    return {
+        v: record.v,
+        quote_id: record.quote_id,
+        key: record.key,
+        order: record.order,
+        created_at: record.created_at,
+        expires_at: record.expires_at
+    };
+}
+
+function signRecord(record, signingKey) {
+    return crypto.createHmac('sha256', signingKey)
+        .update(stableStringify(signedPayload(record)))
+        .digest('hex');
+}
+
+function signatureVerifies(record, signingKey) {
+    const provided = String(record?.sig ?? '');
+    if (!/^[a-f0-9]{64}$/.test(provided)) return false;
+    return crypto.timingSafeEqual(
+        Buffer.from(provided, 'hex'),
+        Buffer.from(signRecord(record, signingKey), 'hex')
+    );
+}
+
+function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimStaleMs, pollIntervalMs, signingSecret }) {
     const dir = path.resolve(directory);
     const inflight = new Map();
+    const signingKey = signingSecret ? signingKeyFor(signingSecret) : null;
 
     const recordFile = key => path.join(dir, `${key}${RECORD_SUFFIX}`);
     const claimFile = key => path.join(dir, `${key}${CLAIM_SUFFIX}`);
@@ -292,6 +345,9 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
         if (!record || record.v !== RECORD_VERSION || !record.order || typeof record.order !== 'object') {
             return null;
         }
+        // An unsigned record is rejected too once a key is configured: the field
+        // is not optional, so stripping it is not a way to skip the check.
+        if (signingKey && !signatureVerifies(record, signingKey)) return null;
         const expiresAt = Number(record.expires_at);
         if (Number.isFinite(expiresAt) && expiresAt <= now()) {
             await fs.unlink(recordFile(key)).catch(() => {});
@@ -310,6 +366,7 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
             created_at: new Date(now()).toISOString(),
             expires_at: attemptDeadline(now(), ttlMs, expiresAt)
         };
+        if (signingKey) record.sig = signRecord(record, signingKey);
         const temporary = `${recordFile(key)}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
         await fs.writeFile(temporary, `${JSON.stringify(record)}\n`, 'utf8');
         // rename is atomic on a POSIX volume, so a reader never sees half a record
@@ -452,6 +509,7 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
 
     return {
         durable: true,
+        signed: Boolean(signingKey),
         run,
         sweep,
         // Published records only; claims and truncated temp files are not attempts.
@@ -467,6 +525,7 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
 
 export function createCheckoutAttemptRegistry({
     directory = null,
+    signingSecret = null,
     ttlMs = DEFAULT_TTL_MS,
     now = () => Date.now(),
     claimTimeoutMs = DEFAULT_CLAIM_TIMEOUT_MS,
@@ -481,7 +540,9 @@ export function createCheckoutAttemptRegistry({
         pollIntervalMs: positiveInt(pollIntervalMs, DEFAULT_POLL_MS)
     };
     const storeDirectory = typeof directory === 'string' ? directory.trim() : '';
-    return storeDirectory
-        ? createDurableRegistry({ ...base, directory: storeDirectory })
-        : createMemoryRegistry(base);
+    if (!storeDirectory) return createMemoryRegistry(base);
+    // Only persisted records need signing; in-memory attempts never reach a
+    // store another writer could tamper with.
+    const secret = typeof signingSecret === 'string' ? signingSecret.trim() : '';
+    return createDurableRegistry({ ...base, directory: storeDirectory, signingSecret: secret || null });
 }

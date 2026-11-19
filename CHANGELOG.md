@@ -1,6 +1,32 @@
 # Changelog
 
+## 2026-11-19
+- Swept stale `CHECKOUT_ATTEMPT_STORE_DIR` artifacts at startup: expired order
+  records, abandoned claim locks, truncated temp files and unreadable records
+  older than the stale window are removed, so a crashed creator cannot leave
+  files behind forever. Live claims and fresh temp files are left alone.
+- Kept checkout attempts keyed by the quote id rather than by the cart. A quote
+  carries no buyer identity — product, amount, currency and redirect URLs are
+  the same for every customer buying that course — so a cart key would replay
+  one buyer's PayPal order and approval link to the next buyer. A second quote
+  for the same cart is a separate attempt; a reload that keeps its quote still
+  replays it, and `PayPal-Request-Id` still deduplicates retries of one attempt.
+
 ## 2026-11-18
+- Checked that `CHECKOUT_ATTEMPT_STORE_DIR` is on shared storage. The config
+  check, the startup log and `/health` now report
+  `config.checkout_attempts.storage` (`shared`, `instance_local` or `unknown`)
+  and `filesystem`, and a serverless runtime or a memory-backed filesystem makes
+  `durable: false` with a `checkout_attempt_store_instance_local` warning, so a
+  Vercel deployment can no longer report per-instance replay protection as
+  durable. A network mount is the only positive proof of sharing.
+- Probed `CHECKOUT_ATTEMPT_STORE_DIR` instead of trusting it. The directory is
+  now created, written to and cleaned up by the config check, the startup log
+  and `/health`; when that probe fails the server raises a
+  `checkout_attempt_store_unwritable` warning, reports
+  `config.checkout_attempts.durable: false` with the failing path and error, and
+  still exits `0`, so a read-only or misconfigured volume can no longer look
+  restart-safe until the first checkout fails.
 - Warned operators when checkout replay protection silently degrades to per
   process memory. If `CHECKOUT_ATTEMPT_STORE_DIR` is unset the server now writes
   a `checkout_attempt_store_not_durable` warning to stderr at startup, lists it

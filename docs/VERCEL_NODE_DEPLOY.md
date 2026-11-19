@@ -52,8 +52,12 @@ the package/config files. `vercel.json` excludes `data/**` and
 function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
 - `PRICE_QUOTE_SECRET` and optional `PRICE_QUOTE_KEY_ID`, `RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`
 - `SETTLEMENT_LEDGER_PATH`, `FULFILLMENT_QUEUE_FILE` (durable writable paths)
-- `CHECKOUT_ATTEMPT_STORE_DIR` (durable directory shared by every instance, so
-  quote replay protection survives restarts)
+- `CHECKOUT_ATTEMPT_STORE_DIR` (durable, writable directory shared by every
+  instance, so quote replay protection survives restarts; the config check and
+  `/health` write and remove a probe file to confirm it). Vercel functions mount
+  no shared filesystem, so on Vercel the server reports any configured directory
+  as instance-local and warns; leave it unset there, and set it only when
+  checkout runs on a host with a mounted shared volume.
 - Optional `CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS` (how long a checkout waits for a
   competing creator before answering `409 CHECKOUT_IN_PROGRESS`; default 10000)
 - Optional legacy quote reconciliation allowlist: `PAYPAL_LEGACY_QUOTE_ORDER_IDS` (comma-separated) or `PAYPAL_QUOTE_REQUIRED_AFTER` (ISO timestamp)
@@ -115,7 +119,18 @@ quote: replaying a quote returns the order created by the first request. Set
 instance sees, so a replay is deduplicated after a restart or on another
 instance. The store claims a creation with an exclusive lock file and publishes
 the order with an atomic rename, so the volume must support atomic exclusive
-create. While another instance still holds that claim, the create endpoint
+create. Because a configured directory is not necessarily a usable one, `--check`
+and `/health` create and remove a probe file inside it: if that write fails the
+response reports `config.checkout_attempts.durable: false` with the directory and
+error, and warns with `checkout_attempt_store_unwritable` (or
+`checkout_attempt_store_not_durable` when the variable is unset). The same check
+also reports where the directory lives (`config.checkout_attempts.storage` is
+`shared`, `instance_local` or `unknown`, plus `filesystem`): a network filesystem
+proves sharing, while a serverless runtime or a memory-backed filesystem proves
+per-instance storage and raises `checkout_attempt_store_instance_local` with
+`durable: false`. On Vercel, every path is instance-local, so the directory
+cannot make replay protection survive a restart there. These are warnings, so the
+config check still exits `0`. While another instance still holds that claim, the create endpoint
 answers `409 CHECKOUT_IN_PROGRESS` with `retryable: true`, a `retry_after_ms`
 value and a `Retry-After` header instead of a `500`; the page retries the same
 request with the same quote, and the retry replays the order once it is

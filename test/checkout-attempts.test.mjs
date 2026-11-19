@@ -294,3 +294,58 @@ test('a failed durable creation releases the claim for a retry', async (t) => {
     assert.equal(retry.replayed, false);
     assert.equal(retry.order.id, 'ORDER-RETRY');
 });
+
+test('two quotes for the same cart stay separate attempts', async () => {
+    // A quote carries no buyer identity: two customers buying the same course at
+    // the same price produce identical product, amount, currency and redirect
+    // URLs. A cart-derived key would make the second buyer replay the first one's
+    // order and approval link, so the attempt must stay per quote.
+    const registry = createCheckoutAttemptRegistry();
+    let calls = 0;
+    const create = async () => ({ id: `ORDER-${++calls}` });
+
+    const first = await registry.run('q_buyer_one', create);
+    const second = await registry.run('q_buyer_two', create);
+
+    assert.notEqual(first.key, second.key);
+    assert.notEqual(first.order.id, second.order.id);
+    assert.equal(second.replayed, false);
+    assert.equal(calls, 2);
+});
+
+test('a sweep removes expired records and abandoned artifacts but not live ones', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+
+    const nowMs = Date.now();
+    const record = (expiresAt) => JSON.stringify({ v: 1, order: { id: 'ORDER-OLD' }, expires_at: expiresAt });
+    const expired = path.join(dir, `${checkoutAttemptKey('q_old')}.json`);
+    const fresh = path.join(dir, `${checkoutAttemptKey('q_new')}.json`);
+    const staleLock = path.join(dir, `${checkoutAttemptKey('q_lock')}.lock`);
+    const staleTmp = path.join(dir, `${checkoutAttemptKey('q_tmp')}.json.123.abc.tmp`);
+    const liveLock = path.join(dir, `${checkoutAttemptKey('q_live_lock')}.lock`);
+    const orphan = path.join(dir, `${checkoutAttemptKey('q_orphan')}.json`);
+    await fs.writeFile(expired, record(nowMs - 60_000), 'utf8');
+    await fs.writeFile(fresh, record(nowMs + 600_000), 'utf8');
+    await fs.writeFile(staleLock, '1', 'utf8');
+    await fs.writeFile(staleTmp, '{}', 'utf8');
+    await fs.writeFile(liveLock, '2', 'utf8');
+    // A record with no usable expiry is never replayable, so it is garbage.
+    await fs.writeFile(orphan, '{not json', 'utf8');
+    const longAgo = new Date(nowMs - 10 * 60_000);
+    await fs.utimes(staleLock, longAgo, longAgo);
+    await fs.utimes(staleTmp, longAgo, longAgo);
+    await fs.utimes(orphan, longAgo, longAgo);
+
+    const registry = createCheckoutAttemptRegistry({ directory: dir, ttlMs: 60_000, claimStaleMs: 60_000 });
+    assert.equal(typeof registry.sweep, 'function');
+    const result = await registry.sweep();
+
+    assert.equal(result.removed, 4);
+    await assert.rejects(fs.access(expired), { code: 'ENOENT' });
+    await assert.rejects(fs.access(staleLock), { code: 'ENOENT' });
+    await assert.rejects(fs.access(staleTmp), { code: 'ENOENT' });
+    await assert.rejects(fs.access(orphan), { code: 'ENOENT' });
+    await fs.access(fresh);
+    await fs.access(liveLock);
+});

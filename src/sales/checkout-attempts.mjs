@@ -44,10 +44,160 @@ export class CheckoutAttemptInProgressError extends Error {
     }
 }
 
+/**
+ * One signed quote is one checkout attempt.
+ *
+ * The key stays per quote on purpose. A quote carries no buyer identity: its
+ * product, amount, currency and redirect URLs are the same for every customer
+ * buying that course, so a cart-derived key would make the second buyer of a
+ * course replay the first buyer's PayPal order and hand them its approval link.
+ * A duplicate order from a page reload is the lesser risk, and a reload that
+ * keeps its quote is already replayed by `run`.
+ */
 export function checkoutAttemptKey(quoteId) {
     const id = String(quoteId || '').trim();
     if (!id) return null;
     return `acp_${crypto.createHash('sha256').update(`acp-order:${id}`).digest('hex').slice(0, 32)}`;
+}
+
+const PROBE_SUFFIX = '.acp_probe';
+
+/**
+ * Check that a store directory can actually hold an attempt: create the
+ * directory, write a uniquely named probe file and remove it again.
+ *
+ * A configured directory is not necessarily a usable one — a read-only volume,
+ * a full disk or a path that is a file all look configured until the first
+ * claim fails, by which point a customer is mid-checkout. Probing lets the
+ * config check and /health report the real state instead of trusting the
+ * setting.
+ */
+export function probeCheckoutAttemptStore(directory) {
+    const configured = typeof directory === 'string' ? directory.trim() : '';
+    if (!configured) {
+        return { configured: false, ok: false, code: null, error: null, directory: null };
+    }
+    const resolved = path.resolve(configured);
+    const probe = path.join(resolved, `${PROBE_SUFFIX}${process.pid}_${crypto.randomBytes(6).toString('hex')}`);
+    let failure = null;
+    try {
+        fsSync.mkdirSync(resolved, { recursive: true });
+        // 'wx' fails instead of overwriting anything already at the probe path.
+        fsSync.writeFileSync(probe, 'probe', { flag: 'wx' });
+    } catch (error) {
+        failure = error;
+    }
+    try {
+        fsSync.unlinkSync(probe);
+    } catch {
+        // Nothing to remove when the write itself failed.
+    }
+    if (failure) {
+        return {
+            configured: true,
+            ok: false,
+            code: typeof failure.code === 'string' && failure.code ? failure.code : 'PROBE_FAILED',
+            error: String(failure.message || failure),
+            directory: resolved
+        };
+    }
+    // Writability is all a probe can prove; sharing and restart survival are
+    // decided by `classifyCheckoutAttemptStorage`.
+    return { configured: true, ok: true, code: null, error: null, directory: resolved };
+}
+
+// Linux `statfs` type values (f_type). A network filesystem is the only positive
+// evidence of shared storage readable from the path itself.
+const NETWORK_FILESYSTEM_TYPES = new Set([
+    0x6969, // nfs
+    0xff534d42, // cifs
+    0xfe534d42, // smb2
+    0x517b, // smb
+    0x01021997 // 9p
+]);
+// Memory-backed filesystems cannot outlive a restart, let alone an instance.
+const VOLATILE_FILESYSTEM_TYPES = new Set([
+    0x01021994, // tmpfs
+    0x858458f6, // ramfs
+    0x1373 // devtmpfs
+]);
+const FILESYSTEM_TYPE_NAMES = new Map([
+    [0x6969, 'nfs'],
+    [0xff534d42, 'cifs'],
+    [0xfe534d42, 'smb2'],
+    [0x517b, 'smb'],
+    [0x01021997, '9p'],
+    [0x01021994, 'tmpfs'],
+    [0x858458f6, 'ramfs'],
+    [0x1373, 'devtmpfs'],
+    [0x794c7630, 'overlay'],
+    [0xef53, 'ext4'],
+    [0x58465342, 'xfs'],
+    [0x9123683e, 'btrfs'],
+    [0x2fc12fc1, 'zfs']
+]);
+
+const SERVERLESS_RUNTIMES = [
+    ['VERCEL', 'vercel'],
+    ['AWS_LAMBDA_FUNCTION_NAME', 'lambda'],
+    ['NETLIFY', 'netlify']
+];
+
+function detectServerlessRuntime(env) {
+    const has = name => Boolean(String(env?.[name] ?? '').trim());
+    for (const [name, runtime] of SERVERLESS_RUNTIMES) {
+        if (has(name)) return runtime;
+    }
+    if (String(env?.AWS_EXECUTION_ENV ?? '').startsWith('AWS_Lambda')) return 'lambda';
+    return null;
+}
+
+/**
+ * Decide whether a store directory can actually be shared, so a deployment
+ * cannot report `durable: true` while every instance keeps its own copy.
+ *
+ * The path is only ever *proved* shared (a network mount) or *proved* not shared
+ * (a serverless runtime, which mounts no shared filesystem, or a memory-backed
+ * filesystem that cannot survive a restart). Anything else is reported as
+ * `unknown` rather than guessed either way, because a plain local volume on a
+ * single long-lived host still survives restarts.
+ */
+export function classifyCheckoutAttemptStorage({ directory, env = process.env, filesystemType = null } = {}) {
+    const configured = typeof directory === 'string' ? directory.trim() : '';
+    if (!configured) {
+        return { configured: false, storage: null, filesystem: null, volatile: false, runtime: null };
+    }
+    const knownType = Number.isFinite(filesystemType);
+    const filesystem = !knownType
+        ? null
+        : FILESYSTEM_TYPE_NAMES.get(filesystemType) ?? `0x${filesystemType.toString(16)}`;
+    const runtime = detectServerlessRuntime(env);
+    const shared = knownType && NETWORK_FILESYSTEM_TYPES.has(filesystemType);
+    const volatile = knownType && VOLATILE_FILESYSTEM_TYPES.has(filesystemType);
+    return {
+        configured: true,
+        storage: shared ? 'shared' : (runtime || volatile ? 'instance_local' : 'unknown'),
+        filesystem,
+        volatile,
+        runtime
+    };
+}
+
+export function assessCheckoutAttemptStoreStorage(directory, env = process.env) {
+    const configured = typeof directory === 'string' ? directory.trim() : '';
+    let filesystemType = null;
+    if (configured) {
+        try {
+            const stats = typeof fsSync.statfsSync === 'function'
+                ? fsSync.statfsSync(path.resolve(configured))
+                : null;
+            if (stats && Number.isFinite(stats.type)) filesystemType = stats.type;
+        } catch {
+            // A missing directory or a platform without statfs is reported by
+            // the writability probe; storage stays unknown here.
+        }
+    }
+    return classifyCheckoutAttemptStorage({ directory: configured, env, filesystemType });
 }
 
 function positiveInt(value, fallback) {
@@ -66,10 +216,7 @@ function sleep(ms) {
  */
 function attemptDeadline(nowMs, ttlMs, expiresAt) {
     const quoteDeadline = expiresAt ? Date.parse(expiresAt) : NaN;
-    return Math.max(
-        nowMs + 60_000,
-        Number.isFinite(quoteDeadline) ? quoteDeadline : nowMs + ttlMs
-    );
+    return Math.max(nowMs + 60_000, Number.isFinite(quoteDeadline) ? quoteDeadline : nowMs + ttlMs);
 }
 
 function createMemoryRegistry({ ttlMs, now }) {
@@ -254,9 +401,59 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
         }
     }
 
+    /**
+     * Remove artifacts a crashed creator left behind: expired order records,
+     * abandoned claims and truncated temp files. A record without a usable
+     * expiry cannot be replayed by `readRecord`, so it is treated like a temp
+     * file and removed once it is older than the ttl. Only files older than the
+     * stale window go, so a live writer in another instance is never touched.
+     * Runs once when the registry is created; safe to call again.
+     */
+    async function sweep() {
+        let names;
+        try {
+            names = await fs.readdir(dir);
+        } catch (error) {
+            if (error?.code === 'ENOENT') return { removed: 0 };
+            throw error;
+        }
+        const current = now();
+        let removed = 0;
+        for (const name of names) {
+            const target = path.join(dir, name);
+            try {
+                if (name.endsWith(RECORD_SUFFIX)) {
+                    let expiresAt = NaN;
+                    try {
+                        expiresAt = Number(JSON.parse(await fs.readFile(target, 'utf8'))?.expires_at);
+                    } catch {
+                        // Truncated or unreadable: judged by age instead.
+                    }
+                    const expired = Number.isFinite(expiresAt)
+                        ? expiresAt <= current
+                        : current - (await fs.stat(target)).mtimeMs > ttlMs;
+                    if (expired) {
+                        await fs.unlink(target);
+                        removed += 1;
+                    }
+                } else if (name.endsWith(CLAIM_SUFFIX) || name.endsWith('.tmp')) {
+                    const stats = await fs.stat(target);
+                    if (current - stats.mtimeMs > claimStaleMs) {
+                        await fs.unlink(target);
+                        removed += 1;
+                    }
+                }
+            } catch {
+                // Another instance may have removed it first, or it vanished.
+            }
+        }
+        return { removed };
+    }
+
     return {
         durable: true,
         run,
+        sweep,
         // Published records only; claims and truncated temp files are not attempts.
         size: () => {
             try {

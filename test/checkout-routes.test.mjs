@@ -107,18 +107,36 @@ const redirectMismatch = await call('/acp/v1/transactions', 'POST', JSON.stringi
 }));
 const create = await call('/acp/v1/transactions', 'POST', createBody);
 const replay = await call('/acp/v1/transactions', 'POST', createBody);
+const orderCallsAfterReplay = globalThis.__orderCreateCalls;
+
+// A second quote for the same cart belongs to a different customer just as
+// easily as to a reload, so it is its own attempt and must not replay the order
+// and approval link the first quote created.
+const dupQuote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank&return_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/success') + '&cancel_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/cancel'));
+const dupQuoteBody = JSON.parse(dupQuote.body);
+const duplicate = await call('/acp/v1/transactions', 'POST', JSON.stringify({
+  product_id: 'financial-risk-manager-test-bank',
+  amount: 19,
+  currency: 'USD',
+  price_quote: dupQuoteBody.quote,
+  return_url: 'https://www.realworldcerts.com/buy/success',
+  cancel_url: 'https://www.realworldcerts.com/buy/cancel'
+}));
+const duplicateOrderCalls = globalThis.__orderCreateCalls;
 const capture = await call('/acp/v1/transactions/ORDER-TEST/capture', 'POST');
 const orderCallsBeforeBusy = globalThis.__orderCreateCalls;
 
-// Another instance holds the claim for a fresh quote: the store directory has
-// its lock file but no published order yet.
-const busyQuote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank&return_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/success') + '&cancel_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/cancel'));
+// Another instance holds the claim for a different cart: the store directory
+// has its lock file but no published order yet. A different course keeps this
+// independent from the cart already ordered above.
+const busyProduct = 'certified-blockchain-expert-cbe-preptest-2025';
+const busyQuote = await call('/acp/v1/price-quote?product_id=' + busyProduct + '&return_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/success') + '&cancel_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/cancel'));
 const busyQuoteBody = JSON.parse(busyQuote.body);
 const busyLock = process.env.CHECKOUT_ATTEMPT_STORE_DIR + '/' + checkoutAttemptKey(busyQuoteBody.quote_id) + '.lock';
 await fs.mkdir(process.env.CHECKOUT_ATTEMPT_STORE_DIR, { recursive: true });
 await fs.writeFile(busyLock, '424242');
 const busyBody = JSON.stringify({
-  product_id: 'financial-risk-manager-test-bank',
+  product_id: busyProduct,
   amount: 19,
   currency: 'USD',
   price_quote: busyQuoteBody.quote,
@@ -130,7 +148,7 @@ const busyOrderCalls = globalThis.__orderCreateCalls;
 await fs.unlink(busyLock);
 const busyRetry = await call('/acp/v1/transactions', 'POST', busyBody);
 
-process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, capture, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
+process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, duplicate, dup_quote_id: dupQuoteBody.quote_id, duplicate_order_calls: duplicateOrderCalls, order_calls_after_replay: orderCallsAfterReplay, capture, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
 `;
 
 function runProbe() {
@@ -221,7 +239,7 @@ test('ACP rejects checkout without a price quote before calling PayPal', () => {
     assert.equal(probe.missing.status, 400);
     const body = JSON.parse(probe.missing.body);
     assert.equal(body.code, 'PRICE_QUOTE_REQUIRED');
-    assert.equal(probe.order_create_calls, 1, 'only the quoted checkout may call PayPal');
+    assert.equal(probe.order_calls_after_replay, 1, 'only the quoted checkout may call PayPal');
 });
 
 test('ACP rejects redirect URLs outside the allowed checkout origin or paths', () => {
@@ -232,7 +250,7 @@ test('ACP rejects redirect URLs outside the allowed checkout origin or paths', (
     assert.equal(probe.badPathQuote.status, 400);
     assert.equal(JSON.parse(probe.badPathQuote.body).code, 'CHECKOUT_REDIRECT_INVALID');
     assert.match(JSON.parse(probe.badPathQuote.body).error, /checkout_redirect_path/);
-    assert.equal(probe.order_create_calls, 1, 'rejected redirects never call PayPal');
+    assert.equal(probe.order_calls_after_replay, 1, 'rejected redirects never call PayPal');
 });
 
 test('ACP rejects a replayed quote with different redirect URLs', () => {
@@ -240,7 +258,7 @@ test('ACP rejects a replayed quote with different redirect URLs', () => {
     assert.equal(probe.redirectMismatch.status, 409);
     const body = JSON.parse(probe.redirectMismatch.body);
     assert.equal(body.code, 'QUOTE_REDIRECT_MISMATCH');
-    assert.equal(probe.order_create_calls, 1, 'the mismatched redirect never calls PayPal');
+    assert.equal(probe.order_calls_after_replay, 1, 'the mismatched redirect never calls PayPal');
 });
 
 test('ACP checkout rejects a stale displayed amount before creating a PayPal order', () => {
@@ -251,7 +269,7 @@ test('ACP checkout rejects a stale displayed amount before creating a PayPal ord
     assert.equal(body.code, 'PRICE_CHANGED');
     assert.deepEqual(body.expected, { value: '19.00', currency: 'USD' });
     assert.deepEqual(body.submitted, { value: '0.01', currency: 'EUR' });
-    assert.equal(probe.order_create_calls, 1, 'only the matching checkout may call PayPal');
+    assert.equal(probe.order_calls_after_replay, 1, 'only the matching checkout may call PayPal');
 });
 
 test('ACP checkout accepts the displayed amount when it matches the catalog', () => {
@@ -273,9 +291,22 @@ test('replaying a quote returns the same PayPal order without creating another',
     const probe = result();
     assert.equal(probe.create.status, 200);
     assert.equal(probe.replay.status, 200);
-    assert.equal(probe.order_create_calls, 1);
+    assert.equal(probe.order_calls_after_replay, 1);
     assert.equal(JSON.parse(probe.replay.body).transaction_id, JSON.parse(probe.create.body).transaction_id);
     assert.match(probe.order_headers[0]['PayPal-Request-Id'], /^acp_[a-f0-9]{32}$/);
+});
+
+test('a second quote for the same cart is a separate attempt, not a replay', () => {
+    const probe = result();
+    assert.equal(probe.duplicate.status, 200);
+    const body = JSON.parse(probe.duplicate.body);
+    assert.equal(body.ok, true);
+    assert.notEqual(probe.dup_quote_id, JSON.parse(probe.quote.body).quote_id, 'the two quotes are distinct');
+    assert.equal(
+        probe.duplicate_order_calls,
+        probe.order_calls_after_replay + 1,
+        'the second buyer gets an order of their own, not the first buyer\'s approval link'
+    );
 });
 
 test('a checkout whose order another instance is still creating returns a retryable conflict', () => {
@@ -288,14 +319,14 @@ test('a checkout whose order another instance is still creating returns a retrya
     assert.equal(body.quote_id, probe.busy_quote_id);
     assert.equal(body.error, 'Another checkout is already creating this order for this quote. Retry the same request shortly.');
     assert.match(probe.busy.headers['Retry-After'], /^[0-9]+$/);
-    assert.equal(probe.busy_order_calls, probe.order_create_calls, 'the conflict never creates a second order');
+    assert.equal(probe.busy_order_calls, probe.order_calls_after_replay + 1, 'the conflict never creates another order');
 });
 
 test('retrying after the competing creator releases the claim creates the order', () => {
     const probe = result();
     assert.equal(probe.busy_retry.status, 200);
     assert.equal(JSON.parse(probe.busy_retry.body).transaction_id, 'ORDER-NEW');
-    assert.equal(probe.busy_retry_order_calls, probe.order_create_calls + 1, 'the retry creates exactly one order');
+    assert.equal(probe.busy_retry_order_calls, probe.busy_order_calls + 1, 'the retry creates exactly one order');
 });
 
 function pageElement() {

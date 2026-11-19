@@ -35,34 +35,118 @@ import {
   resolvePriceQuoteKeys,
   verifyPriceQuote
 } from "./sales/price-quote.mjs";
-import { checkoutAttemptKey, createCheckoutAttemptRegistry } from "./sales/checkout-attempts.mjs";
+import {
+  assessCheckoutAttemptStoreStorage,
+  checkoutAttemptKey,
+  createCheckoutAttemptRegistry,
+  probeCheckoutAttemptStore
+} from "./sales/checkout-attempts.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 let requestHandler = null;
+const checkoutAttemptStoreDirectory = process.env.CHECKOUT_ATTEMPT_STORE_DIR || null;
 const checkoutAttempts = createCheckoutAttemptRegistry({
   // A store directory shared by every instance makes quote replay protection
   // survive restarts; without one the registry is per process.
-  directory: process.env.CHECKOUT_ATTEMPT_STORE_DIR || null,
+  directory: checkoutAttemptStoreDirectory,
   // How long a request waits for a competing creator before answering with a
   // retryable conflict instead of starting a second PayPal order.
   claimTimeoutMs: process.env.CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS || undefined
 });
+// Clear artifacts a crashed creator left behind (expired records, abandoned
+// claims, truncated temp files). Best effort: it must never block startup.
+void checkoutAttempts.sweep?.().catch(() => {});
 
-// Without a shared store directory the registry is per process, so a restart or
-// a second instance can create a second PayPal order for a reused quote. That
-// is a durability regression, not a fatal error, but operators must see it.
-const checkoutAttemptStoreWarning = checkoutAttempts.durable
-  ? null
-  : "CHECKOUT_ATTEMPT_STORE_DIR is not set: checkout replay protection is per process only, so a restart or another instance can create a duplicate PayPal order for a reused quote.";
-if (checkoutAttemptStoreWarning) {
+// A configured directory only protects restarts if it can actually be written
+// and is visible to every instance. Probe it instead of trusting the setting, so
+// a read-only volume or a serverless instance's local disk cannot look durable
+// until the first claim fails. Cached briefly because /health and the webhook
+// path both consult this.
+const CHECKOUT_ATTEMPT_STORE_PROBE_TTL_MS = 5_000;
+let checkoutAttemptStoreCheck = null;
+
+function checkoutAttemptStoreCheckCached() {
+  const nowMs = Date.now();
+  if (
+    checkoutAttemptStoreCheck &&
+    nowMs - checkoutAttemptStoreCheck.at < CHECKOUT_ATTEMPT_STORE_PROBE_TTL_MS
+  ) {
+    return checkoutAttemptStoreCheck.result;
+  }
+  const store = probeCheckoutAttemptStore(checkoutAttemptStoreDirectory);
+  const storage = assessCheckoutAttemptStoreStorage(checkoutAttemptStoreDirectory);
+  const result = { store, storage };
+  checkoutAttemptStoreCheck = { at: nowMs, result };
+  return result;
+}
+
+const SERVERLESS_RUNTIME_LABELS = {
+  vercel: "Vercel functions",
+  lambda: "Lambda functions",
+  netlify: "Netlify functions"
+};
+
+function instanceLocalStorageReason(storage) {
+  const parts = [];
+  if (storage.runtime) {
+    const runtime = SERVERLESS_RUNTIME_LABELS[storage.runtime] || storage.runtime;
+    parts.push(`${runtime} have no shared filesystem`);
+  }
+  if (storage.volatile && storage.filesystem) {
+    parts.push(`${storage.filesystem} does not survive a restart`);
+  }
+  return parts.length ? parts.join("; ") : "the directory is not shared storage";
+}
+
+/**
+ * What the operator should see about restart protection. `durable` means an
+ * attempt written now is visible to another instance and after a restart, so it
+ * requires both a successful write and storage that is not instance-local.
+ */
+function checkoutAttemptStoreReport({ store, storage }) {
+  return {
+    durable: store.ok === true && storage.storage !== "instance_local",
+    directory: store.directory,
+    writable: store.ok === true,
+    storage: storage.storage,
+    filesystem: storage.filesystem,
+    error: store.ok ? null : store.error
+  };
+}
+
+function checkoutAttemptStoreWarningFor({ store, storage }) {
+  if (!store.configured) {
+    return {
+      code: "checkout_attempt_store_not_durable",
+      error: "CHECKOUT_ATTEMPT_STORE_DIR is not set: checkout replay protection is per process only, so a restart or another instance can create a duplicate PayPal order for a reused quote."
+    };
+  }
+  if (!store.ok) {
+    return {
+      code: "checkout_attempt_store_unwritable",
+      error: `CHECKOUT_ATTEMPT_STORE_DIR (${store.directory}) is set but not writable (${store.code}): checkout replay protection cannot persist attempts, so a restart or another instance can create a duplicate PayPal order for a reused quote, and checkouts fail until the directory is usable.`
+    };
+  }
+  if (storage.storage === "instance_local") {
+    return {
+      code: "checkout_attempt_store_instance_local",
+      error: `CHECKOUT_ATTEMPT_STORE_DIR (${store.directory}) is on instance-local storage (${instanceLocalStorageReason(storage)}): every instance keeps its own store, so a restart or another instance can still create a duplicate PayPal order for a reused quote. Point it at a volume shared by every instance, or leave it unset (per-process protection) instead of assuming it is durable.`
+    };
+  }
+  return null;
+}
+
+const startupCheckoutAttemptStore = checkoutAttemptStoreCheckCached();
+const startupCheckoutAttemptStoreWarning = checkoutAttemptStoreWarningFor(startupCheckoutAttemptStore);
+if (startupCheckoutAttemptStoreWarning) {
   process.stderr.write(
     `${JSON.stringify({
       ok: false,
-      warning: "checkout_attempt_store_not_durable",
-      error: checkoutAttemptStoreWarning,
-      checkout_attempts: { durable: false }
+      warning: startupCheckoutAttemptStoreWarning.code,
+      error: startupCheckoutAttemptStoreWarning.error,
+      checkout_attempts: checkoutAttemptStoreReport(startupCheckoutAttemptStore)
     })}\n`
   );
 }
@@ -728,7 +812,9 @@ function validateConfig() {
 function getConfigCheck() {
   const missing = [];
   const warnings = [];
-  if (checkoutAttemptStoreWarning) warnings.push(checkoutAttemptStoreWarning);
+  const checkoutAttemptStore = checkoutAttemptStoreCheckCached();
+  const checkoutAttemptStoreWarning = checkoutAttemptStoreWarningFor(checkoutAttemptStore);
+  if (checkoutAttemptStoreWarning) warnings.push(checkoutAttemptStoreWarning.error);
   const have = (name) => {
     const v = process.env[name];
     return v != null && String(v).trim() !== "" && !isPlaceholderValue(v);
@@ -753,7 +839,7 @@ function getConfigCheck() {
     ok: missing.length === 0,
     missing,
     warnings,
-    checkout_attempts: { durable: checkoutAttempts.durable === true },
+    checkout_attempts: checkoutAttemptStoreReport(checkoutAttemptStore),
     flags: {
       SWARM_LIVE: String(process.env.SWARM_LIVE ?? "false").toLowerCase() === "true",
       BASE44_ENABLE_PAYPAL_WEBHOOK_WRITE: wantWriteEvent,
@@ -1970,6 +2056,11 @@ if (args.check === true || args["config-check"] === true) {
       const description = String(picked.title || "").trim() || null;
       const customId = String(body.reference ?? body.custom_id ?? body.customId ?? `acp_${Date.now()}`).slice(0, 120);
 
+      // Keyed by the quote, not by the cart it sells: a quote carries no buyer
+      // identity, so a cart key would replay one customer's order (and its
+      // approval link) to the next customer buying the same course. The quote id
+      // is also the PayPal idempotency key, so retries of this attempt stay
+      // deduplicated even on another instance.
       const requestId = checkoutAttemptKey(quote.qid);
       let order;
       try {

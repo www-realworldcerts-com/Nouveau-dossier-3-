@@ -21,6 +21,11 @@ import {
 } from "./base44-revenue.mjs";
 import { maybeSendAlert } from "./alerts.mjs";
 import { createDedupeStore } from "./dedupe-store.mjs";
+import {
+  identifiersFromPayPalEvent,
+  recordVerifiedWebhook,
+  registryStatus
+} from "./real/psp/webhook-registry.mjs";
 import { enforceAuthorityProtocol } from "./authority.mjs";
 import { addSecurityHeaders, validateRequest, validateAuth } from "./security-middleware.mjs";
 import { escapeHtml, fulfillPaidOrder, verifyAccessToken } from "./financial/fulfillment-service.mjs";
@@ -1532,6 +1537,9 @@ if (args.check === true || args["config-check"] === true) {
         // A serverless instance cannot share a file log; this says so instead of
         // letting the funnel quietly reset on every cold start.
         checkout_intents: intentStoreStatus(),
+        // Nothing confirms money unless a webhook we recorded named it, so a
+        // store that does not survive the instance must be visible here.
+        psp_webhook_registry: registryStatus(),
         startupConfigError
       });
       return;
@@ -2670,6 +2678,23 @@ if (args.check === true || args["config-check"] === true) {
       return;
     }
 
+    // Only a webhook PayPal verified can confirm money later, so the receipt
+    // is written before anything else believes this event. Recorded before the
+    // dedupe short-circuit: a replay must not leave the registry empty.
+    let webhookReceipt = null;
+    try {
+      webhookReceipt = await recordVerifiedWebhook(
+        identifiersFromPayPalEvent(evt, headers?.transmissionId)
+      );
+    } catch (err) {
+      webhookReceipt = {
+        recorded: false,
+        reason: "registry_write_failed",
+        error: truncate(err?.message ?? String(err), 200)
+      };
+      process.stderr.write(`webhook registry write failed: ${webhookReceipt.error}\n`);
+    }
+
     const dedupeKey =
       evt?.id ??
       headers?.transmissionId ??
@@ -2680,6 +2705,7 @@ if (args.check === true || args["config-check"] === true) {
         verified: true,
         deduped: true,
         dedupe: dedupeStore.stats(),
+        webhook_receipt: webhookReceipt,
         processingMs: Date.now() - startMs,
         summary: buildSummary(evt)
       });
@@ -2860,6 +2886,7 @@ if (args.check === true || args["config-check"] === true) {
       payoutBatchStatusResult,
       eventDeduped: created?.deduped === true,
       dedupe: dedupeStore.stats(),
+      webhook_receipt: webhookReceipt,
       processingMs: Date.now() - startMs,
       summary: buildSummary(evt, { revenueCandidate: revenueEvent ? true : false })
     });

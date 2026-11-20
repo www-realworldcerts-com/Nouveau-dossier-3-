@@ -1,6 +1,22 @@
 # Changelog
 
 ## 2026-11-20
+- A psp id now confirms money only if it names a webhook PayPal actually
+  verified. `assertPSPWebhookExists` accepted any id longer than five
+  characters, so a forged capture id passed as `psp_confirmation_missing`-free
+  proof; it now checks a registry in which the webhook server and
+  `handlePayPalWebhook` write a receipt after PayPal returns
+  `verification_status: SUCCESS`, keyed by capture/transaction id, webhook event
+  id and transmission id. Receipts are idempotent, a receipt without a provider
+  transaction id is refused, and a corrupted registry reads as no confirmation.
+  The registry is a file (`PSP_WEBHOOK_REGISTRY_FILE`, default
+  `data/psp/verified-webhooks.ndjson`) or an append-only HTTP sink
+  (`PSP_WEBHOOK_REGISTRY_URL`/`PSP_WEBHOOK_REGISTRY_TOKEN`) because a serverless
+  instance cannot keep a file; `/health` reports it as `psp_webhook_registry`
+  with `durable` and the reason, so a store that dies with the instance is not
+  mistaken for an empty audit trail. `handlePayPalWebhook` also treated any
+  answer from the verify call as success; only `SUCCESS` counts now, so a
+  `FAILURE` response can neither record a receipt nor reach the proof.
 - Revenue and earnings are now refused at creation, not demoted at the ledger
   write, when no payment-provider transaction id backs them
   (`REVENUE_NOT_PROVIDER_VERIFIED`). The guard sits in `buildRevenueData`,

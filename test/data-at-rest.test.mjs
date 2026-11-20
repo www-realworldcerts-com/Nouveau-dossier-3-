@@ -9,7 +9,9 @@ import {
   encryptBuffer,
   encryptSensitiveFields,
   encryptionConfigured,
-  scanSensitiveFields
+  readJsonAtRest,
+  scanSensitiveFields,
+  writeJsonAtomic
 } from '../src/security/data-at-rest.mjs';
 import { loadPayoutLedger, savePayoutLedger } from '../src/financial/payout-ledger.mjs';
 
@@ -79,6 +81,43 @@ test('binary encrypted files detect tampering', () => {
     tampered[tampered.length - 1] ^= 1;
     assert.throws(() => decryptBuffer(tampered), /could not be decrypted/i);
   } finally {
+    if (previous == null) delete process.env.DATA_ENCRYPTION_KEY;
+    else process.env.DATA_ENCRYPTION_KEY = previous;
+  }
+});
+
+test('sealed JSON round-trips and a sealed file stays sealed when rewritten', () => {
+  const previous = process.env.DATA_ENCRYPTION_KEY;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sealed-json-'));
+  const file = path.join(dir, 'revenue.json');
+  try {
+    process.env.DATA_ENCRYPTION_KEY = KEY_1;
+    const source = {
+      id: 'REV_1',
+      amount: 25,
+      status: 'UNVERIFIED',
+      recipient: 'owner@example.com',
+      bank: { account: '007810000448500030594182', swift: 'BCMAMAMC' }
+    };
+    writeJsonAtomic(file, source, { sealed: true });
+
+    const raw = fs.readFileSync(file);
+    assert.equal(raw.subarray(0, 8).toString('utf8'), 'DATAENC1');
+    assert.equal(raw.toString('utf8').includes('owner@example.com'), false);
+    assert.equal(raw.toString('utf8').includes('007810000448500030594182'), false);
+
+    const first = readJsonAtRest(file);
+    assert.equal(first.sealed, true);
+    assert.deepEqual(first.value, source);
+
+    writeJsonAtomic(file, { ...first.value, status: 'VERIFIED' }, { sealed: true });
+    assert.equal(fs.readFileSync(file).subarray(0, 8).toString('utf8'), 'DATAENC1');
+
+    const reread = readJsonAtRest(file);
+    assert.equal(reread.sealed, true);
+    assert.deepEqual(reread.value, { ...source, status: 'VERIFIED' });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
     if (previous == null) delete process.env.DATA_ENCRYPTION_KEY;
     else process.env.DATA_ENCRYPTION_KEY = previous;
   }

@@ -268,8 +268,12 @@ export function encryptBuffer(buffer, { env = process.env } = {}) {
   return Buffer.concat([FILE_MAGIC, seal(Buffer.from(buffer), current)]);
 }
 
+function hasFileMagic(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.length >= FILE_MAGIC.length + 28 && buffer.subarray(0, FILE_MAGIC.length).equals(FILE_MAGIC);
+}
+
 export function decryptBuffer(buffer, { env = process.env } = {}) {
-  if (!Buffer.isBuffer(buffer) || buffer.length < FILE_MAGIC.length + 28 || !buffer.subarray(0, FILE_MAGIC.length).equals(FILE_MAGIC)) {
+  if (!hasFileMagic(buffer)) {
     throw new DataAtRestError('Not an encrypted JARVIS file.', 'DATA_AT_REST_CORRUPT');
   }
   return open(buffer.subarray(FILE_MAGIC.length), getEncryptionKeys(env));
@@ -277,9 +281,32 @@ export function decryptBuffer(buffer, { env = process.env } = {}) {
 
 let warnedAboutPlaintext = false;
 
-export function writeJsonAtomic(file, value, { env = process.env, required = false } = {}) {
-  const resolved = path.resolve(file);
+function writeFileAtomic(resolved, data) {
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, data, { mode: 0o600 });
+  fs.renameSync(tmp, resolved);
+}
+
+/**
+ * Read a JSON document in either storage shape: plaintext JSON whose sensitive
+ * fields may be `enc:v1:` values, or a whole-file sealed envelope. `sealed`
+ * reports which, so a caller rewriting the document can put the bytes back the
+ * same way instead of downgrading a sealed file to plaintext.
+ */
+export function readJsonAtRest(file, { env = process.env } = {}) {
+  const raw = fs.readFileSync(path.resolve(file));
+  const sealed = hasFileMagic(raw);
+  const parsed = JSON.parse((sealed ? decryptBuffer(raw, { env }) : raw).toString('utf8'));
+  return { value: decryptSensitiveFields(parsed, { env }), sealed };
+}
+
+/**
+ * Write a JSON document atomically, field-encrypting sensitive values. With
+ * `sealed`, the document is also wrapped in the whole-file envelope; a sealed
+ * file therefore stays sealed when it is rewritten.
+ */
+export function writeJsonAtomic(file, value, { env = process.env, required = false, sealed = false } = {}) {
   if (!encryptionConfigured(env) && scanSensitiveFields(value).length > 0) {
     if (!warnedAboutPlaintext) {
       console.warn('[data-at-rest] Sensitive fields are being written in plaintext because DATA_ENCRYPTION_KEY is not set.');
@@ -287,9 +314,8 @@ export function writeJsonAtomic(file, value, { env = process.env, required = fal
     }
   }
   const encrypted = encryptSensitiveFields(value, { env, required });
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(encrypted, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(tmp, resolved);
+  const json = `${JSON.stringify(encrypted, null, 2)}\n`;
+  writeFileAtomic(path.resolve(file), sealed ? encryptBuffer(Buffer.from(json, 'utf8'), { env }) : json);
   return encrypted;
 }
 
@@ -299,10 +325,6 @@ export function readEncryptedJson(file, { env = process.env } = {}) {
 }
 
 export function writeJsonPlainAtomic(file, value) {
-  const resolved = path.resolve(file);
-  fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(tmp, resolved);
+  writeFileAtomic(path.resolve(file), `${JSON.stringify(value, null, 2)}\n`);
   return value;
 }

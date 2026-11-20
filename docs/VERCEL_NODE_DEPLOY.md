@@ -262,6 +262,21 @@ and webhook routes.
 
 ## Verification
 
+Before deploying, run the money preflight in the target environment:
+
+```bash
+npm run doctor:money          # ordered checkout steps, exit 1 on any failure
+npm run doctor:money -- --json --offline   # machine-readable, skip the network probe
+```
+
+It walks catalog → price quote → order creation → capture → attempt store →
+fulfilment → the emailed access link → the funnel log → the PayPal webhook, and
+names the exact env var behind every step that cannot work. The access-link step
+fetches `${APP_ORIGIN}/access/<invalid token>` and fails when it answers 404,
+which is the difference between "orders can be taken" and "the buyer receives a
+dead link". Use `--offline` only when `APP_ORIGIN` is unreachable from where you
+run it; the step then warns instead of failing.
+
 Local, without Vercel:
 
 ```bash

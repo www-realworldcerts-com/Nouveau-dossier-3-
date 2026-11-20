@@ -1,6 +1,14 @@
 # Changelog
 
 ## 2026-11-20
+- Added `npm run doctor:money`, a preflight that walks the checkout in buyer
+  order (catalog, signed quote, order creation, capture, attempt store,
+  fulfilment, the emailed access link, the funnel log, the PayPal webhook) and
+  names the exact env var behind each step that cannot work. The access-link
+  step fetches `${APP_ORIGIN}/access/<invalid token>` and fails on 404, so a
+  deploy that can take orders but cannot deliver is caught before traffic
+  rather than discovered by a buyer holding a dead link. `--json` for machines,
+  `--offline` to skip the network probe, exit 1 on any failure.
 - Revenue ledger refuses self-verification. Money is recorded as `VERIFIED` only
   when a payment-provider transaction id (PayPal, Stripe, Payoneer/bank, on-chain
   hash) backs it; a local `LIVE_*` id, a settlement batch or a proof the system

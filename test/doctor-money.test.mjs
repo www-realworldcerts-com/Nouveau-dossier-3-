@@ -17,6 +17,7 @@ const STRIPPED = [
     'OWNER_BANK_ACCOUNT', 'OWNER_BANK_RIB', 'BANK_ACCOUNT', 'BANK_RIB', 'BANK_IBAN',
     'FULFILLMENT_ENABLED', 'FULFILLMENT_ACCESS_SECRET', 'FULFILLMENT_FROM_EMAIL',
     'RESEND_API_KEY', 'SETTLEMENT_LEDGER_PATH', 'APP_ORIGIN',
+    'FULFILLMENT_ACCESS_LINK_ENABLED', 'FULFILLMENT_SUPPORT_EMAIL',
     'CHECKOUT_ATTEMPT_STORE_DIR', 'CHECKOUT_ATTEMPT_SIGNING_SECRET',
     'CHECKOUT_INTENTS_FILE', 'CHECKOUT_INTENTS_URL', 'CHECKOUT_INTENTS_TOKEN',
     'SALES_DATA_DIR', 'VERCEL', 'AWS_LAMBDA_FUNCTION_NAME', 'NETLIFY'
@@ -123,7 +124,7 @@ test('a serverless deploy without a durable funnel log is warned, not passed sil
     assert.equal(steps(durable).find(step => step.id === 'funnel').status, 'ok');
 });
 
-test('a delivery link that 404s is reported as a failure', async (t) => {
+test('a delivery link that 404s is a failure only when the email carries it', async (t) => {
     const server = http.createServer((req, res) => {
         if (req.url.startsWith('/access/')) {
             res.writeHead(404, { 'content-type': 'text/plain' });
@@ -137,13 +138,25 @@ test('a delivery link that 404s is reported as a failure', async (t) => {
     t.after(() => server.close());
     const origin = `http://127.0.0.1:${server.address().port}`;
 
-    const run = await runDoctor({ overrides: { ...COMPLETE, APP_ORIGIN: origin }, args: ['--json'] });
+    // The pass is the delivery by default, so a dead route costs the buyer
+    // nothing and is not a failure.
+    const unattached = await runDoctor({ overrides: { ...COMPLETE, APP_ORIGIN: origin }, args: ['--json'] });
+    assert.equal(unattached.status, 0, unattached.stdout + unattached.stderr);
+    const idle = steps(unattached).find(step => step.id === 'delivery_link');
+    assert.equal(idle.status, 'ok');
+    assert.match(idle.detail, /self-contained/);
+
+    // Once the email starts carrying the URL, the dead route is the buyer's problem.
+    const run = await runDoctor({
+        overrides: { ...COMPLETE, APP_ORIGIN: origin, FULFILLMENT_ACCESS_LINK_ENABLED: 'true' },
+        args: ['--json']
+    });
     assert.equal(run.status, 1, run.stdout + run.stderr);
 
     const link = steps(run).find(step => step.id === 'delivery_link');
     assert.equal(link.status, 'fail');
     assert.match(link.detail, /answers 404/);
-    assert.deepEqual(link.env, ['APP_ORIGIN']);
+    assert.deepEqual(link.env, ['APP_ORIGIN', 'FULFILLMENT_ACCESS_LINK_ENABLED']);
 });
 
 test('a delivery route that answers for an invalid token is accepted', async (t) => {
@@ -155,7 +168,10 @@ test('a delivery route that answers for an invalid token is accepted', async (t)
     t.after(() => server.close());
     const origin = `http://127.0.0.1:${server.address().port}`;
 
-    const run = await runDoctor({ overrides: { ...COMPLETE, APP_ORIGIN: origin }, args: ['--json'] });
+    const run = await runDoctor({
+        overrides: { ...COMPLETE, APP_ORIGIN: origin, FULFILLMENT_ACCESS_LINK_ENABLED: 'true' },
+        args: ['--json']
+    });
     assert.equal(run.status, 0, run.stdout + run.stderr);
     const link = steps(run).find(step => step.id === 'delivery_link');
     assert.equal(link.status, 'ok');

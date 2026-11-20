@@ -163,9 +163,14 @@ if (String(env.FULFILLMENT_ENABLED ?? 'true').toLowerCase() === 'false') {
     }
 }
 
-// 7 ─ The link in that email: it must not point at a route that 404s.
+// 7 ─ The online copy of the link. It is only emailed when explicitly enabled:
+// delivery is the attached pass, so a 404 route is not a failed delivery.
+const accessLinkEnabled = /^(1|true|yes|on)$/i.test(String(env.FULFILLMENT_ACCESS_LINK_ENABLED ?? '').trim());
 const appOrigin = String(env.APP_ORIGIN ?? '').trim();
-if (!appOrigin) {
+if (!accessLinkEnabled) {
+    record('delivery_link', 'Access link route', 'ok',
+        'not used: the emailed access pass is self-contained, so delivery does not need the app server');
+} else if (!appOrigin) {
     record('delivery_link', 'Access link route', 'warn',
         'APP_ORIGIN is unset: the emailed link falls back to https://www.realworldcerts.com/access/<token>, where the app server is not deployed',
         { env: ['APP_ORIGIN'] });
@@ -178,7 +183,7 @@ if (!appOrigin) {
         if (response.status === 404) {
             record('delivery_link', 'Access link route', 'fail',
                 `${appOrigin}/access/<token> answers 404: the buyer would receive a dead link`,
-                { env: ['APP_ORIGIN'], fix: 'Deploy the app server at APP_ORIGIN, or deliver something that does not need it' });
+                { env: ['APP_ORIGIN', 'FULFILLMENT_ACCESS_LINK_ENABLED'], fix: 'Unset FULFILLMENT_ACCESS_LINK_ENABLED, or deploy the app server at APP_ORIGIN' });
         } else if ([400, 401, 403, 410].includes(response.status)) {
             record('delivery_link', 'Access link route', 'ok', `route answers ${response.status} for an invalid token`);
         } else {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import test from 'node:test';
 
 import {
@@ -86,14 +87,56 @@ test('a captured order is prepaid from swarm revenue and emailed access', async 
   assert.equal(requests[0].url, 'https://api.resend.com/emails');
   const emailBody = JSON.parse(requests[0].init.body);
   assert.deepEqual(emailBody.to, ['buyer@example.com']);
-  assert.match(emailBody.text, /https:\/\/www\.realworldcerts\.com\/access\//);
+
+  // The delivery is the attached pass, not a link to a route that may 404.
+  assert.equal(emailBody.attachments.length, 1);
+  assert.equal(emailBody.attachments[0].filename, 'access-ORDER-1.html');
+  const passHtml = Buffer.from(emailBody.attachments[0].content, 'base64').toString('utf8');
+  assert.match(passHtml, /Risk Management/);
+  assert.match(passHtml, /ORDER-1/);
+  assert.match(passHtml, /<html/);
+  assert.doesNotMatch(passHtml, /<script/i);
+  assert.doesNotMatch(passHtml, /<img/i);
+  assert.doesNotMatch(passHtml, /https?:\/\//i, 'the pass must work with no network at all');
+  assert.doesNotMatch(emailBody.text, /\/access\//, 'the dead route is not in the buyer email by default');
 
   assert.equal(queued.length, 1);
   assert.equal(queued[0].status, 'DELIVERED');
   assert.equal(queued[0].funding.prepaid_by, 'swarm');
   assert.equal(queued[0].funding.funding_source, 'swarm_revenue');
+  assert.equal(queued[0].access_pass.filename, emailBody.attachments[0].filename);
+  assert.equal(
+    queued[0].access_pass.sha256,
+    crypto.createHash('sha256').update(passHtml, 'utf8').digest('hex')
+  );
   const token = queued[0].access_url.split('/access/')[1];
   assert.equal(verifyAccessToken(token, 'test-secret').ok, true);
+  // The pass carries the same signed token, so support can verify it offline.
+  assert.ok(passHtml.includes(token));
+});
+
+test('the online access route is emailed only when it is enabled', async () => {
+  const requests = [];
+  const result = await fulfillPaidOrder({
+    order: paidOrder(),
+    product: { id: 'course-1', name: 'Risk Management' },
+    ledger: successfulLedger(),
+    queue: async () => {},
+    secret: 'test-secret',
+    baseUrl: 'https://www.realworldcerts.com',
+    includeAccessUrl: true,
+    emailApiKey: 're_test',
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return new Response(JSON.stringify({ id: 'email-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+  });
+
+  assert.equal(result.delivery, 'emailed');
+  const emailBody = JSON.parse(requests[0].init.body);
+  assert.match(emailBody.text, /https:\/\/www\.realworldcerts\.com\/access\//);
+  const passHtml = Buffer.from(emailBody.attachments[0].content, 'base64').toString('utf8');
+  assert.match(passHtml, /https:\/\/www\.realworldcerts\.com\/access\//);
 });
 
 test('a retried capture does not send a second access email', async () => {

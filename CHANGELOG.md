@@ -1,6 +1,18 @@
 # Changelog
 
 ## 2026-11-20
+- Fulfilment no longer depends on the app server being deployed. The paid-order
+  email used to carry only `/access/<token>`, a route the live domain answers
+  with 404, so a real buyer got a dead link; the email now carries the signed
+  token, order, amount and entitlement in a self-contained `access-<order>.html`
+  pass attached through Resend. The pass has no scripts, images or external
+  references, so it opens offline and stays verifiable: support can check the
+  HMAC against `FULFILLMENT_ACCESS_SECRET` with no server. The online copy is
+  included only when `FULFILLMENT_ACCESS_LINK_ENABLED=true`, and the queue
+  records the attachment's `filename`/`sha256` under `access_pass` so a
+  delivery can be proven. `doctor:money` reports the access-link step as `ok`
+  while delivery is the pass, and still fails on a 404 once the email carries
+  the URL.
 - A psp id now confirms money only if it names a webhook PayPal actually
   verified. `assertPSPWebhookExists` accepted any id longer than five
   characters, so a forged capture id passed as `psp_confirmation_missing`-free

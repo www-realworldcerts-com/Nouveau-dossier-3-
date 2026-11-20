@@ -33,6 +33,7 @@ export class FulfillmentManager {
                 ? order.action_required
                 : `Send '${product}' to ${customerEmail}`,
             access_url: order.access_url || null,
+            access_pass: order.access_pass || null,
             funding: order.funding || null,
             email: order.email || null
         };

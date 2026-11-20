@@ -179,9 +179,16 @@ After a successful capture, the handler calls `fulfillPaidOrder`:
 3. If available revenue does not cover the cost, access is not released. The
    order is queued as `BLOCKED_PREPAYMENT` and the success page reports that
    fulfillment needs support.
-4. Otherwise a signed `/access/<token>` link is generated and emailed through
-   Resend (`RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`). A provider failure is
-   queued as `PENDING_EMAIL`, never reported as delivered.
+4. Otherwise the buyer is emailed a self-contained access pass through Resend
+   (`RESEND_API_KEY`, `FULFILLMENT_FROM_EMAIL`) as the attachment
+   `access-<order>.html`: the signed token, the order, the amount, the product
+   and support instructions, with no scripts, images or external references.
+   The pass opens offline and keeps working when this app server is not
+   deployed, which the emailed `/access/<token>` page cannot do. The online copy
+   is added to the email only when `FULFILLMENT_ACCESS_LINK_ENABLED=true`, after
+   that route has been verified live. A provider failure is queued as
+   `PENDING_EMAIL`, never reported as delivered, and the queue entry records the
+   attachment's `filename` and `sha256` under `access_pass`.
 
 The settlement ledger is also the email idempotency key: retrying a capture for
 an order already marked `email_status: sent` does not send a second email.
@@ -193,6 +200,10 @@ Required fulfillment variables:
   distinct from the data encryption key
 - `APP_ORIGIN=https://www.realworldcerts.com`
 - `RESEND_API_KEY` and a verified `FULFILLMENT_FROM_EMAIL`
+- `FULFILLMENT_ACCESS_LINK_ENABLED` — optional; `true` adds the `/access/<token>`
+  online copy to the email, so only set it once that route answers
+- `FULFILLMENT_SUPPORT_EMAIL` — optional; the address named in the pass
+  (default `billing@realworldcerts.com`)
 - `SETTLEMENT_LEDGER_PATH` and `FULFILLMENT_QUEUE_FILE` pointing at durable,
   writable storage
 
@@ -203,7 +214,8 @@ relying on production fulfillment. The code still fails closed: without a
 writable ledger, delivery is queued/blocked rather than silently given away.
 
 `/access/<token>` verifies the HMAC and expiry, then links to the configured
-product URL or catalog slug. `FULFILLMENT_QUEUE_FILE` is an append-only audit
+product URL or catalog slug; it is an online copy of the pass, not the delivery
+itself. `FULFILLMENT_QUEUE_FILE` is an append-only audit
 trail; `BLOCKED_PREPAYMENT`, `PENDING_EMAIL`, `PENDING_ACCESS_SECRET`, and
 `DELIVERED` are the delivery states.
 
@@ -271,11 +283,13 @@ npm run doctor:money -- --json --offline   # machine-readable, skip the network 
 
 It walks catalog → price quote → order creation → capture → attempt store →
 fulfilment → the emailed access link → the funnel log → the PayPal webhook, and
-names the exact env var behind every step that cannot work. The access-link step
-fetches `${APP_ORIGIN}/access/<invalid token>` and fails when it answers 404,
-which is the difference between "orders can be taken" and "the buyer receives a
-dead link". Use `--offline` only when `APP_ORIGIN` is unreachable from where you
-run it; the step then warns instead of failing.
+names the exact env var behind every step that cannot work. Delivery is the
+attached pass, so the access-link step reports `ok` while
+`FULFILLMENT_ACCESS_LINK_ENABLED` is unset; with it set, the step fetches
+`${APP_ORIGIN}/access/<invalid token>` and fails when it answers 404, because the
+email then carries a link the buyer cannot open. Use `--offline` only when
+`APP_ORIGIN` is unreachable from where you run it; the step then warns instead of
+failing.
 
 Local, without Vercel:
 

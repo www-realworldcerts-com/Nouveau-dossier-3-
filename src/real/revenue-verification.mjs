@@ -162,6 +162,27 @@ export function demoteUnverifiedStatus(status) {
     return { status: raw, changed: false };
 }
 
+/**
+ * The storage invariant: a record that claims a verified status must be backed
+ * by a provider transaction id. Read-side demotion keeps totals honest but
+ * leaves a file asserting money that never arrived, so anything writing a
+ * revenue record calls this and refuses instead of persisting the claim.
+ */
+export function assertStorableRevenueStatus(event = {}, { label = 'revenue event' } = {}) {
+    const raw = event?.status == null ? '' : String(event.status).trim();
+    if (!VERIFIED_STATUSES.has(raw.toLowerCase())) {
+        return { status: raw || null, verdict: null };
+    }
+    const verdict = classifyRevenueEvent(event);
+    if (verdict.verified) return { status: raw, verdict };
+    throw new RevenueNotProviderVerifiedError(verdict.reason, {
+        label,
+        id: event?.event_id ?? event?.externalId ?? null,
+        amount: event?.amount ?? null,
+        currency: event?.currency ?? null
+    });
+}
+
 /** Verified vs unverified totals, so an audit never sums the system's own output. */
 export function summarizeRevenueEvents(events = []) {
     const byCurrency = new Map();

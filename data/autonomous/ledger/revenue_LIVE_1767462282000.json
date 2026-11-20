@@ -1,14 +1,14 @@
 {
   "event_id": "LIVE_1767462282000",
-  "amount": 75.00,
+  "amount": 75,
   "currency": "USD",
   "occurred_at": "2026-01-03T16:00:00.000Z",
   "source": "Instant Email Campaign Setup",
-  "status": "VERIFIED",
+  "status": "UNVERIFIED",
   "verification_proof": {
     "type": "autonomous_execution",
     "psp_id": "PROOF_1767462282250",
-    "amount": 75.00,
+    "amount": 75,
     "currency": "USD",
     "timestamp": "2026-01-03T16:00:00.000Z",
     "details": "Successfully executed cold email campaign targeting 100 leads via SmartLead."
@@ -20,5 +20,14 @@
     "owner_directive_enforced": true
   },
   "settled": false,
-  "created_at": "2026-01-03T16:00:00.000Z"
+  "created_at": "2026-01-03T16:00:00.000Z",
+  "quarantine": {
+    "previous_status": "VERIFIED",
+    "reason": "self_issued_proof",
+    "psp_id": "PROOF_1767462282250",
+    "amount": 75,
+    "currency": "USD",
+    "quarantined_at": "2026-11-20T12:37:53.087Z",
+    "quarantined_by": "scripts/quarantine-unverified-revenue.mjs"
+  }
 }

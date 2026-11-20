@@ -141,10 +141,14 @@ reads that record; it never trusts a client-supplied amount.
   signed quote, `ok` when they match, and `unchecked` when no comparison is
   possible. `unchecked` reasons include `quote_reference_missing` (no quote id
   in `custom_id`/`invoice_id`), `quote_record_unavailable` (record expired,
-  pruned or on another instance), `quote_record_incomplete`, `quote_id_conflict`,
-  `mixed_capture_currency`, `missing_captured_amount` and `missing_currency`.
-- `captured.value_cents` sums completed captures, so a multi-capture order is
-  compared with its full settled total, not just the first capture.
+  pruned, on another instance or not verifying), `quote_record_incomplete`,
+  `quote_id_conflict`, `mixed_capture_currency`, `capture_not_settled`,
+  `missing_captured_amount` and `missing_currency`.
+- Only `COMPLETED` captures count as captured, matching what the rest of the
+  code treats as paid: pending, declined or merely authorized money is
+  `capture_not_settled`, never compared as if it had settled. `captured.value_cents`
+  sums completed captures, so a multi-capture order is compared with its full
+  settled total, not just the first capture.
 - `catalog_revision` compares the quote's stored catalog version and digest with
   the catalog loaded now: `ok`, `mismatch` (`catalog_revision_changed`) or
   `unchecked`. A catalog change after the order was created does not make an

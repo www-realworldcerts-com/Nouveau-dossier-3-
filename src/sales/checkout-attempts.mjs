@@ -342,6 +342,9 @@ function signedPayload(record) {
  * Records written before quote facts were signed carry no `quote` field. Their
  * signature covers this older payload, so verifying it keeps an in-flight
  * checkout replayable across the deploy that started signing quote facts.
+ *
+ * The field list is frozen on purpose: adding a field here would change the
+ * bytes those records were signed over and break them.
  */
 function legacySignedPayload(record) {
     return {
@@ -400,6 +403,8 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
         }
         // An unsigned record is rejected too once a key is configured: the field
         // is not optional, so stripping it is not a way to skip the check.
+        // An unverifiable or absent record looks the same to the caller, and both
+        // reasons are reported honestly by the capture reconciliation.
         if (signingKey && !signatureVerifies(record, signingKey)) return null;
         const expiresAt = Number(record.expires_at);
         if (Number.isFinite(expiresAt) && expiresAt <= now()) {

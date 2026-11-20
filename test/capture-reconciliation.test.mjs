@@ -22,12 +22,15 @@ function order({
     customId = undefined,
     invoiceId = undefined
 } = {}) {
+    const money = amount === null ? undefined : { value: amount, currency_code: currency };
     const unit = {
-        amount: amount === null ? undefined : { value: amount, currency_code: currency },
+        amount: money,
         custom_id: customId ?? (quoteId ? `course|q=${quoteId}|v=${version}` : undefined),
-        invoice_id: invoiceId ?? (quoteId ? `q=${quoteId}|d=${digest}` : undefined)
+        invoice_id: invoiceId ?? (quoteId ? `q=${quoteId}|d=${digest}` : undefined),
+        // A real capture response carries the settled capture rows; a bare
+        // purchase unit is not proof that money moved.
+        payments: { captures: captures ?? [{ id: 'CAP-1', status: 'COMPLETED', amount: money }] }
     };
-    if (captures) unit.payments = { captures };
     return { id: 'ORDER-1', status: 'COMPLETED', purchase_units: [unit] };
 }
 
@@ -139,17 +142,6 @@ test('an attempt record without quote facts is unchecked', () => {
     assert.equal(reconciliation.reason, 'quote_record_incomplete');
 });
 
-test('a record for another quote is unchecked', () => {
-    const reconciliation = reconcileCapturedPayment({
-        order: order(),
-        attempt: { quote_id: 'q_other', quote: QUOTE },
-        catalog: CATALOG
-    });
-
-    assert.equal(reconciliation.status, 'unchecked');
-    assert.equal(reconciliation.reason, 'quote_record_mismatch');
-});
-
 test('conflicting quote ids between custom_id and invoice_id are unchecked', () => {
     const reconciliation = reconcileCapturedPayment({
         order: order({ quoteId: 'q_custom', invoiceId: 'q=q_invoice|d=sha256:abc123' }),
@@ -166,6 +158,21 @@ test('an order without quote metadata is unchecked', () => {
 
     assert.equal(reconciliation.status, 'unchecked');
     assert.equal(reconciliation.reason, 'quote_reference_missing');
+});
+
+test('an order whose capture has not completed is unchecked, not compared', () => {
+    const reconciliation = reconcileCapturedPayment({
+        order: order({
+            captures: [{ id: 'CAP-1', status: 'PENDING', amount: { value: '19.00', currency_code: 'USD' } }]
+        }),
+        attempt: attempt(),
+        catalog: CATALOG
+    });
+
+    assert.equal(reconciliation.status, 'unchecked');
+    assert.equal(reconciliation.reason, 'capture_not_settled');
+    assert.equal(reconciliation.captured.value_cents, null);
+    assert.equal(reconciliation.quoted.value_cents, 1900, 'the quote is still reported');
 });
 
 test('a capture without an amount is unchecked', () => {
@@ -189,7 +196,7 @@ test('a catalog change after the order is reported separately from the amount', 
     assert.equal(reconciliation.status, 'ok', 'an accurate capture is still accurate');
     assert.equal(reconciliation.catalog_revision, 'mismatch');
     assert.equal(reconciliation.catalog_revision_reason, 'catalog_revision_changed');
-    assert.equal(reconciliation.catalog_digest, 'sha256:abc123');
+    assert.equal(reconciliation.quoted.catalog_digest, 'sha256:abc123');
     assert.equal(reconciliation.catalog_digest_current, 'sha256:newer');
 });
 

@@ -8,8 +8,9 @@
   compares the captured amount and currency with them and with the current
   catalog revision. A capture that does not match the quote is reported as
   `mismatch` with machine reasons and a cent delta; a missing or unverifiable
-  record, ambiguous quote metadata or a missing capture amount is `unchecked`,
-  never `ok`. Older records that predate the extra signed field still verify, so
+  record, ambiguous quote metadata, a capture that has not settled or a missing
+  capture amount is `unchecked`, never `ok`. Only `COMPLETED` captures count as
+  captured, so pending or authorized money is not compared as if it settled. Older records that predate the extra signed field still verify, so
   an in-flight checkout stays replayable across the upgrade. The check is
   read-only: it changes no price, capture, order or catalog entry.
 

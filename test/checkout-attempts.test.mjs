@@ -472,6 +472,13 @@ test('tampering with the stored quoted amount invalidates the record', async (t)
     const registry = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
     assert.equal(await registry.lookup('q_quote_tamper'), null, 'a swapped amount is never reported');
 
+    // Removing the field entirely must not fall through to the legacy payload:
+    // that would make deleting quote facts a way to skip their check.
+    const stripped = { ...stored };
+    delete stripped.quote;
+    await fs.writeFile(file, JSON.stringify(stripped), 'utf8');
+    assert.equal(await registry.lookup('q_quote_tamper'), null, 'stripping the quote facts is not a downgrade');
+
     const result = await registry.run('q_quote_tamper', async () => ({ id: 'ORDER-FRESH' }));
     assert.equal(result.replayed, false);
     assert.equal(result.order.id, 'ORDER-FRESH');

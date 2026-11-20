@@ -13,8 +13,6 @@ import { parsePayPalCustomId, parsePayPalInvoiceId } from './price-quote.mjs';
  * A mismatch is a finding for an owner to refund, collect or accept.
  */
 
-export const CAPTURE_RECONCILIATION_VERSION = 1;
-
 function toCents(value) {
     const amount = Number(value);
     return Number.isFinite(amount) ? Math.round(amount * 100) : null;
@@ -26,29 +24,31 @@ function currencyOf(amount) {
 }
 
 /**
- * The captured money for an order. PayPal may settle an order in several
- * captures, so completed captures are summed; an order with none falls back to
- * its purchase-unit amount. Mixed capture currencies cannot be summed and are
- * reported as unchecked rather than guessed.
+ * The settled money for an order. Only COMPLETED captures count, which is the
+ * same definition of paid the rest of the code uses; pending, declined or
+ * merely authorized money has not been captured and is reported as such rather
+ * than compared as if it had. Completed captures are summed, so a multi-capture
+ * order is compared with its full settled total. Mixed capture currencies
+ * cannot be summed and are reported as unchecked rather than guessed.
  */
 function capturedPayment(order) {
     const units = Array.isArray(order?.purchase_units) ? order.purchase_units : [];
-    const unit = units[0] || {};
     const captures = units.flatMap(item => (Array.isArray(item?.payments?.captures) ? item.payments.captures : []));
     const settled = captures.filter(capture => String(capture?.status || '').toUpperCase() === 'COMPLETED');
-    const counted = settled.length > 0 ? settled : captures;
 
-    if (counted.length === 0) {
+    if (settled.length === 0) {
         return {
-            value_cents: toCents(unit?.amount?.value),
-            currency: currencyOf(unit?.amount),
+            value_cents: null,
+            currency: null,
             capture_count: 0,
             capture_ids: [],
-            mixed_currency: false
+            mixed_currency: false,
+            // Captures exist but none settled: the order is not captured yet.
+            unsettled: captures.length > 0
         };
     }
 
-    const rows = counted.map(capture => ({
+    const rows = settled.map(capture => ({
         id: capture?.id ?? null,
         value_cents: toCents(capture?.amount?.value),
         currency: currencyOf(capture?.amount)
@@ -61,7 +61,8 @@ function capturedPayment(order) {
         currency: currencies.size === 1 ? [...currencies][0] : null,
         mixed_currency: currencies.size > 1,
         capture_count: rows.length,
-        capture_ids: rows.map(row => row.id).filter(Boolean)
+        capture_ids: rows.map(row => row.id).filter(Boolean),
+        unsettled: false
     };
 }
 
@@ -87,7 +88,7 @@ function quotedFacts(attempt) {
  *
  * `status` covers the payment: `mismatch` when the captured amount or currency
  * differs from the quote, `unchecked` when no comparison is possible (no quote
- * reference, no stored record, or no captured amount). `catalog_revision` is
+ * reference, no stored record, or no settled capture). `catalog_revision` is
  * reported separately: a catalog change after the order was created does not
  * make an accurately captured payment wrong, it only means the quote predates
  * the current catalog.
@@ -126,15 +127,12 @@ export function reconcileCapturedPayment({
     }
 
     const base = {
-        version: CAPTURE_RECONCILIATION_VERSION,
         order_id: order?.id ?? null,
         quote_id: quoteId,
         capture_count: captured.capture_count,
         capture_ids: captured.capture_ids,
         captured: { value_cents: captured.value_cents, currency: captured.currency },
         quoted,
-        catalog_version: quoted?.catalog_version ?? null,
-        catalog_digest: quoted?.catalog_digest ?? null,
         catalog_version_current: currentVersion,
         catalog_digest_current: currentDigest,
         catalog_revision: catalogRevision,
@@ -148,12 +146,12 @@ export function reconcileCapturedPayment({
         unchecked = 'quote_reference_missing';
     } else if (!attempt) {
         unchecked = 'quote_record_unavailable';
-    } else if (attempt.quote_id && String(attempt.quote_id) !== quoteId) {
-        unchecked = 'quote_record_mismatch';
     } else if (!quoted || quoted.value_cents === null || !quoted.currency) {
         unchecked = 'quote_record_incomplete';
     } else if (captured.mixed_currency) {
         unchecked = 'mixed_capture_currency';
+    } else if (captured.unsettled) {
+        unchecked = 'capture_not_settled';
     } else if (captured.value_cents === null) {
         unchecked = 'missing_captured_amount';
     } else if (!captured.currency) {

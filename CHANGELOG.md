@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-20
+- Reported post-capture reconciliation. The signed checkout attempt record now
+  stores the facts of the quote it was created from (amount in cents, currency,
+  catalog version and catalog digest) under the record's HMAC, and
+  `POST /acp/v1/transactions/:id/capture` returns a `reconciliation` object that
+  compares the captured amount and currency with them and with the current
+  catalog revision. A capture that does not match the quote is reported as
+  `mismatch` with machine reasons and a cent delta; a missing or unverifiable
+  record, ambiguous quote metadata or a missing capture amount is `unchecked`,
+  never `ok`. Older records that predate the extra signed field still verify, so
+  an in-flight checkout stays replayable across the upgrade. The check is
+  read-only: it changes no price, capture, order or catalog entry.
+
 ## 2026-11-19
 - Signed stored checkout attempt records. When `CHECKOUT_ATTEMPT_SIGNING_SECRET`
   (or the configured price quote key) is set, every record in

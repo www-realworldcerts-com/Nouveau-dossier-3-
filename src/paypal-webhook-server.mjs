@@ -42,6 +42,7 @@ import {
   probeCheckoutAttemptStore
 } from "./sales/checkout-attempts.mjs";
 import { checkoutClientKey, createCheckoutRateLimiter } from "./sales/checkout-rate-limit.mjs";
+import { reconcileCapturedPayment } from "./sales/capture-reconciliation.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -1824,6 +1825,31 @@ if (args.check === true || args["config-check"] === true) {
         const custom = parsePayPalCustomId(units[0]?.custom_id);
         const invoice = parsePayPalInvoiceId(units[0]?.invoice_id);
         const productId = custom.productId;
+        // Compare the money PayPal actually captured with the signed quote facts
+        // stored for this order's quote id. Reporting only: nothing is repriced,
+        // refunded or held here.
+        const captureQuoteId = custom.quoteId || invoice.quoteId || null;
+        let captureAttempt = null;
+        if (captureQuoteId) {
+          try {
+            captureAttempt = await checkoutAttempts.lookup(captureQuoteId);
+          } catch {
+            captureAttempt = null;
+          }
+        }
+        let captureCatalog = null;
+        let captureCatalogError = null;
+        try {
+          captureCatalog = loadCourseCatalog();
+        } catch (error) {
+          captureCatalogError = error?.message ?? String(error);
+        }
+        const reconciliation = reconcileCapturedPayment({
+          order,
+          attempt: captureAttempt,
+          catalog: captureCatalog,
+          catalogError: captureCatalogError
+        });
         const product = productId ? publicProducts().find((item) => String(item.id ?? '') === productId) || null : null;
         const fulfill = shouldFulfillPaidOrders();
         let fulfillment = null;
@@ -1846,6 +1872,7 @@ if (args.check === true || args["config-check"] === true) {
           quote_id: custom.quoteId || invoice.quoteId || null,
           catalog_version: custom.catalogVersion || null,
           catalog_digest: invoice.catalogDigest || null,
+          reconciliation,
           captures: captures.map((capture) => ({
             id: capture?.id ?? null,
             status: capture?.status ?? null,
@@ -2138,7 +2165,18 @@ if (args.check === true || args["config-check"] === true) {
             cancelUrl,
             requestId
           }),
-          { expiresAt: verifiedQuote.expires_at }
+          {
+            expiresAt: verifiedQuote.expires_at,
+            // Facts from the signed quote, stored and signed with the attempt so
+            // a later capture can be compared with what the buyer was quoted
+            // after the quote token itself is gone.
+            quote: {
+              amount_cents: Number(quote.a),
+              currency: String(quote.c),
+              catalog_version: catalogVersion,
+              catalog_digest: catalogDigest
+            }
+          }
         ));
       } catch (error) {
         // Another instance is still creating this quote's order and has not

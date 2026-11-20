@@ -219,6 +219,27 @@ function attemptDeadline(nowMs, ttlMs, expiresAt) {
     return Math.max(nowMs + 60_000, Number.isFinite(quoteDeadline) ? quoteDeadline : nowMs + ttlMs);
 }
 
+/**
+ * Facts from the signed price quote, stored with the attempt so a capture can
+ * still be compared with what the buyer was quoted after the quote token is
+ * gone. Anything malformed is dropped rather than stored as a half fact.
+ */
+function normalizeQuoteFacts(quote) {
+    if (!quote || typeof quote !== 'object') return null;
+    const amount = Number(quote.amount_cents);
+    const currency = String(quote.currency || '').trim().toUpperCase();
+    const version = quote.catalog_version === undefined || quote.catalog_version === null
+        ? ''
+        : String(quote.catalog_version);
+    const digest = quote.catalog_digest === undefined || quote.catalog_digest === null
+        ? ''
+        : String(quote.catalog_digest);
+    if (!Number.isInteger(amount) || amount <= 0) return null;
+    if (!/^[A-Z]{3}$/.test(currency)) return null;
+    if (!version || !digest) return null;
+    return { amount_cents: amount, currency, catalog_version: version, catalog_digest: digest };
+}
+
 function createMemoryRegistry({ ttlMs, now }) {
     const attempts = new Map();
 
@@ -229,7 +250,7 @@ function createMemoryRegistry({ ttlMs, now }) {
         }
     }
 
-    async function run(quoteId, create, { expiresAt = null } = {}) {
+    async function run(quoteId, create, { expiresAt = null, quote = null } = {}) {
         const key = checkoutAttemptKey(quoteId);
         if (!key) throw new Error('Checkout attempt requires a quote id');
         prune();
@@ -241,7 +262,7 @@ function createMemoryRegistry({ ttlMs, now }) {
         }
 
         const deadline = attemptDeadline(now(), ttlMs, expiresAt);
-        const record = { expiresAt: deadline, order: null, promise: null };
+        const record = { expiresAt: deadline, order: null, promise: null, quote: normalizeQuoteFacts(quote) };
 
         const promise = Promise.resolve()
             .then(create)
@@ -260,12 +281,23 @@ function createMemoryRegistry({ ttlMs, now }) {
         return { key, order, replayed: false };
     }
 
+    /** Read-only lookup used by post-capture reconciliation. */
+    async function lookup(quoteId) {
+        const key = checkoutAttemptKey(quoteId);
+        if (!key) return null;
+        prune();
+        const record = attempts.get(key);
+        if (!record || !record.order) return null;
+        return { quote_id: String(quoteId), key, order: record.order, quote: record.quote ?? null };
+    }
+
     return {
         durable: false,
         // Stored records do not exist without a directory, and nothing here is
         // signed, so the reported state matches the durable registry's shape.
         signed: false,
         run,
+        lookup,
         clear: () => attempts.clear(),
         size: () => attempts.size
     };
@@ -300,24 +332,45 @@ function signedPayload(record) {
         quote_id: record.quote_id,
         key: record.key,
         order: record.order,
+        quote: record.quote ?? null,
         created_at: record.created_at,
         expires_at: record.expires_at
     };
 }
 
-function signRecord(record, signingKey) {
+/**
+ * Records written before quote facts were signed carry no `quote` field. Their
+ * signature covers this older payload, so verifying it keeps an in-flight
+ * checkout replayable across the deploy that started signing quote facts.
+ */
+function legacySignedPayload(record) {
+    return {
+        v: record.v,
+        quote_id: record.quote_id,
+        key: record.key,
+        order: record.order,
+        created_at: record.created_at,
+        expires_at: record.expires_at
+    };
+}
+
+function signPayload(payload, signingKey) {
     return crypto.createHmac('sha256', signingKey)
-        .update(stableStringify(signedPayload(record)))
+        .update(stableStringify(payload))
         .digest('hex');
+}
+
+function signRecord(record, signingKey) {
+    return signPayload(signedPayload(record), signingKey);
 }
 
 function signatureVerifies(record, signingKey) {
     const provided = String(record?.sig ?? '');
     if (!/^[a-f0-9]{64}$/.test(provided)) return false;
-    return crypto.timingSafeEqual(
-        Buffer.from(provided, 'hex'),
-        Buffer.from(signRecord(record, signingKey), 'hex')
-    );
+    const actual = Buffer.from(provided, 'hex');
+    if (crypto.timingSafeEqual(actual, Buffer.from(signRecord(record, signingKey), 'hex'))) return true;
+    if (record.quote !== undefined) return false;
+    return crypto.timingSafeEqual(actual, Buffer.from(signPayload(legacySignedPayload(record), signingKey), 'hex'));
 }
 
 function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimStaleMs, pollIntervalMs, signingSecret }) {
@@ -356,13 +409,14 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
         return record;
     }
 
-    async function writeRecord(key, quoteId, order, expiresAt) {
+    async function writeRecord(key, quoteId, order, expiresAt, quote = null) {
         await fs.mkdir(dir, { recursive: true });
         const record = {
             v: RECORD_VERSION,
             quote_id: String(quoteId),
             key,
             order,
+            quote: normalizeQuoteFacts(quote),
             created_at: new Date(now()).toISOString(),
             expires_at: attemptDeadline(now(), ttlMs, expiresAt)
         };
@@ -422,7 +476,7 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
         await fs.unlink(claimFile(key)).catch(() => {});
     }
 
-    async function run(quoteId, create, { expiresAt = null } = {}) {
+    async function run(quoteId, create, { expiresAt = null, quote = null } = {}) {
         const key = checkoutAttemptKey(quoteId);
         if (!key) throw new Error('Checkout attempt requires a quote id');
 
@@ -445,7 +499,7 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
 
         const creation = (async () => {
             const order = await create();
-            await writeRecord(key, quoteId, order, expiresAt);
+            await writeRecord(key, quoteId, order, expiresAt, quote);
             return order;
         })();
         inflight.set(key, creation);
@@ -507,10 +561,29 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
         return { removed };
     }
 
+    /**
+     * Read-only lookup for post-capture reconciliation. Unlike `run` it never
+     * creates, claims or rewrites anything, and it returns null when the record
+     * is missing, expired or does not verify.
+     */
+    async function lookup(quoteId) {
+        const key = checkoutAttemptKey(quoteId);
+        if (!key) return null;
+        const record = await readRecord(key);
+        if (!record) return null;
+        return {
+            quote_id: record.quote_id ?? String(quoteId),
+            key: record.key ?? key,
+            order: record.order,
+            quote: normalizeQuoteFacts(record.quote)
+        };
+    }
+
     return {
         durable: true,
         signed: Boolean(signingKey),
         run,
+        lookup,
         sweep,
         // Published records only; claims and truncated temp files are not attempts.
         size: () => {

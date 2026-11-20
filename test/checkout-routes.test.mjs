@@ -10,6 +10,7 @@ const probe = String.raw`
 import handler from './api/index.mjs';
 import fs from 'node:fs/promises';
 import { checkoutAttemptKey } from './src/sales/checkout-attempts.mjs';
+import { encodePayPalCustomId, encodePayPalInvoiceId } from './src/sales/price-quote.mjs';
 
 globalThis.__orderCreateCalls = 0;
 globalThis.__orderBodies = [];
@@ -30,6 +31,32 @@ globalThis.fetch = async (url, init = {}) => {
       id: 'ORDER-NEW',
       status: 'CREATED',
       links: [{ rel: 'approve', href: 'https://www.paypal.com/approve' }]
+    }), { status: 201, headers: { 'content-type': 'application/json' } });
+  }
+  if (target.includes('/v2/checkout/orders/ORDER-NEW/capture')) {
+    return new Response(JSON.stringify({
+      id: 'ORDER-NEW',
+      status: 'COMPLETED',
+      purchase_units: [{
+        custom_id: encodePayPalCustomId({
+          productId: 'financial-risk-manager-test-bank',
+          quoteId: quoteBody.quote_id,
+          catalogVersion: quoteBody.catalog_version
+        }),
+        invoice_id: encodePayPalInvoiceId({
+          quoteId: quoteBody.quote_id,
+          catalogDigest: quoteBody.catalog_digest
+        }),
+        amount: { value: '19.00', currency_code: 'USD' },
+        payments: {
+          captures: [{
+            id: 'CAP-NEW',
+            status: 'COMPLETED',
+            final_capture: true,
+            amount: { value: '19.00', currency_code: 'USD' }
+          }]
+        }
+      }]
     }), { status: 201, headers: { 'content-type': 'application/json' } });
   }
   if (target.includes('/v2/checkout/orders/ORDER-TEST/capture')) {
@@ -124,6 +151,9 @@ const duplicate = await call('/acp/v1/transactions', 'POST', JSON.stringify({
 }));
 const duplicateOrderCalls = globalThis.__orderCreateCalls;
 const capture = await call('/acp/v1/transactions/ORDER-TEST/capture', 'POST');
+// ORDER-NEW was created from a signed quote, so its capture can be compared
+// with the quote facts stored in the attempt record for that quote.
+const captureCreated = await call('/acp/v1/transactions/ORDER-NEW/capture', 'POST');
 const orderCallsBeforeBusy = globalThis.__orderCreateCalls;
 
 // Another instance holds the claim for a different cart: the store directory
@@ -148,7 +178,7 @@ const busyOrderCalls = globalThis.__orderCreateCalls;
 await fs.unlink(busyLock);
 const busyRetry = await call('/acp/v1/transactions', 'POST', busyBody);
 
-process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, duplicate, dup_quote_id: dupQuoteBody.quote_id, duplicate_order_calls: duplicateOrderCalls, order_calls_after_replay: orderCallsAfterReplay, capture, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
+process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, duplicate, dup_quote_id: dupQuoteBody.quote_id, duplicate_order_calls: duplicateOrderCalls, order_calls_after_replay: orderCallsAfterReplay, capture, capture_created: captureCreated, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
 `;
 
 const rateLimitProbe = String.raw`
@@ -491,6 +521,29 @@ test('the checkout page keeps its quote and retries a retryable in-progress conf
     assert.ok(posts[1].at - posts[0].at >= 30, 'the retry waits for retry_after_ms');
     assert.equal(location.href, 'https://www.paypal.com/approve');
     assert.equal(elements.error.textContent, '');
+});
+
+test('a capture of an order created from a quote is reconciled against its signed quote', () => {
+    const probe = result();
+    assert.equal(probe.capture_created.status, 200);
+    const body = JSON.parse(probe.capture_created.body);
+    const reconciliation = body.reconciliation;
+
+    assert.equal(reconciliation.status, 'ok', JSON.stringify(reconciliation));
+    assert.equal(reconciliation.quote_id, JSON.parse(probe.quote.body).quote_id);
+    assert.equal(reconciliation.captured.value_cents, 1900);
+    assert.equal(reconciliation.captured.currency, 'USD');
+    assert.equal(reconciliation.quoted.value_cents, 1900);
+    assert.equal(reconciliation.quoted.catalog_digest, JSON.parse(probe.quote.body).catalog_digest);
+    assert.equal(reconciliation.delta_cents, 0);
+    assert.equal(reconciliation.catalog_revision, 'ok');
+});
+
+test('a capture without quote metadata reports reconciliation as unchecked', () => {
+    const probe = result();
+    const body = JSON.parse(probe.capture.body);
+    assert.equal(body.reconciliation.status, 'unchecked');
+    assert.equal(body.reconciliation.reason, 'quote_reference_missing');
 });
 
 test('an approved PayPal order can be captured and reports COMPLETED', () => {

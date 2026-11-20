@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -395,6 +396,118 @@ test('two quotes for the same cart stay separate attempts', async () => {
     assert.notEqual(first.order.id, second.order.id);
     assert.equal(second.replayed, false);
     assert.equal(calls, 2);
+});
+
+const QUOTE_FACTS = {
+    amount_cents: 1900,
+    currency: 'usd',
+    catalog_version: '1',
+    catalog_digest: 'sha256:abc123'
+};
+
+function stableStringify(value) {
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+    if (value && typeof value === 'object') {
+        const fields = Object.keys(value).sort()
+            .map(field => `${JSON.stringify(field)}:${stableStringify(value[field])}`);
+        return `{${fields.join(',')}}`;
+    }
+    return JSON.stringify(value ?? null);
+}
+
+function legacySignature(record) {
+    const signingKey = crypto.createHmac('sha256', SIGNING_SECRET).update('acp-attempt-record:v1').digest();
+    return crypto.createHmac('sha256', signingKey).update(stableStringify(record)).digest('hex');
+}
+
+test('stored quote facts are signed with the record and readable without replay', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+
+    const registry = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    await registry.run('q_facts', async () => ({ id: 'ORDER-FACTS' }), { quote: QUOTE_FACTS });
+
+    const found = await registry.lookup('q_facts');
+    assert.deepEqual(found.quote, {
+        amount_cents: 1900,
+        currency: 'USD',
+        catalog_version: '1',
+        catalog_digest: 'sha256:abc123'
+    });
+    assert.equal(found.order.id, 'ORDER-FACTS');
+    assert.equal(found.quote_id, 'q_facts');
+
+    const stored = JSON.parse(await fs.readFile(path.join(dir, `${checkoutAttemptKey('q_facts')}.json`), 'utf8'));
+    assert.equal(stored.quote.amount_cents, 1900, 'the quote facts are on disk');
+    assert.match(stored.sig, /^[a-f0-9]{64}$/);
+
+    const restarted = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    assert.equal((await restarted.lookup('q_facts')).quote.amount_cents, 1900);
+    assert.equal(await restarted.lookup('q_absent'), null);
+});
+
+test('an in-memory registry exposes quote facts without a store', async () => {
+    const registry = createCheckoutAttemptRegistry();
+    await registry.run('q_memory_facts', async () => ({ id: 'ORDER-MEMORY' }), { quote: QUOTE_FACTS });
+
+    const found = await registry.lookup('q_memory_facts');
+    assert.equal(found.quote.amount_cents, 1900);
+    assert.equal(found.quote.currency, 'USD');
+    assert.equal(await registry.lookup('q_memory_absent'), null);
+});
+
+test('tampering with the stored quoted amount invalidates the record', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+
+    const first = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    await first.run('q_quote_tamper', async () => ({ id: 'ORDER-REAL' }), { quote: QUOTE_FACTS });
+
+    // A writer on the shared volume lowers the quoted amount so a capture check
+    // would believe the buyer owed less.
+    const file = path.join(dir, `${checkoutAttemptKey('q_quote_tamper')}.json`);
+    const stored = JSON.parse(await fs.readFile(file, 'utf8'));
+    await fs.writeFile(file, JSON.stringify({ ...stored, quote: { ...stored.quote, amount_cents: 1 } }), 'utf8');
+
+    const registry = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    assert.equal(await registry.lookup('q_quote_tamper'), null, 'a swapped amount is never reported');
+
+    const result = await registry.run('q_quote_tamper', async () => ({ id: 'ORDER-FRESH' }));
+    assert.equal(result.replayed, false);
+    assert.equal(result.order.id, 'ORDER-FRESH');
+});
+
+test('a record signed before quote facts were added still replays', async (t) => {
+    const { dir, cleanup } = await tempStore();
+    t.after(cleanup);
+
+    // Exact shape written by the previous version: no `quote` field, signed over
+    // the older payload. It belongs to an in-flight checkout during the upgrade.
+    const key = checkoutAttemptKey('q_legacy');
+    const record = {
+        v: 1,
+        quote_id: 'q_legacy',
+        key,
+        order: { id: 'ORDER-LEGACY' },
+        created_at: new Date().toISOString(),
+        expires_at: Date.now() + 600_000
+    };
+    record.sig = legacySignature(record);
+    await fs.writeFile(path.join(dir, `${key}.json`), JSON.stringify(record), 'utf8');
+
+    const registry = createCheckoutAttemptRegistry({ directory: dir, signingSecret: SIGNING_SECRET });
+    let calls = 0;
+    const replay = await registry.run('q_legacy', async () => {
+        calls += 1;
+        return { id: 'ORDER-DUPLICATE' };
+    });
+
+    assert.equal(calls, 0, 'the older record is still trusted');
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.order.id, 'ORDER-LEGACY');
+
+    const found = await registry.lookup('q_legacy');
+    assert.equal(found.quote, null, 'the older record has no quote facts to compare');
 });
 
 test('a sweep removes expired records and abandoned artifacts but not live ones', async (t) => {

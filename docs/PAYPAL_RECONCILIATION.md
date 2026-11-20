@@ -116,6 +116,44 @@ The silent-failure audit maps these rows to the high-severity
 `PAYPAL_QUOTE_METADATA_DRIFT` finding, with the affected order ids and reasons
 in its evidence.
 
+## Post-capture reconciliation
+
+`POST /acp/v1/transactions/:id/capture` reports a `reconciliation` object that
+compares what PayPal actually captured with the signed checkout attempt record
+for the order's quote. The quote token is client-held and gone by capture time,
+so its facts — amount in cents, currency, catalog version and catalog digest —
+are stored in the attempt record and covered by the record's HMAC. The check
+reads that record; it never trusts a client-supplied amount.
+
+```json
+{
+  "status": "mismatch",
+  "reasons": ["amount_mismatch"],
+  "captured": { "value_cents": 1, "currency": "USD" },
+  "quoted": { "value_cents": 1900, "currency": "USD", "catalog_version": "1", "catalog_digest": "sha256:..." },
+  "delta_cents": -1899,
+  "catalog_revision": "ok",
+  "quote_id": "q_..."
+}
+```
+
+- `status` is `mismatch` when the captured amount or currency differs from the
+  signed quote, `ok` when they match, and `unchecked` when no comparison is
+  possible. `unchecked` reasons include `quote_reference_missing` (no quote id
+  in `custom_id`/`invoice_id`), `quote_record_unavailable` (record expired,
+  pruned or on another instance), `quote_record_incomplete`, `quote_id_conflict`,
+  `mixed_capture_currency`, `missing_captured_amount` and `missing_currency`.
+- `captured.value_cents` sums completed captures, so a multi-capture order is
+  compared with its full settled total, not just the first capture.
+- `catalog_revision` compares the quote's stored catalog version and digest with
+  the catalog loaded now: `ok`, `mismatch` (`catalog_revision_changed`) or
+  `unchecked`. A catalog change after the order was created does not make an
+  accurately captured payment wrong; it is reported separately from the amount.
+- `reconciliation` on an order with no quote metadata is `unchecked`, never
+  `ok`. The endpoint still answers 200 and still fulfils a completed order: this
+  is a report, not a gate, and it never changes a price, a captured amount, a
+  catalog entry or a Shopify price.
+
 ## Idempotency
 
 1. The queue is read before any write; an order id already present is skipped.

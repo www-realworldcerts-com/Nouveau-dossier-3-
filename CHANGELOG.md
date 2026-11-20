@@ -19,7 +19,12 @@
   come from the catalog FX table rather than a guess; the charged amount is
   carried in `amount_cents`/`currency`. Recording is best effort: a write
   failure is logged and never fails a checkout. The log path is
-  `CHECKOUT_INTENTS_FILE`, falling back to `$SALES_DATA_DIR/course-intents.ndjson`.
+  `CHECKOUT_INTENTS_FILE`, falling back to `$SALES_DATA_DIR/course-intents.ndjson`,
+  or an append-only HTTP sink when `CHECKOUT_INTENTS_URL` is set — a serverless
+  instance has no shared filesystem, so a file log would reset the funnel on
+  every cold start. `/health` reports `checkout_intents` with `durable`, `target`
+  and the reason it is not durable, and the sales-agent reports read the same
+  store. Events keep the intent tracker schema, so `funnelSummary()` is unchanged.
 - Reported post-capture reconciliation. The signed checkout attempt record now
   stores the facts of the quote it was created from (amount in cents, currency,
   catalog version and catalog digest) under the record's HMAC, and

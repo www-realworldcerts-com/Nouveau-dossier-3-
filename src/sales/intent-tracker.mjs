@@ -93,9 +93,16 @@ export function loadIntents(intentsPath) {
 }
 
 export function funnelSummary(intentsPath, { days = 30, now = new Date() } = {}) {
-    const events = loadIntents(intentsPath);
+    return funnelSummaryFromEvents(loadIntents(intentsPath), { days, now });
+}
+
+/**
+ * The same summary over events already loaded, so a durable remote log can be
+ * reported without a second implementation of the funnel maths.
+ */
+export function funnelSummaryFromEvents(events, { days = 30, now = new Date() } = {}) {
     const cutoff = new Date(now).getTime() - days * 24 * 60 * 60 * 1000;
-    const scoped = events.filter(event => {
+    const scoped = (Array.isArray(events) ? events : []).filter(event => {
         const ts = Date.parse(event.timestamp);
         return Number.isFinite(ts) && ts >= cutoff;
     });

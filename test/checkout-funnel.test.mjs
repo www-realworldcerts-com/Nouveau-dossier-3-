@@ -74,10 +74,10 @@ test('a reload of the same intent and a replayed order are not double counted', 
         sessionId: 'sess_reload01'
     });
 
-    assert.equal(recordFunnelEvent(intent, { file }).duplicate, false);
-    assert.equal(recordFunnelEvent(intent, { file }).duplicate, true);
-    assert.equal(recordFunnelEvent(order, { file }).duplicate, false);
-    assert.equal(recordFunnelEvent(order, { file }).duplicate, true);
+    assert.equal((await recordFunnelEvent(intent, { file })).duplicate, false);
+    assert.equal((await recordFunnelEvent(intent, { file })).duplicate, true);
+    assert.equal((await recordFunnelEvent(order, { file })).duplicate, false);
+    assert.equal((await recordFunnelEvent(order, { file })).duplicate, true);
 
     const summary = funnelSummary(file, { days: 30 });
     assert.equal(summary.counts.checkout_intent, 1);
@@ -87,8 +87,8 @@ test('a reload of the same intent and a replayed order are not double counted', 
 
 test('two sessions viewing the same course are two intents', async (t) => {
     const file = await tempFile(t);
-    recordFunnelEvent(checkoutIntentEvent({ course: COURSE, catalog: CATALOG, sessionId: 'sess_first001' }), { file });
-    recordFunnelEvent(checkoutIntentEvent({ course: COURSE, catalog: CATALOG, sessionId: 'sess_second01' }), { file });
+    await recordFunnelEvent(checkoutIntentEvent({ course: COURSE, catalog: CATALOG, sessionId: 'sess_first001' }), { file });
+    await recordFunnelEvent(checkoutIntentEvent({ course: COURSE, catalog: CATALOG, sessionId: 'sess_second01' }), { file });
 
     assert.equal(funnelSummary(file, { days: 30 }).counts.checkout_intent, 2);
 });
@@ -100,7 +100,7 @@ test('a write failure is reported, never thrown into checkout', async (t) => {
     // A file where a directory is expected makes the append fail.
     await fs.writeFile(path.join(dir, 'nested'), 'not a directory', 'utf8');
 
-    const result = recordFunnelEvent(
+    const result = await recordFunnelEvent(
         checkoutIntentEvent({ course: COURSE, catalog: CATALOG, sessionId: 'sess_failure01' }),
         { file: blocked }
     );

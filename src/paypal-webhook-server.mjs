@@ -46,6 +46,7 @@ import { reconcileCapturedPayment } from "./sales/capture-reconciliation.mjs";
 import {
   checkoutIntentEvent,
   checkoutSession,
+  intentStoreStatus,
   paidOrderEvent,
   recordFunnelEvent
 } from "./sales/checkout-funnel.mjs";
@@ -1528,6 +1529,9 @@ if (args.check === true || args["config-check"] === true) {
         live: getEnvBool("SWARM_LIVE", false),
         dedupe: dedupeStore.stats(),
         config: getConfigCheck(),
+        // A serverless instance cannot share a file log; this says so instead of
+        // letting the funnel quietly reset on every cold start.
+        checkout_intents: intentStoreStatus(),
         startupConfigError
       });
       return;
@@ -1668,7 +1672,7 @@ if (args.check === true || args["config-check"] === true) {
           const catalog = loadCourseCatalog();
           const course = catalog.bySlug[String(productId)];
           if (course) {
-            recordFunnelEvent(checkoutIntentEvent({
+            await recordFunnelEvent(checkoutIntentEvent({
               course,
               catalog,
               sessionId: session.id,
@@ -1896,7 +1900,7 @@ if (args.check === true || args["config-check"] === true) {
         // captured order is not counted at its full quoted price.
         if (String(order?.status || '').toUpperCase() === 'COMPLETED') {
           try {
-            recordFunnelEvent(paidOrderEvent({
+            await recordFunnelEvent(paidOrderEvent({
               orderId: order?.id ?? orderId,
               courseId: productId || null,
               amountCents: reconciliation.captured.value_cents,

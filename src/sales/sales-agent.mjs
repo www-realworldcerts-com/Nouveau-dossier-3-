@@ -25,7 +25,8 @@ import {
 import { valuateCourse } from './llm-valuation.mjs';
 import { checkStorefrontGate, shopifySettingsFromEnv } from './shopify.mjs';
 import { publishCatalogToShopify } from './catalog-publisher.mjs';
-import { funnelSummary, loadIntents } from './intent-tracker.mjs';
+import { funnelSummaryFromEvents } from './intent-tracker.mjs';
+import { loadFunnelEvents } from './checkout-funnel.mjs';
 
 /**
  * Autonomous sales agent: the blueprint's seven-node control loop
@@ -554,7 +555,7 @@ export class SalesAgent {
     async selfImprove({ days = this.config.self_improve.window_days } = {}) {
         const paths = this.paths();
         const courses = mergePrices(this.requireCatalog(), paths.priceLog);
-        const intents = loadIntents(paths.intents);
+        const intents = await loadFunnelEvents();
         const viewsRows = readNdjson(paths.views);
         const orders = readNdjson(paths.orders);
         const cutoff = this.now().getTime() - days * 86400000;
@@ -693,7 +694,7 @@ export class SalesAgent {
         const priced = courses.filter(course => Number(course.price_mad) > 0).length;
         const publishReports = readNdjson(paths.publishReport);
         const lastPublish = publishReports.at(-1) || null;
-        const funnel = funnelSummary(paths.intents, { days: 30, now: this.now() });
+        const funnel = funnelSummaryFromEvents(await loadFunnelEvents(), { days: 30, now: this.now() });
         const orders = readNdjson(paths.orders);
         return {
             generated_at: this.now().toISOString(),

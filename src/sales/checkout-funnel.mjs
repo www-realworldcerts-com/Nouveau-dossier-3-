@@ -1,6 +1,12 @@
-import path from 'node:path';
+import { makeSessionId, normalizeReferrer, validateIntent } from './intent-tracker.mjs';
+import {
+    fileIntentStore,
+    intentStoreStatus,
+    intentsFile,
+    resolveIntentStore
+} from './intent-store.mjs';
 
-import { appendIntent, loadIntents, makeSessionId, normalizeReferrer } from './intent-tracker.mjs';
+export { intentStoreStatus, intentsFile };
 
 /**
  * Checkout funnel instrumentation.
@@ -17,12 +23,6 @@ import { appendIntent, loadIntents, makeSessionId, normalizeReferrer } from './i
  */
 
 export const CHECKOUT_SESSION_COOKIE = 'rwc_sid';
-
-export function intentsFile(env = process.env) {
-    const configured = String(env.CHECKOUT_INTENTS_FILE || '').trim();
-    if (configured) return path.resolve(configured);
-    return path.join(path.resolve(env.SALES_DATA_DIR || 'data/sales'), 'course-intents.ndjson');
-}
 
 function parseCookie(header, name) {
     for (const part of String(header || '').split(';')) {
@@ -98,25 +98,49 @@ export function paidOrderEvent({ orderId, courseId, amountCents, catalog, sessio
     };
 }
 
+/** Read the whole funnel log from the configured store. */
+export async function loadFunnelEvents(store = resolveIntentStore()) {
+    return store.load();
+}
+
 /**
  * Append `event` unless the funnel already holds it. A reload of /buy for the
  * same session and course is one intent, and a replayed capture is one order.
+ *
+ * The log is read before it is written: if it cannot be read, the event is
+ * dropped rather than risking a duplicate `paid_order`, which would inflate the
+ * only number this instrumentation exists to report.
  */
-export function recordFunnelEvent(event, { file = intentsFile() } = {}) {
+export async function recordFunnelEvent(event, { store = null, file = null } = {}) {
     if (!event) return { ok: false, reason: 'no_event' };
+    const validation = validateIntent(event);
+    if (!validation.ok) {
+        console.warn(`[checkout-funnel] ${event.event || 'event'} not recorded: ${validation.problems.join('; ')}`);
+        return { ok: false, reason: validation.problems.join('; '), event };
+    }
+
+    const sink = store || (file ? fileIntentStore({ file }) : resolveIntentStore());
+    let existing;
     try {
-        const existing = loadIntents(file);
-        const duplicate = event.event === 'paid_order'
-            ? existing.some(row => row?.event === 'paid_order' && row?.order_id && row.order_id === event.order_id)
-            : existing.some(row =>
-                row?.event === 'checkout_intent'
-                && row?.session_id === event.session_id
-                && row?.course_id === event.course_id);
-        if (duplicate) return { ok: true, duplicate: true, event };
-        appendIntent(event, file);
+        existing = await sink.load();
+    } catch (error) {
+        console.warn(`[checkout-funnel] ${event.event} not recorded (log unreadable): ${error?.message ?? error}`);
+        return { ok: false, reason: `log_unavailable: ${error?.message ?? error}`, event };
+    }
+
+    const duplicate = event.event === 'paid_order'
+        ? existing.some(row => row?.event === 'paid_order' && row?.order_id && row.order_id === event.order_id)
+        : existing.some(row =>
+            row?.event === 'checkout_intent'
+            && row?.session_id === event.session_id
+            && row?.course_id === event.course_id);
+    if (duplicate) return { ok: true, duplicate: true, event };
+
+    try {
+        await sink.append(event);
         return { ok: true, duplicate: false, event };
     } catch (error) {
-        console.warn(`[checkout-funnel] ${event?.event || 'event'} not recorded: ${error?.message ?? error}`);
+        console.warn(`[checkout-funnel] ${event.event} not recorded: ${error?.message ?? error}`);
         return { ok: false, reason: error?.message ?? String(error), event };
     }
 }

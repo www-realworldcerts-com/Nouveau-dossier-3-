@@ -117,11 +117,20 @@ from the catalog FX table — the tracker's MAD fields are a currency conversion
 not the charge. A generic `/buy` page with no course named records nothing,
 because a render of the course selector is not demand.
 
-Store the log somewhere durable: `CHECKOUT_INTENTS_FILE`
-(default `$SALES_DATA_DIR/course-intents.ndjson`). A serverless function's local
-filesystem is ephemeral, so without a durable path the counts reset per instance
-and the funnel will read zero again for a reason that looks identical to no
-traffic. A failed write is logged and dropped; it never breaks a checkout.
+The log is only as durable as its backend. A serverless instance mounts no
+shared filesystem, so a file log resets on every cold start and the funnel reads
+zero for a reason that looks identical to no traffic. Set
+`CHECKOUT_INTENTS_URL` to an append-only HTTP sink and every instance writes one
+log: `POST {events:[event]}` appends, `GET` returns the log as a JSON array,
+`{events:[...]}` or ndjson, and `CHECKOUT_INTENTS_TOKEN` is sent as a bearer
+token. Without that URL the log stays at `CHECKOUT_INTENTS_FILE`
+(default `$SALES_DATA_DIR/course-intents.ndjson`), and `/health` reports
+`checkout_intents { kind, durable, target, reason }` so an instance-local log is
+visible rather than silent. `sales-agent status` and `self-improve` read the
+configured store, so the report matches what was actually recorded.
+
+A failed read drops the event rather than risking a duplicate `paid_order`, and a
+failed write is logged and dropped; neither ever breaks a checkout.
 
 Schema: `event`, `timestamp`, `session_id`, `course_id`, `price_mad`,
 `price_eur`, `source`, `referrer` (normalized to direct/google/meta/tiktok/

@@ -256,6 +256,19 @@ export const FINDING_CATALOG = {
         owner_action: 'Review the quote metadata findings and allowlist only orders created before quote enforcement.',
         sla_hours: 4
     },
+    REVENUE_REVERSAL_WITHOUT_CAPTURE: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'A refund, reversal or dispute has no matching capture in the ledger',
+        impact: 'Money that PayPal returned is still counted as revenue, or a chargeback is invisible: the ledger reports revenue the business no longer holds.',
+        containment: 'Do not net the reversal against unrelated revenue; keep the original capture untouched until the missing record is found.',
+        obligation: 'Locate or reconstruct the capture the reversal refers to, then record the reversal against it.',
+        remedy: 'Run `npm run ledger:reverse -- --event=<paypal-event.json> --apply` once the capture exists, or import the missing capture from PayPal and reverse it.',
+        mitigation: 'Every reversal is keyed to the original capture id and unmatched reversals are reported at critical severity, never dropped.',
+        verification: 'A later reversal run reports the capture matched and the ledger nets the refund to zero.',
+        owner_action: 'Provide the PayPal capture id or replay the original capture webhook, then rerun the reversal.',
+        sla_hours: 4
+    },
     PAYMENT_WEBHOOK_UNREACHABLE: {
         domain: 'revenue',
         severity: 'critical',

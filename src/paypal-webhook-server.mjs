@@ -15,6 +15,7 @@ import {
 } from "./paypal-api.mjs";
 import { OwnerSettlementEnforcer } from "./policy/owner-settlement.mjs";
 import { mapPayPalWebhookToRevenueEvent } from "./paypal-event-mapper.mjs";
+import { dispatchVerifiedPayPalReversal } from "./real/ledger/reversal-dispatch.mjs";
 import {
   createBase44RevenueEventIdempotent,
   getRevenueConfigFromEnv
@@ -2712,6 +2713,23 @@ if (args.check === true || args["config-check"] === true) {
       return;
     }
 
+    // A refund, capture reversal or dispute is money leaving: write the
+    // negative, capture-keyed event now instead of leaving it to an operator
+    // running `npm run ledger:reverse` after the totals were already read.
+    const reversalResult = dispatchVerifiedPayPalReversal(evt);
+    if (reversalResult.finding) {
+      process.stderr.write(
+        `FINDING ${reversalResult.finding.code} [${reversalResult.finding.severity}] ` +
+        `${reversalResult.finding.detail}\n`
+      );
+    } else if (reversalResult.reason === "reversal_failed") {
+      process.stderr.write(
+        `FINDING REVENUE_REVERSAL_NOT_RECORDED [critical] A verified ` +
+        `${reversalResult.reversal?.type ?? "reversal"} could not be written to the ledger: ` +
+        `${reversalResult.error}\n`
+      );
+    }
+
     const revenueCfg = getRevenueConfigFromEnv();
     const revenueEvent = mapPayPalWebhookToRevenueEvent(evt, {
       defaultCurrency: revenueCfg.defaultCurrency
@@ -2880,6 +2898,17 @@ if (args.check === true || args["config-check"] === true) {
       revenueStored: wantRevenueWrite,
       revenueCreatedId,
       revenueDeduped,
+      reversal: reversalResult.dispatched
+        ? {
+            dispatched: true,
+            applied: reversalResult.applied === true,
+            reason: reversalResult.reason,
+            reversal_event_id: reversalResult.reversal_event_id ?? null,
+            capture_event_id: reversalResult.capture_event_id ?? null,
+            finding: reversalResult.finding ?? null,
+            error: reversalResult.error ?? null
+          }
+        : { dispatched: false, reason: reversalResult.reason },
       payoutStatusUpdated: payoutStatusResult?.updated === true,
       payoutStatusResult,
       payoutBatchStatusUpdated: payoutBatchStatusResult?.updated === true,

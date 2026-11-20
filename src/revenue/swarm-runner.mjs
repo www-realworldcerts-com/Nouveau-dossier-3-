@@ -6,6 +6,7 @@ import { ProductSelectionEngine } from './product-scoring.mjs';
 import { SmartSettlementOrchestrator } from '../financial/SmartSettlementOrchestrator.mjs';
 import { AdvancedFinancialManager } from '../finance/AdvancedFinancialManager.mjs';
 import { getRevenueConfigFromEnv } from '../base44-revenue.mjs';
+import { isProviderTransactionId } from '../real/revenue-verification.mjs';
 import '../load-env.mjs';
 import fs from 'fs';
 import path from 'path';
@@ -68,20 +69,40 @@ class CommerceExecutionAgent {
     async executeTrade(product) {
         console.log(`💰 EXECUTING TRADE: ${product.name}`);
 
-        // REAL REVENUE GENERATION (No Simulation)
-        const grossRevenue = 150.00; // Fixed unit price for now
+        // A trade only becomes revenue once a payment provider has settled it.
+        // There is no unit price to book: without a provider transaction id
+        // this agent has sold nothing it can prove, so it books nothing.
+        const execution = product?.execution ?? product?.settlement ?? null;
+        const providerTransactionId = String(
+            execution?.provider_transaction_id ?? execution?.transaction_id ?? execution?.psp_id ?? ''
+        ).trim();
+        if (!isProviderTransactionId(providerTransactionId)) {
+            return {
+                status: 'REFUSED',
+                reason: 'NO_PROVIDER_TRANSACTION_ID',
+                details: 'Revenue is only recorded against the payment provider transaction that settled the trade.',
+                product: product.name
+            };
+        }
+
+        const grossRevenue = Number(execution?.amount ?? product?.amount);
+        if (!Number.isFinite(grossRevenue) || grossRevenue <= 0) {
+            return { status: 'REFUSED', reason: 'INVALID_AMOUNT', product: product.name };
+        }
 
         // Ingest revenue into AdvancedFinancialManager
         const manager = new AdvancedFinancialManager();
         await manager.initialize();
         const revenueEvent = manager.revenue.ingestRawRevenue({
             amount: grossRevenue,
-            currency: 'USD',
+            currency: String(execution?.currency ?? 'USD'),
             source: 'swarm_trade',
             metadata: {
                 product: product.name,
                 agent_id: 'commerce_exec',
-                trade_executed: true
+                trade_executed: true,
+                psp_transaction_id: providerTransactionId,
+                provider: execution?.provider ?? null
             }
         }, 'SwarmCommerceAgent', 'CommerceExecutionAgent');
 

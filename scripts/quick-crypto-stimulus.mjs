@@ -4,13 +4,27 @@ import path from 'path';
 // Load system components
 import { AutonomousSettlementEngine } from '../data/full_autonomous_system.js';
 import { writeJsonAtomic } from '../src/security/data-at-rest.mjs';
+import { isProviderTransactionId } from '../src/real/revenue-verification.mjs';
 
 // Configuration for "Stimulus"
 const STIMULUS_AMOUNT = 850; // ~$850 USD
 const STIMULUS_CURRENCY = 'USD';
 const STIMULUS_RAIL = 'crypto';
 
+// A settlement batch is a claim on money that has already moved. Without the
+// on-chain transfer hash there is nothing to settle, so this refuses to write a
+// batch rather than inventing one from a hardcoded amount.
+const PROVIDER_TRANSACTION_ID = String(process.env.PROVIDER_TRANSACTION_ID ?? process.argv[2] ?? '').trim();
+
 async function generateStimulus() {
+  if (!isProviderTransactionId(PROVIDER_TRANSACTION_ID)) {
+    console.error(
+      'REFUSING TO WRITE A SETTLEMENT BATCH: no provider transaction id.\n' +
+      'Set PROVIDER_TRANSACTION_ID to the crypto transfer hash that funds this batch.'
+    );
+    process.exit(1);
+  }
+
   console.log('🚀 GENERATING QUICK CRYPTO STIMULUS BATCH...');
   
   // 1. Initialize Autonomous System
@@ -30,9 +44,10 @@ async function generateStimulus() {
     items: [
       {
         item_id: `ITEM_STIMULUS_1`,
-        earning_id: `EARN_STIMULUS_1`,
+        earning_id: `EARN_${PROVIDER_TRANSACTION_ID.slice(0, 16)}`,
         amount: STIMULUS_AMOUNT,
         currency: STIMULUS_CURRENCY,
+        psp_transaction_id: PROVIDER_TRANSACTION_ID,
         description: 'Accelerated Crypto Stimulus - Bucket A'
       }
     ]
@@ -62,6 +77,7 @@ async function generateStimulus() {
       method: 'crypto',
       metadata: {
         files: artifactPath,
+        psp_transaction_id: PROVIDER_TRANSACTION_ID,
         manual_override: 'User Request: Fast Crypto Stimulus'
       }
     }

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { demoteUnverifiedStatus, verifyRevenueEvent } from "./real/revenue-verification.mjs";
+import { demoteUnverifiedStatus, verifyRevenueEvent, RevenueNotProviderVerifiedError } from "./real/revenue-verification.mjs";
 import { computeConstitutionHash } from "./policy/constitution.mjs";
 import { getConstitutionState, computeConstitutionHashFromFile } from "./bootstrap/constitution-validator.mjs";
 
@@ -62,7 +62,7 @@ function computeEventHash({ sourceId, amount, confirmationDateIso, sourceType, r
   return crypto.createHash("sha256").update(input, "utf8").digest("hex");
 }
 
-function buildRevenueData(cfg, event) {
+function buildRevenueData(cfg, event, { dryRun = false } = {}) {
   const data = {};
   const { fieldMap } = cfg;
 
@@ -105,6 +105,17 @@ function buildRevenueData(cfg, event) {
     metadata: event.metadata,
     verification_proof: event.verification_proof ?? event.metadata?.verification_proof
   });
+
+  // Refuse the record outright. Demoting the status still leaves a row that a
+  // payout batch can pick up, which is how invented revenue reaches a transfer.
+  if (!verification.verified && !dryRun) {
+    throw new RevenueNotProviderVerifiedError(verification.reason, {
+      label: `revenue event from ${event.source ?? 'unknown source'}`,
+      id: event.externalId ?? null,
+      amount: event.amount,
+      currency: event.currency
+    });
+  }
 
   if (fieldMap.metadata) {
     data[fieldMap.metadata] = {
@@ -164,7 +175,7 @@ async function findExistingId(entity, filter) {
 }
 
 export async function createBase44RevenueEvent(base44, cfg, event, { dryRun } = {}) {
-  const data = buildRevenueData(cfg, event);
+  const data = buildRevenueData(cfg, event, { dryRun });
 
   if (dryRun) return { dryRun: true, entity: cfg.entityName, data };
 
@@ -177,7 +188,7 @@ export async function createBase44RevenueEvent(base44, cfg, event, { dryRun } = 
 }
 
 export async function createBase44RevenueEventIdempotent(base44, cfg, event, { dryRun } = {}) {
-  const data = buildRevenueData(cfg, event);
+  const data = buildRevenueData(cfg, event, { dryRun });
 
   if (dryRun) return { dryRun: true, entity: cfg.entityName, data };
 

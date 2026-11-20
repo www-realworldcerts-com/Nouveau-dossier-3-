@@ -28,7 +28,10 @@ test("createBase44EarningIdempotent dedupes by earning_id", async () => {
         currency: "USD",
         source: "agent_commission",
         beneficiary: "YOUNES",
-        status: "settled_externally_pending"
+        status: "settled_externally_pending",
+        // Dedupe is tested against a provider-backed earning, because an
+        // earning without provider evidence is now refused before lookup.
+        metadata: { psp_transaction_id: "3C679366HH908993F" }
       },
       { dryRun: false }
     );

@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { ExternalGatewayManager } from './ExternalGatewayManager.mjs';
 import { OwnerSettlementEnforcer } from '../policy/owner-settlement.mjs';
 import { AppendOnlyHmacLogger } from '../audit/AppendOnlyHmacLogger.mjs';
+import { requireProviderBackedRevenue } from '../real/revenue-verification.mjs';
 
 // ============================================================================
 // LAZYARK FUSION: LEGACY REDIRECT MAP
@@ -425,7 +426,7 @@ class CurrencyManager {
 // 3. REVENUE INGESTION & ADJUSTMENT
 // ============================================================================
 
-class RevenueManager {
+export class RevenueManager {
   constructor(storage, auditLogger) {
     this.storage = storage;
     this.audit = auditLogger;
@@ -434,6 +435,19 @@ class RevenueManager {
   }
 
   ingestRawRevenue(data, sourceSystem, actor = 'System') {
+    // Nothing enters the revenue ledger without provider evidence, including
+    // recurring schedules and swarm trades that only assert an amount.
+    requireProviderBackedRevenue(
+      {
+        externalId: data?.external_id ?? data?.id ?? null,
+        amount: data?.amount,
+        currency: data?.currency,
+        metadata: data?.metadata,
+        verification_proof: data?.verification_proof
+      },
+      { label: `revenue ingest from ${sourceSystem ?? actor}` }
+    );
+
     const id = `REV_${crypto.randomUUID()}`;
     
     // LAZYARK FUSION: Handle Legacy Agent Redirection

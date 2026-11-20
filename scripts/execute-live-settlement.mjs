@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { writeJsonAtomic } from '../src/security/data-at-rest.mjs';
+import { isProviderTransactionId } from '../src/real/revenue-verification.mjs';
 
 // Load system components
 import { AutonomousSettlementEngine } from '../data/full_autonomous_system.js';
@@ -10,7 +11,19 @@ import { AutonomousSettlementEngine } from '../data/full_autonomous_system.js';
 const LIVE_AMOUNT = 850; // ~$850 USD
 const LIVE_CURRENCY = 'USD';
 
+// The batch may only record money that a provider already moved. Without the
+// transfer hash this writes nothing, instead of settling a hardcoded amount.
+const PROVIDER_TRANSACTION_ID = String(process.env.PROVIDER_TRANSACTION_ID ?? process.argv[2] ?? '').trim();
+
 async function executeLiveSettlement() {
+  if (!isProviderTransactionId(PROVIDER_TRANSACTION_ID)) {
+    console.error(
+      'REFUSING TO EXECUTE A SETTLEMENT BATCH: no provider transaction id.\n' +
+      'Set PROVIDER_TRANSACTION_ID to the transfer hash that settled this batch.'
+    );
+    process.exit(1);
+  }
+
   console.log('🚀 EXECUTING LIVE AUTONOMOUS SETTLEMENT...');
   console.log('   Target: TRUST WALLET / BYBIT (Self-Custody)');
   
@@ -28,9 +41,10 @@ async function executeLiveSettlement() {
     items: [
       {
         item_id: `ITEM_LIVE_1`,
-        earning_id: `EARN_LIVE_1`,
+        earning_id: `EARN_${PROVIDER_TRANSACTION_ID.slice(0, 16)}`,
         amount: LIVE_AMOUNT,
         currency: LIVE_CURRENCY,
+        psp_transaction_id: PROVIDER_TRANSACTION_ID,
         description: 'LIVE Autonomous Settlement - Bucket A (Crypto)'
       }
     ]
@@ -56,6 +70,7 @@ async function executeLiveSettlement() {
       method: 'crypto',
       metadata: {
         files: artifactPath,
+        psp_transaction_id: PROVIDER_TRANSACTION_ID,
         manual_override: 'LIVE EXECUTION: TRUST WALLET MIGRATION'
       }
     }

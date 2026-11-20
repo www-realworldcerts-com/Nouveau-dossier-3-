@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { readEncryptedJson, writeJsonAtomic } from '../src/security/data-at-rest.mjs';
+import { isProviderTransactionId } from '../src/real/revenue-verification.mjs';
 
 // Configuration
 const TRUST_WALLET = '0xA46225a984E2B2B5E5082E52AE8d8915A09fEfe7';
@@ -10,6 +11,17 @@ const BATCH_ID = 'BATCH_LIVE_1767528254631';
 const AMOUNT = 850.00;
 const TOKEN = 'USDT (BEP20)';
 const EXPORT_DIR = 'exports/crypto';
+
+// A receipt is evidence that funds moved. Refuse to write one without the
+// on-chain transaction hash, rather than stamping a receipt on a failed transfer.
+const PROVIDER_TRANSACTION_ID = String(process.env.PROVIDER_TRANSACTION_ID ?? '').trim();
+if (!isProviderTransactionId(PROVIDER_TRANSACTION_ID)) {
+  console.error(
+    'REFUSING TO WRITE A SETTLEMENT RECEIPT: no provider transaction id.\n' +
+    'Set PROVIDER_TRANSACTION_ID to the on-chain transfer hash for this batch.'
+  );
+  process.exit(1);
+}
 
 // 1. Load Swarm Wallet Info
 const swarmWalletPath = 'data/autonomous/SWARM_WALLET.json';
@@ -24,10 +36,11 @@ const receiptContent = `
 ================================================================================
                        SWARM NETWORK SETTLEMENT RECEIPT
 ================================================================================
-STATUS:         READY_FOR_BROADCAST (Pending API Fix)
+STATUS:         SETTLED
 NETWORK:        BSC (Binance Smart Chain)
 TIMESTAMP:      ${timestamp}
 BATCH ID:       ${BATCH_ID}
+TX HASH:        ${PROVIDER_TRANSACTION_ID}
 
 --------------------------------------------------------------------------------
 SOURCE:         ${SWARM_WALLET} (Swarm Aggregation Wallet)
@@ -43,11 +56,10 @@ SETTLEMENT FLOW
 --------------------------------------------------------------------------------
 1. Revenue Generation (Agents) -> COMPLETE
 2. Aggregation (Swarm Wallet)  -> COMPLETE (Balance: ${swarmWallet.balance?.USDT || 'Unknown'} USDT)
-3. Final Settlement (Trust Wallet) -> PENDING (Requires Valid API/Key)
+3. Final Settlement (Trust Wallet) -> COMPLETE
 
 [NOTE]
-Real on-chain transaction hash could not be generated due to Binance API 
-Signature Error (-1022). Funds are currently SECURE in Swarm Aggregation Wallet.
+Settled on chain in ${PROVIDER_TRANSACTION_ID}.
 
 ================================================================================
 `;
@@ -61,13 +73,14 @@ fs.writeFileSync(receiptPath, receiptContent);
 const ledgerPath = `data/autonomous/ledger/batch_${BATCH_ID}.json`;
 if (fs.existsSync(ledgerPath)) {
     const ledger = readEncryptedJson(ledgerPath);
-    ledger.data.status = 'pending_broadcast';
+    ledger.data.status = 'settled';
     ledger.data.source_wallet = SWARM_WALLET;
-    ledger.data.notes = 'API Signature Error - Funds held in Swarm Wallet';
+    ledger.data.psp_transaction_id = PROVIDER_TRANSACTION_ID;
+    ledger.data.notes = `Settled on chain in ${PROVIDER_TRANSACTION_ID}`;
     writeJsonAtomic(ledgerPath, ledger);
 }
 
-console.log(`✅ SWARM FUNDS IDENTIFIED & SECURED`);
+console.log(`✅ SWARM SETTLEMENT RECORDED (${PROVIDER_TRANSACTION_ID})`);
 console.log(`💰 Source: ${SWARM_WALLET}`);
 console.log(`💰 Amount: $${AMOUNT} ${TOKEN}`);
 console.log(`⚠️  Status: PENDING BROADCAST (API Error)`);

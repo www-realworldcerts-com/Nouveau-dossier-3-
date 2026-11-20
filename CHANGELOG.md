@@ -1,6 +1,18 @@
 # Changelog
 
 ## 2026-11-20
+- Revenue and earnings are now refused at creation, not demoted at the ledger
+  write, when no payment-provider transaction id backs them
+  (`REVENUE_NOT_PROVIDER_VERIFIED`). The guard sits in `buildRevenueData`,
+  `buildEarningData`, `RevenueManager.ingestRawRevenue` and the autonomous
+  engine's `ingestRevenue`, so a fake record never exists for a payout batch to
+  pick up. `revenue/swarm-runner.mjs` no longer books a fixed $150 per trade:
+  without a provider transaction it returns `REFUSED`/`NO_PROVIDER_TRANSACTION_ID`.
+  `quick-crypto-stimulus`, `execute-live-settlement` and
+  `simulate-external-payout` refuse to write a batch or receipt without
+  `PROVIDER_TRANSACTION_ID`. `paypal_capture_id` counts as evidence, so real
+  captures are unaffected. A shadowed `ingestRevenue` that wrote earnings with
+  no proof at all was removed.
 - Added `npm run doctor:money`, a preflight that walks the checkout in buyer
   order (catalog, signed quote, order creation, capture, attempt store,
   fulfilment, the emailed access link, the funnel log, the PayPal webhook) and

@@ -75,6 +75,8 @@ export function classifyRevenueProof(proof) {
 const METADATA_ID_FIELDS = [
     'psp_transaction_id',
     'paypal_transaction_id',
+    // The capture id is what PayPal settles; the webhook mapper records only this.
+    'paypal_capture_id',
     'transaction_id',
     'bank_reference',
     'bank_ref',
@@ -105,6 +107,38 @@ export function verifyRevenueEvent({ metadata = {}, verification_proof: proof = 
         return { ...classified, reason: 'psp_id_not_provider_transaction', psp_id: String(present[0][1]), source: present[0][0] };
     }
     return { ...classified, source: candidate ? 'verification_proof' : null };
+}
+
+export class RevenueNotProviderVerifiedError extends Error {
+    constructor(reason, { label = 'revenue event', id = null, amount = null, currency = null } = {}) {
+        super(
+            `Refusing to record ${label}${id ? ` ${id}` : ''}` +
+            `${amount != null ? ` (${currency || 'USD'} ${amount})` : ''}: ` +
+            `no payment-provider transaction id (${reason})`
+        );
+        this.name = 'RevenueNotProviderVerifiedError';
+        this.code = 'REVENUE_NOT_PROVIDER_VERIFIED';
+        this.reason = reason;
+        this.subject = { label, id, amount, currency };
+    }
+}
+
+/**
+ * The creation-time gate. Demoting at the ledger write still leaves a record
+ * that payout batches can pick up, so revenue and earnings are refused here
+ * unless a provider transaction id backs them.
+ */
+export function requireProviderBackedRevenue(event = {}, { label = 'revenue event' } = {}) {
+    const verdict = classifyRevenueEvent(event);
+    if (!verdict.verified) {
+        throw new RevenueNotProviderVerifiedError(verdict.reason, {
+            label,
+            id: event?.externalId ?? event?.event_id ?? null,
+            amount: event?.amount ?? null,
+            currency: event?.currency ?? null
+        });
+    }
+    return verdict;
 }
 
 export function classifyRevenueEvent(event = {}) {

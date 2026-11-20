@@ -5,6 +5,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { requireProviderBackedRevenue } from '../src/real/revenue-verification.mjs';
 
 // Node 22+ has native fetch, so we don't need node-fetch
 // Base44SDK import removed as it is not strictly used in autonomous fallback mode
@@ -524,6 +525,19 @@ class AutonomousSettlementEngine {
       throw new Error('PSP proof required for real revenue (AUTONOMOUS_CONFIG.requirePSPProof = true)');
     }
 
+    // Only a payment provider transaction id may become an earning. A proof
+    // object carrying PSP_/SIM_ ids is refused here, before any record exists.
+    const providerTransactionId = String(pspProof?.transaction_id ?? pspProof?.psp_id ?? '').trim();
+    requireProviderBackedRevenue(
+      {
+        externalId: revenueEventId ?? null,
+        amount,
+        currency,
+        metadata: { psp_transaction_id: providerTransactionId, provider: pspProof?.provider ?? null }
+      },
+      { label: 'autonomous revenue ingest' }
+    );
+
     // VALIDATE PSP PROOF
     if (pspProof) {
       this.logger.log(`   Validating PSP proof...`, 'info');
@@ -560,7 +574,9 @@ class AutonomousSettlementEngine {
         recipient_type: 'owner',
         autonomous: true,
         ingested_at: new Date().toISOString(),
-        real_revenue: true
+        real_revenue: true,
+        psp_transaction_id: providerTransactionId,
+        psp_provider: pspProof?.provider ?? null
       },
       created_at: new Date().toISOString()
     };
@@ -792,42 +808,6 @@ class AutonomousSettlementEngine {
     });
 
     return Object.values(batches);
-  }
-
-  async ingestRevenue(params) {
-    this.logger.log('\n📥 INGESTING NEW REVENUE', 'auto');
-
-    const earning = {
-      earning_id: `EARN_${Date.now()}`,
-      amount: params.amount,
-      currency: params.currency,
-      occurred_at: new Date().toISOString(),
-      source: params.source || 'autonomous_ingestion',
-      beneficiary: OWNER.paypal, // HARDCODED OWNER
-      status: 'pending_payout',
-      revenue_event_id: params.revenueEventId || `REV_${Date.now()}`,
-      metadata: {
-        recipient_type: 'owner',
-        autonomous: true,
-        ingested_at: new Date().toISOString()
-      },
-      created_at: new Date().toISOString()
-    };
-
-    this.storage.save('earning', earning.earning_id, earning);
-
-    this.logger.log(`   Earning ID: ${earning.earning_id}`, 'success');
-    this.logger.log(`   Amount: $${earning.amount} ${earning.currency}`, 'money');
-    this.logger.log(`   Beneficiary: ${earning.beneficiary}`, 'owner');
-    this.logger.log('   Status: Queued for settlement', 'success');
-
-    // Trigger immediate scan if autonomous mode is running
-    if (this.running) {
-      this.logger.log('   Triggering immediate settlement scan...', 'auto');
-      setTimeout(() => this.scan(), 1000); // 1 second delay
-    }
-
-    return earning;
   }
 
   getStats() {

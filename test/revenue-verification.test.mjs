@@ -89,3 +89,15 @@ test('the audit summary separates provider-backed money from self-issued output'
     assert.deepEqual(summary.reasons, { self_issued_proof: 1 });
     assert.equal(classifyRevenueEvent(events[1]).verified, false);
 });
+
+test('a PayPal capture webhook still counts as provider-backed revenue', async () => {
+  const { mapPayPalWebhookToRevenueEvent } = await import('../src/paypal-event-mapper.mjs');
+  const mapped = mapPayPalWebhookToRevenueEvent({
+    id: 'WH-1',
+    event_type: 'PAYMENT.CAPTURE.COMPLETED',
+    create_time: '2026-11-20T00:00:00Z',
+    resource: { id: '3C679366HH908993F', status: 'COMPLETED', amount: { value: '19.00', currency_code: 'USD' } }
+  });
+  assert.equal(classifyRevenueEvent(mapped).verified, true);
+  assert.equal(classifyRevenueEvent(mapped).provider, 'paypal');
+});

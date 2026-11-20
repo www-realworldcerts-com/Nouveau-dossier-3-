@@ -29,7 +29,9 @@ function makeEvent(overrides = {}) {
     occurredAt: "2025-01-01T00:00:00.000Z",
     source: "paypal",
     externalId: "evt_1",
-    metadata: {},
+    // Creation requires provider evidence; idempotency is tested against a
+    // genuinely provider-backed event so no step has to pretend one is real.
+    metadata: { psp_transaction_id: "3C679366HH908993F" },
     ...overrides
   };
 }
@@ -65,7 +67,8 @@ test("a self-issued proof is written as UNVERIFIED even when the event claims VE
 test("a local event id with no provider transaction is not VERIFIED", async () => {
   const out = await createBase44RevenueEvent(null, cfgWithStatus(), makeEvent({
     externalId: "LIVE_1767462283000",
-    status: "VERIFIED"
+    status: "VERIFIED",
+    metadata: {}
   }), { dryRun: true });
 
   assert.equal(out.data.status, "UNVERIFIED");
@@ -86,8 +89,36 @@ test("a PayPal transaction id keeps the verified status", async () => {
 });
 
 test("an unverified event with no status is still recorded as a hallucination", async () => {
-  const out = await createBase44RevenueEvent(null, cfgWithStatus(), makeEvent({ externalId: "LIVE_x" }), { dryRun: true });
+  const out = await createBase44RevenueEvent(null, cfgWithStatus(), makeEvent({ externalId: "LIVE_x", metadata: {} }), { dryRun: true });
   assert.equal(out.data.status, "hallucination");
+});
+
+test("an unverified event is refused at creation, not demoted after the fact", async () => {
+  let created = false;
+  const base44 = {
+    asServiceRole: {
+      entities: {
+        RevenueEvent: {
+          filter: async () => [],
+          create: async () => {
+            created = true;
+            return { id: "new" };
+          }
+        }
+      }
+    }
+  };
+
+  await assert.rejects(
+    () => createBase44RevenueEventIdempotent(base44, makeCfg(), makeEvent({ externalId: "LIVE_1767462283000", metadata: {} }), { dryRun: false }),
+    (error) => {
+      assert.equal(error.code, "REVENUE_NOT_PROVIDER_VERIFIED");
+      assert.equal(error.reason, "no_provider_transaction_id");
+      assert.match(error.message, /Refusing to record revenue event from paypal/);
+      return true;
+    }
+  );
+  assert.equal(created, false, "no row may be written for an unverified event");
 });
 
 test("createBase44RevenueEventIdempotent returns existing id when found", async () => {

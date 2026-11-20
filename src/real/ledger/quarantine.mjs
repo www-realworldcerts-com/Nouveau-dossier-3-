@@ -18,7 +18,14 @@ import {
     assertStorableRevenueStatus,
     demoteUnverifiedStatus
 } from '../revenue-verification.mjs';
-import { readEncryptedJson, writeJsonAtomic } from '../../security/data-at-rest.mjs';
+import {
+    decryptBuffer,
+    decryptSensitiveFields,
+    encryptBuffer,
+    encryptSensitiveFields,
+    readEncryptedJson,
+    writeJsonAtomic
+} from '../../security/data-at-rest.mjs';
 
 /** Revenue events only: an amount plus a revenue id or a proof. Payout `items`
  * rows and `earning` records in the same directory are obligations, not
@@ -38,16 +45,56 @@ export function revenueEventsIn(value) {
     return found;
 }
 
+/**
+ * Read a ledger file in either stored shape: a plaintext JSON document (whose
+ * sensitive fields may individually be `enc:v1:` values), or a whole-file
+ * sealed record (`DATAENC1` envelope from `encryptBuffer`). The sealed shape is
+ * tried first because its JSON only exists after decryption. Returns the parsed
+ * value plus how it was stored, so a write can put the bytes back the same way;
+ * `null` means genuinely unreadable.
+ */
 function readRecord(file) {
+    let raw;
     try {
-        return readEncryptedJson(file);
+        raw = fs.readFileSync(file);
+    } catch {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(decryptBuffer(raw).toString('utf8'));
+        return { value: decryptSensitiveFields(parsed), wholeFileEncrypted: true };
+    } catch {
+        // Not a sealed file; fall through to the plaintext shapes.
+    }
+    try {
+        return { value: readEncryptedJson(file), wholeFileEncrypted: false };
     } catch {
         try {
-            return JSON.parse(fs.readFileSync(file, 'utf8'));
+            return { value: JSON.parse(raw.toString('utf8')), wholeFileEncrypted: false };
         } catch {
             return null;
         }
     }
+}
+
+/**
+ * Write a record back in the shape it was read in. A sealed file must stay
+ * sealed: the migration rewrites records, it never downgrades encryption. The
+ * envelope is re-created (new IV), with field-level encryption applied first so
+ * sensitive fields keep their own protection.
+ */
+function writeRecord(file, value, { wholeFileEncrypted }) {
+    if (!wholeFileEncrypted) {
+        writeJsonAtomic(file, value);
+        return;
+    }
+    const resolved = path.resolve(file);
+    const json = `${JSON.stringify(encryptSensitiveFields(value), null, 2)}\n`;
+    const sealed = encryptBuffer(Buffer.from(json, 'utf8'));
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, sealed, { mode: 0o600 });
+    fs.renameSync(tmp, resolved);
 }
 
 /**
@@ -97,8 +144,9 @@ export function quarantineRecord(record, { now = new Date().toISOString() } = {}
 }
 
 export function quarantineFile(file, { apply = false, now = new Date().toISOString() } = {}) {
-    const value = readRecord(file);
-    if (!value) return { file, changed: 0, unreadable: true, events: [] };
+    const stored = readRecord(file);
+    if (!stored) return { file, changed: 0, unreadable: true, events: [] };
+    const { value } = stored;
 
     const events = [];
     let changed = 0;
@@ -123,7 +171,7 @@ export function quarantineFile(file, { apply = false, now = new Date().toISOStri
         }
     }
 
-    if (changed > 0 && apply) writeJsonAtomic(file, value);
+    if (changed > 0 && apply) writeRecord(file, value, stored);
     return { file, changed, unreadable: false, events };
 }
 

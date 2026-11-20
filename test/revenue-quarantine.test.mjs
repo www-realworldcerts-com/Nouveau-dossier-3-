@@ -6,8 +6,22 @@ import test from 'node:test';
 
 import { quarantineDirectory, quarantineRecord } from '../src/real/ledger/quarantine.mjs';
 import { assertStorableRevenueStatus, RevenueNotProviderVerifiedError } from '../src/real/revenue-verification.mjs';
+import { decryptBuffer, encryptBuffer } from '../src/security/data-at-rest.mjs';
 
 const PAYPAL_ID = '3C679366HH908993F';
+const ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
+
+/** Run `fn` with a data-at-rest key configured, restoring the environment after. */
+function withEncryptionKey(fn) {
+    const previous = process.env.DATA_ENCRYPTION_KEY;
+    process.env.DATA_ENCRYPTION_KEY = ENCRYPTION_KEY;
+    try {
+        return fn();
+    } finally {
+        if (previous == null) delete process.env.DATA_ENCRYPTION_KEY;
+        else process.env.DATA_ENCRYPTION_KEY = previous;
+    }
+}
 
 function selfProofRecord(overrides = {}) {
     return {
@@ -136,6 +150,57 @@ test('the storage guard accepts a provider-backed VERIFIED record and ignores ho
     assert.equal(assertStorableRevenueStatus(providerRecord()).status, 'VERIFIED');
     assert.equal(assertStorableRevenueStatus(selfProofRecord({ status: 'UNVERIFIED' })).status, 'UNVERIFIED');
     assert.equal(assertStorableRevenueStatus({ status: undefined }).status, null);
+});
+
+test('a whole-file encrypted record is decrypted, rewritten in place and written back sealed', () => {
+    withEncryptionKey(() => {
+        const dir = ledgerDir({});
+        const file = path.join(dir, 'revenue_LIVE_sealed.json');
+        fs.writeFileSync(file, encryptBuffer(Buffer.from(`${JSON.stringify(selfProofRecord(), null, 2)}\n`, 'utf8')));
+        const before = fs.readFileSync(file);
+
+        const report = quarantineDirectory(dir, { apply: true, now: '2026-11-20T00:00:00.000Z' });
+        assert.equal(report.unreadable, 0, 'a sealed record is not counted as unreadable');
+        assert.equal(report.changed, 1);
+
+        const sealed = fs.readFileSync(file);
+        assert.notDeepEqual(sealed, before, 'the rewrite actually reached the disk');
+        assert.deepEqual(sealed.subarray(0, 8), Buffer.from('DATAENC1'), 'the file stays whole-file encrypted');
+
+        const saved = JSON.parse(decryptBuffer(sealed).toString('utf8'));
+        assert.equal(saved.status, 'UNVERIFIED');
+        assert.equal(saved.amount, 75, 'the amount survives the round trip');
+        assert.equal(saved.quarantine.reason, 'self_issued_proof');
+        assert.equal(saved.quarantine.psp_id, 'PROOF_1767462282250');
+        assert.equal(saved.verification_proof.type, 'autonomous_execution');
+
+        const afterFirst = fs.readFileSync(file);
+        const second = quarantineDirectory(dir, { apply: true, now: '2026-11-21T00:00:00.000Z' });
+        assert.equal(second.changed, 0);
+        assert.deepEqual(fs.readFileSync(file), afterFirst, 'a second run rewrites no bytes');
+    });
+});
+
+test('a record nested under `data` is rewritten there and the rest of the file survives', () => {
+    const wrapper = {
+        type: 'revenue_record',
+        version: 2,
+        notes: ['do not drop'],
+        data: selfProofRecord({ nested_note: 'keep me' })
+    };
+    const dir = ledgerDir({ 'revenue_data_1.json': wrapper });
+
+    const report = quarantineDirectory(dir, { apply: true, now: '2026-11-20T00:00:00.000Z' });
+    assert.equal(report.changed, 1);
+
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'revenue_data_1.json'), 'utf8'));
+    assert.equal(saved.data.status, 'UNVERIFIED', 'the nested record is the one rewritten');
+    assert.equal(saved.data.quarantine.previous_status, 'VERIFIED');
+    assert.equal(saved.data.nested_note, 'keep me');
+    assert.equal(saved.type, 'revenue_record', 'the wrapper keeps its own fields');
+    assert.equal(saved.version, 2);
+    assert.deepEqual(saved.notes, ['do not drop']);
+    assert.equal(saved.status, undefined, 'the wrapper is not turned into a revenue event');
 });
 
 test('the repository ledger stores no VERIFIED record without a provider transaction id', () => {

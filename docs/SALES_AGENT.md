@@ -107,6 +107,22 @@ const intent = buildCheckoutIntent({
 appendIntent(intent, 'data/sales/course-intents.ndjson');
 ```
 
+The checkout server already does this: `/buy?product_id=<slug>` records a
+`checkout_intent` for that course, and a capture that settles records one
+`paid_order`. Both share the `rwc_sid` session cookie, so an intent and the order
+it becomes can be joined; a reload of the same intent and a replayed capture are
+filtered out by `src/sales/checkout-funnel.mjs`. The tracked amount is the
+charged amount (`amount_cents`, `currency`) with `price_mad`/`price_eur` derived
+from the catalog FX table — the tracker's MAD fields are a currency conversion,
+not the charge. A generic `/buy` page with no course named records nothing,
+because a render of the course selector is not demand.
+
+Store the log somewhere durable: `CHECKOUT_INTENTS_FILE`
+(default `$SALES_DATA_DIR/course-intents.ndjson`). A serverless function's local
+filesystem is ephemeral, so without a durable path the counts reset per instance
+and the funnel will read zero again for a reason that looks identical to no
+traffic. A failed write is logged and dropped; it never breaks a checkout.
+
 Schema: `event`, `timestamp`, `session_id`, `course_id`, `price_mad`,
 `price_eur`, `source`, `referrer` (normalized to direct/google/meta/tiktok/
 linkedin/youtube/whatsapp/referral). `funnelSummary()` returns counts for

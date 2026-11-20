@@ -4,6 +4,7 @@
 
 import { buildBase44Client } from '../src/base44-client.mjs';
 import { getRevenueConfigFromEnv } from '../src/base44-revenue.mjs';
+import { classifyRevenueEvent } from '../src/real/revenue-verification.mjs';
 import '../src/load-env.mjs';
 
 async function monitorRevenueHealth() {
@@ -25,26 +26,38 @@ async function monitorRevenueHealth() {
             return;
         }
 
-        // Calculate metrics
-        const verified = events.filter(e => e.status === 'VERIFIED');
-        const settled = events.filter(e => e.settled === true);
-        const pending = events.filter(e => e.status === 'VERIFIED' && !e.settled);
+        // Calculate metrics. `verified` means a payment-provider transaction id
+        // backs the event, never just a status string the system wrote itself.
+        const verdicts = events.map(e => ({ event: e, verdict: classifyRevenueEvent(e) }));
+        const verified = verdicts.filter(v => v.verdict.verified).map(v => v.event);
+        const unverified = verdicts.filter(v => !v.verdict.verified).map(v => v.event);
+        const selfIssued = verdicts.filter(v => v.verdict.reason === 'self_issued_proof').map(v => v.event);
+        const settled = verified.filter(e => e.settled === true);
+        const pending = verified.filter(e => !e.settled);
         const failed = events.filter(e => e.status === 'FAILED' || e.status === 'ERROR');
 
-        const totalRevenue = events.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+        const totalRevenue = verified.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+        const unverifiedRevenue = unverified.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+        const selfIssuedRevenue = selfIssued.reduce((sum, e) => sum + Number(e.amount || 0), 0);
         const settledRevenue = settled.reduce((sum, e) => sum + Number(e.amount || 0), 0);
         const pendingRevenue = pending.reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
         // Display metrics
         console.log('\n📈 Revenue Metrics (Last 100 events):');
         console.log(`   Total Events: ${events.length}`);
-        console.log(`   Verified: ${verified.length}`);
+        console.log(`   Verified: ${verified.length} (provider transaction id present)`);
+        console.log(`   Unverified: ${unverified.length}`);
+        console.log(`   Self-issued proofs: ${selfIssued.length}`);
         console.log(`   Settled: ${settled.length}`);
         console.log(`   Pending Settlement: ${pending.length}`);
         console.log(`   Failed: ${failed.length}`);
 
         console.log('\n💰 Financial Summary:');
-        console.log(`   Total Revenue: $${totalRevenue.toFixed(2)}`);
+        console.log(`   Verified Revenue: $${totalRevenue.toFixed(2)}`);
+        console.log(`   Unverified Revenue (not counted as revenue): $${unverifiedRevenue.toFixed(2)}`);
+        if (selfIssued.length) {
+            console.log(`   Of which self-issued proofs: $${selfIssuedRevenue.toFixed(2)}`);
+        }
         console.log(`   Settled: $${settledRevenue.toFixed(2)} (${totalRevenue > 0 ? ((settledRevenue / totalRevenue) * 100).toFixed(1) : 0}%)`);
         console.log(`   Pending: $${pendingRevenue.toFixed(2)}`);
 

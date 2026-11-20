@@ -1,6 +1,7 @@
 // src/real/proof-validator.mjs
 import { assertPSPWebhookExists } from './psp/psp-webhooks.mjs';
 import { OWNER_ALLOWLIST } from './constants.mjs';
+import { classifyRevenueProof } from './revenue-verification.mjs';
 
 export class ProofValidator {
   /**
@@ -34,6 +35,15 @@ export class ProofValidator {
     }
 
     this.#assertBasicShape(proof);
+
+    // Only a provider transaction id can prove money moved. A proof the system
+    // generated about itself (`autonomous_execution`, a `PROOF_*` id) is refused
+    // here so it can never reach the ledger as verified revenue.
+    const verdict = classifyRevenueProof(proof);
+    if (!verdict.verified) {
+      throw new Error(`INVARIANT_FAIL: ${verdict.reason}${verdict.psp_id ? ` (${verdict.psp_id})` : ''}`);
+    }
+
     if (proof.type === 'onchain_tx') {
       await this.#assertOnChain(proof, event);
     } else {

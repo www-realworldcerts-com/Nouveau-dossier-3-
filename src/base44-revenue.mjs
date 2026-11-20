@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { demoteUnverifiedStatus, verifyRevenueEvent } from "./real/revenue-verification.mjs";
 import { computeConstitutionHash } from "./policy/constitution.mjs";
 import { getConstitutionState, computeConstitutionHashFromFile } from "./bootstrap/constitution-validator.mjs";
 
@@ -95,22 +96,38 @@ function buildRevenueData(cfg, event) {
   if (fieldMap.status && event.status != null) data[fieldMap.status] = event.status;
   if (fieldMap.payoutBatchId && event.payoutBatchId != null) data[fieldMap.payoutBatchId] = event.payoutBatchId;
 
-  // Enforce Revenue Verification (No IDs = Hallucination)
-  // "For each revenue event, attach one of: PSP transaction ID Settlement batch ID Bank reference Anything else is not revenue. No IDs = hallucination."
-  const hasExternalId = event.externalId && !String(event.externalId).startsWith("manual_");
-  const hasPspId = event.metadata?.psp_transaction_id || event.metadata?.paypal_transaction_id || event.metadata?.transaction_id;
-  const hasSettlementId = event.metadata?.settlement_batch_id || event.metadata?.settlement_id;
-  const hasBankRef = event.metadata?.bank_reference || event.metadata?.bank_ref;
-  
-  const isVerified = hasExternalId || hasPspId || hasSettlementId || hasBankRef;
-  
-  if (!isVerified && (!event.status || event.status === "confirmed")) {
-    // Force status to hallucination if no verification IDs present and not explicitly set to something else (like 'pending')
-    // We allow 'pending' or other statuses, but if it claims to be 'confirmed' or is undefined, we demote it.
-    if (fieldMap.status) {
-        console.warn(`⚠️  Marking Revenue Event ${event.externalId} as HALLUCINATION due to missing verification IDs.`);
-        data[fieldMap.status] = "hallucination";
+  // Enforce Revenue Verification: a provider transaction id is the only thing
+  // that may be called VERIFIED. A local id (`LIVE_...`), a settlement batch, a
+  // mission id, or a proof the system issued about itself (`autonomous_execution`)
+  // is not evidence, so such an event is never recorded as verified whatever the
+  // caller claimed — the ledger would otherwise inflate its own audit numbers.
+  const verification = verifyRevenueEvent({
+    metadata: event.metadata,
+    verification_proof: event.verification_proof ?? event.metadata?.verification_proof
+  });
+
+  if (fieldMap.metadata) {
+    data[fieldMap.metadata] = {
+      ...(data[fieldMap.metadata] || {}),
+      verification: {
+        verified: verification.verified,
+        reason: verification.reason,
+        provider: verification.provider,
+        psp_id: verification.verified ? verification.psp_id : null,
+        evidence: verification.source
+      }
+    };
+  }
+
+  if (fieldMap.status && !verification.verified) {
+    const declared = data[fieldMap.status] ?? null;
+    const demoted = demoteUnverifiedStatus(declared);
+    if (demoted.changed) {
+      console.warn(
+        `⚠️  Revenue Event ${event.externalId} has no payment-provider transaction id (${verification.reason}); recorded as ${demoted.status} instead of ${declared ?? "(none)"}.`
+      );
     }
+    data[fieldMap.status] = demoted.status;
   }
 
   if (fieldMap.eventHash) {

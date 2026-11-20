@@ -94,7 +94,7 @@ function call(url, method = 'GET', body = '{}') {
   });
 }
 
-const buy = await call('/buy');
+const buy = await call('/buy?product_id=financial-risk-manager-test-bank');
 const discovery = await call('/acp/v1/discovery');
 const prices = await call('/data/store-prices.json');
 const quote = await call('/acp/v1/price-quote?product_id=financial-risk-manager-test-bank&return_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/success') + '&cancel_url=' + encodeURIComponent('https://www.realworldcerts.com/buy/cancel'));
@@ -154,6 +154,8 @@ const capture = await call('/acp/v1/transactions/ORDER-TEST/capture', 'POST');
 // ORDER-NEW was created from a signed quote, so its capture can be compared
 // with the quote facts stored in the attempt record for that quote.
 const captureCreated = await call('/acp/v1/transactions/ORDER-NEW/capture', 'POST');
+// A replayed capture must not count as a second paid order.
+const captureCreatedAgain = await call('/acp/v1/transactions/ORDER-NEW/capture', 'POST');
 const orderCallsBeforeBusy = globalThis.__orderCreateCalls;
 
 // Another instance holds the claim for a different cart: the store directory
@@ -178,7 +180,14 @@ const busyOrderCalls = globalThis.__orderCreateCalls;
 await fs.unlink(busyLock);
 const busyRetry = await call('/acp/v1/transactions', 'POST', busyBody);
 
-process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, duplicate, dup_quote_id: dupQuoteBody.quote_id, duplicate_order_calls: duplicateOrderCalls, order_calls_after_replay: orderCallsAfterReplay, capture, capture_created: captureCreated, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
+const intentsPath = process.env.CHECKOUT_INTENTS_FILE;
+const funnel = intentsPath
+  ? await fs.readFile(intentsPath, 'utf8')
+      .then(text => text.split('\n').filter(Boolean).map(line => JSON.parse(line)))
+      .catch(() => [])
+  : [];
+
+process.stdout.write(JSON.stringify({ buy, discovery, prices, quote, badOriginQuote, badPathQuote, missing, stale, redirectMismatch, create, replay, duplicate, dup_quote_id: dupQuoteBody.quote_id, duplicate_order_calls: duplicateOrderCalls, order_calls_after_replay: orderCallsAfterReplay, capture, capture_created: captureCreated, capture_created_again: captureCreatedAgain, intents: funnel, busy, busy_quote_id: busyQuoteBody.quote_id, busy_order_calls: busyOrderCalls, busy_retry: busyRetry, busy_retry_order_calls: globalThis.__orderCreateCalls, order_create_calls: orderCallsBeforeBusy, order_bodies: globalThis.__orderBodies, order_headers: globalThis.__orderHeaders }) + '\n');
 `;
 
 const rateLimitProbe = String.raw`
@@ -240,6 +249,7 @@ function runProbe(script = probe, envOverrides = {}) {
             env: {
                 ...process.env,
                 CHECKOUT_ATTEMPT_STORE_DIR: store,
+                CHECKOUT_INTENTS_FILE: path.join(store, 'course-intents.ndjson'),
                 CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS: '250',
                 VERCEL: '1',
                 PAYPAL_WEBHOOK_ID: 'WH-TEST',
@@ -537,6 +547,32 @@ test('a capture of an order created from a quote is reconciled against its signe
     assert.equal(reconciliation.quoted.catalog_digest, JSON.parse(probe.quote.body).catalog_digest);
     assert.equal(reconciliation.delta_cents, 0);
     assert.equal(reconciliation.catalog_revision, 'ok');
+});
+
+test('opening checkout for a named course records one checkout intent', () => {
+    const probe = result();
+    const intents = probe.intents.filter((row) => row.event === 'checkout_intent');
+    assert.equal(intents.length, 1, JSON.stringify(probe.intents));
+    const [intent] = intents;
+    assert.equal(intent.course_id, 'financial-risk-manager-test-bank');
+    assert.equal(intent.amount_cents, 1900);
+    assert.equal(intent.currency, 'USD');
+    assert.equal(intent.price_mad, 190, 'the MAD price comes from the catalog FX table');
+    assert.equal(intent.price_eur, 17);
+    assert.match(intent.session_id, /^sess_/);
+    assert.ok(Number.isFinite(Date.parse(intent.timestamp)));
+    assert.match(probe.buy.headers['Set-Cookie'], /^rwc_sid=sess_[A-Za-z0-9_]+; Path=\/;/);
+});
+
+test('a completed capture records exactly one paid order', () => {
+    const probe = result();
+    const paid = probe.intents.filter((row) => row.event === 'paid_order');
+    assert.equal(paid.length, 1, JSON.stringify(probe.intents));
+    assert.equal(paid[0].order_id, 'ORDER-NEW');
+    assert.equal(paid[0].course_id, 'financial-risk-manager-test-bank');
+    assert.equal(paid[0].amount_cents, 1900);
+    assert.equal(paid[0].currency, 'USD');
+    assert.equal(probe.capture_created_again.status, 200, 'the replay still answers 200');
 });
 
 test('a capture without quote metadata reports reconciliation as unchecked', () => {

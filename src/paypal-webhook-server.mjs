@@ -43,6 +43,12 @@ import {
 } from "./sales/checkout-attempts.mjs";
 import { checkoutClientKey, createCheckoutRateLimiter } from "./sales/checkout-rate-limit.mjs";
 import { reconcileCapturedPayment } from "./sales/capture-reconciliation.mjs";
+import {
+  checkoutIntentEvent,
+  checkoutSession,
+  paidOrderEvent,
+  recordFunnelEvent
+} from "./sales/checkout-funnel.mjs";
 
 const isDirectExecution =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -420,7 +426,7 @@ function json(res, status, data) {
   res.end(body);
 }
 
-function html(res, status, body) {
+function html(res, status, body, headers = {}) {
   const text = String(body ?? "");
   // HTML pages are self-contained and use inline scripts. Keep the strict API
   // CSP, but allow the page's own inline code so checkout buttons work.
@@ -430,7 +436,8 @@ function html(res, status, body) {
   );
   res.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
-    "Content-Length": Buffer.byteLength(text)
+    "Content-Length": Buffer.byteLength(text),
+    ...headers
   });
   res.end(text);
 }
@@ -1651,7 +1658,28 @@ if (args.check === true || args["config-check"] === true) {
         json(res, 405, { ok: false, error: "Method not allowed" });
         return;
       }
-      html(res, 200, buyPage());
+      // A deep link from a course page names one course, and that is a checkout
+      // intent for it. The generic page lets the buyer choose, so nothing is
+      // recorded there: counting a render of the selector as demand would lie.
+      const session = checkoutSession(req.headers?.cookie);
+      const productId = getSearchParams(req).get("product_id");
+      if (productId) {
+        try {
+          const catalog = loadCourseCatalog();
+          const course = catalog.bySlug[String(productId)];
+          if (course) {
+            recordFunnelEvent(checkoutIntentEvent({
+              course,
+              catalog,
+              sessionId: session.id,
+              referrer: req.headers?.referer
+            }));
+          }
+        } catch (error) {
+          console.warn(`[checkout-funnel] checkout_intent skipped: ${error?.message ?? error}`);
+        }
+      }
+      html(res, 200, buyPage(), session.setCookie ? { "Set-Cookie": session.setCookie } : {});
       return;
     }
 
@@ -1862,6 +1890,22 @@ if (args.check === true || args["config-check"] === true) {
           }
         } else if (!fulfill) {
           fulfillment = { ok: true, delivery: 'disabled' };
+        }
+        // A settled capture is a paid order for the funnel. The amount is the
+        // one reconciliation summed from completed captures, so a partially
+        // captured order is not counted at its full quoted price.
+        if (String(order?.status || '').toUpperCase() === 'COMPLETED') {
+          try {
+            recordFunnelEvent(paidOrderEvent({
+              orderId: order?.id ?? orderId,
+              courseId: productId || null,
+              amountCents: reconciliation.captured.value_cents,
+              catalog: captureCatalog,
+              sessionId: checkoutSession(req.headers?.cookie, { create: false }).id
+            }));
+          } catch (error) {
+            console.warn(`[checkout-funnel] paid_order skipped: ${error?.message ?? error}`);
+          }
         }
         json(res, 200, {
           ok: true,

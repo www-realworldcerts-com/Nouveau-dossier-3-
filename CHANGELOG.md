@@ -1,6 +1,25 @@
 # Changelog
 
 ## 2026-11-20
+- Revenue ledger refuses self-verification. Money is recorded as `VERIFIED` only
+  when a payment-provider transaction id (PayPal, Stripe, Payoneer/bank, on-chain
+  hash) backs it; a local `LIVE_*` id, a settlement batch or a proof the system
+  issued about itself (`autonomous_execution`, `PROOF_*`) now records the event
+  as `UNVERIFIED` with the reason and the evidence it lacked, and leaves the
+  event's `metadata.verification` for the audit trail. `ProofValidator` refuses
+  the same self-issued proofs, `monitor-revenue-health` reports verified and
+  unverified money separately, and `npm run audit:revenue-proofs` classifies the
+  local ledger on disk so its totals cannot be inflated by the system's output.
+- Instrumented the checkout funnel. `/buy` now records a `checkout_intent`
+  when it renders a named course (`?product_id=`), and a settled capture records
+  one `paid_order`, both through the existing intent tracker so
+  `funnelSummary()` reports real counts instead of zeros caused by missing data.
+  The two events share a checkout session cookie (`rwc_sid`), a reload or a
+  replayed capture is not counted twice, and the reported `price_mad`/`price_eur`
+  come from the catalog FX table rather than a guess; the charged amount is
+  carried in `amount_cents`/`currency`. Recording is best effort: a write
+  failure is logged and never fails a checkout. The log path is
+  `CHECKOUT_INTENTS_FILE`, falling back to `$SALES_DATA_DIR/course-intents.ndjson`.
 - Reported post-capture reconciliation. The signed checkout attempt record now
   stores the facts of the quote it was created from (amount in cents, currency,
   catalog version and catalog digest) under the record's HMAC, and

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createBase44RevenueEventIdempotent } from "../src/base44-revenue.mjs";
+import { createBase44RevenueEvent, createBase44RevenueEventIdempotent } from "../src/base44-revenue.mjs";
 
 function makeCfg() {
   return {
@@ -33,6 +33,62 @@ function makeEvent(overrides = {}) {
     ...overrides
   };
 }
+
+function cfgWithStatus() {
+  const cfg = makeCfg();
+  cfg.fieldMap.status = "status";
+  return cfg;
+}
+
+const SELF_ISSUED = {
+  type: "autonomous_execution",
+  psp_id: "PROOF_1767462283250",
+  amount: 100,
+  currency: "USD",
+  timestamp: "2026-01-03T16:01:00.000Z"
+};
+
+test("a self-issued proof is written as UNVERIFIED even when the event claims VERIFIED", async () => {
+  const out = await createBase44RevenueEvent(null, cfgWithStatus(), makeEvent({
+    externalId: "LIVE_1767462283000",
+    amount: 100,
+    status: "VERIFIED",
+    metadata: { created_by: "autonomous-daemon", verification_proof: SELF_ISSUED }
+  }), { dryRun: true });
+
+  assert.equal(out.data.status, "UNVERIFIED");
+  assert.equal(out.data.metadata.verification.verified, false);
+  assert.equal(out.data.metadata.verification.reason, "self_issued_proof");
+  assert.equal(out.data.metadata.verification.psp_id, null);
+});
+
+test("a local event id with no provider transaction is not VERIFIED", async () => {
+  const out = await createBase44RevenueEvent(null, cfgWithStatus(), makeEvent({
+    externalId: "LIVE_1767462283000",
+    status: "VERIFIED"
+  }), { dryRun: true });
+
+  assert.equal(out.data.status, "UNVERIFIED");
+  assert.equal(out.data.metadata.verification.reason, "no_provider_transaction_id");
+});
+
+test("a PayPal transaction id keeps the verified status", async () => {
+  const out = await createBase44RevenueEvent(null, cfgWithStatus(), makeEvent({
+    externalId: "CAP-1",
+    status: "VERIFIED",
+    metadata: { psp_transaction_id: "3C679366HH908993F" }
+  }), { dryRun: true });
+
+  assert.equal(out.data.status, "VERIFIED");
+  assert.equal(out.data.metadata.verification.verified, true);
+  assert.equal(out.data.metadata.verification.provider, "paypal");
+  assert.equal(out.data.metadata.verification.psp_id, "3C679366HH908993F");
+});
+
+test("an unverified event with no status is still recorded as a hallucination", async () => {
+  const out = await createBase44RevenueEvent(null, cfgWithStatus(), makeEvent({ externalId: "LIVE_x" }), { dryRun: true });
+  assert.equal(out.data.status, "hallucination");
+});
 
 test("createBase44RevenueEventIdempotent returns existing id when found", async () => {
   let created = false;

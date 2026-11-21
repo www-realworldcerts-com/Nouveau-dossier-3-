@@ -36,7 +36,7 @@ owner authorization and is never inferred by the swarm.
 | `REVENUE_STALL` | high | Latest financial record older than `--stall-days` (default 7) |
 | `PROCUREMENT_DELIVERY_STALL` | high | POs placed/shipped longer than the stall window |
 | `DELIVERY_UNVERIFIED` | medium | Delivered/on-hold POs without completed verification |
-| `FULFILLMENT_BACKLOG` | high | `PENDING_DELIVERY` orders older than the stall window |
+| `FULFILLMENT_BACKLOG` | high | Orders whose latest queue line is `PENDING_DELIVERY`, older than the stall window |
 | `FULFILLMENT_DELIVERY_EXHAUSTED` | critical | The fulfilment drain recorded `DELIVERY_EXHAUSTED` as an order's latest queue line |
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |

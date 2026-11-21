@@ -166,6 +166,27 @@ test('aged pending customer fulfillments are flagged', () => {
     assert.equal(backlog.evidence.pending_count, 1);
 });
 
+test('backlog counts only orders whose latest line is still pending', () => {
+    const queue = [
+        // Old pending line, later resolved in different ways.
+        { timestamp: new Date(NOW.getTime() - 20 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'delivered-later' },
+        { timestamp: NOW.toISOString(), status: 'DELIVERED', order_id: 'delivered-later' },
+        { timestamp: new Date(NOW.getTime() - 20 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'exhausted-later' },
+        { timestamp: NOW.toISOString(), status: 'DELIVERY_EXHAUSTED', order_id: 'exhausted-later' },
+        // Still pending: this one must count.
+        { timestamp: new Date(NOW.getTime() - 9 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'still-waiting' }
+    ];
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: queue }) });
+
+    const backlog = findings.find(finding => finding.code === 'FULFILLMENT_BACKLOG');
+    assert.ok(backlog, 'the genuinely pending order is still reported');
+    assert.equal(backlog.evidence.pending_count, 1);
+    assert.doesNotMatch(backlog.detail, /delivered-later|exhausted-later/);
+
+    const exhausted = findings.find(finding => finding.code === 'FULFILLMENT_DELIVERY_EXHAUSTED');
+    assert.deepEqual(exhausted.evidence.orders.map(order => order.order_id), ['exhausted-later']);
+});
+
 test('an order the drain exhausted becomes a recorded silent-failure finding', () => {
     const root = tempRoot();
     fs.mkdirSync(path.join(root, 'logs'), { recursive: true });

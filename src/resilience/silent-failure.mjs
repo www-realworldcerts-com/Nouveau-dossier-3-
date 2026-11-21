@@ -135,7 +135,7 @@ export const FINDING_CATALOG = {
         obligation: 'Deliver or refund every pending order.',
         remedy: 'Work the fulfillment queue oldest-first and record proof of delivery/refund.',
         mitigation: 'Backlog age detection in this sentinel.',
-        verification: 'No PENDING_DELIVERY entry older than the stall window remains.',
+        verification: 'No order whose latest queue line is PENDING_DELIVERY is older than the stall window.',
         owner_action: 'Fulfil or refund the oldest pending orders.',
         sla_hours: 48
     },
@@ -691,7 +691,16 @@ export function detectSilentFailures({
     const queue = fulfillment === undefined
         ? readFulfillmentQueue(root, { queueFile: env?.FULFILLMENT_QUEUE_FILE || undefined })
         : fulfillment;
-    const pending = queue.filter(entry => String(entry.status || '').toUpperCase() === 'PENDING_DELIVERY');
+    // The queue is append-only, so only an order's latest line says where it
+    // stands. This is the same view the drain uses: an order delivered or
+    // exhausted later must not keep counting as a pending backlog entry.
+    const latestByOrder = new Map();
+    for (const entry of queue) {
+        const orderId = entry?.order_id ? String(entry.order_id) : null;
+        if (orderId) latestByOrder.set(orderId, entry);
+    }
+    const latest = [...latestByOrder.values()];
+    const pending = latest.filter(entry => String(entry.status || '').toUpperCase() === 'PENDING_DELIVERY');
     const pendingDays = pending.map(entry => {
         const time = Date.parse(entry.timestamp || '');
         return Number.isFinite(time) ? (at.getTime() - time) / 86400000 : Infinity;
@@ -706,14 +715,9 @@ export function detectSilentFailures({
 
     // The drain stops retrying an order after its attempt cap and records
     // DELIVERY_EXHAUSTED as the queue's latest line. Detect it from the same
-    // last-line-wins view so a dead paid order becomes an incident finding, and
-    // a later DELIVERED line for that order clears it.
-    const latestByOrder = new Map();
-    for (const entry of queue) {
-        const orderId = entry?.order_id ? String(entry.order_id) : null;
-        if (orderId) latestByOrder.set(orderId, entry);
-    }
-    const exhausted = [...latestByOrder.values()]
+    // latest-line view so a dead paid order becomes an incident finding, and a
+    // later DELIVERED line for that order clears it.
+    const exhausted = latest
         .filter(entry => String(entry.status || '').toUpperCase() === 'DELIVERY_EXHAUSTED')
         .map(entry => ({
             order_id: String(entry.order_id),

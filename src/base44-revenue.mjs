@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { demoteUnverifiedStatus, verifyRevenueEvent, RevenueNotProviderVerifiedError } from "./real/revenue-verification.mjs";
+import { reversalWithoutCaptureFinding } from "./real/ledger/reversals.mjs";
 import { computeConstitutionHash } from "./policy/constitution.mjs";
 import { getConstitutionState, computeConstitutionHashFromFile } from "./bootstrap/constitution-validator.mjs";
 
@@ -74,7 +75,8 @@ function buildRevenueData(cfg, event, { dryRun = false } = {}) {
   
   const numericAmount = Number(event.amount);
 
-  if (!cfg.allowNonPositiveAmounts && numericAmount <= 0) {
+  // A reversal is a deliberate negative row, not bad data.
+  if (!cfg.allowNonPositiveAmounts && numericAmount <= 0 && !event.metadata?.reversal_of) {
     console.warn(`⚠️  Revenue event ${event.externalId} amount <= 0 (${numericAmount}). Proceeding despite policy.`);
     // throw new Error("Revenue event amount must be > 0");
   }
@@ -185,6 +187,142 @@ export async function createBase44RevenueEvent(base44, cfg, event, { dryRun } = 
 
   const entity = base44.asServiceRole.entities[cfg.entityName];
   return entity.create(data);
+}
+
+/** The capture ids a Base44 revenue row can identify itself by. */
+function captureIds(row, metadataField) {
+  const meta = row?.[metadataField] ?? {};
+  const proof = meta?.verification_proof ?? null;
+  return [meta.paypal_capture_id, meta.psp_transaction_id, proof?.psp_id]
+    .filter((value) => value != null && String(value).trim() !== "")
+    .map((value) => String(value).trim());
+}
+
+/** Revenue rows, newest first, bounded so a huge entity cannot hang a webhook. */
+async function listRevenueRows(entity, cfg, { pageSize = 250, maxRows = 5000 } = {}) {
+  const fields = [
+    "id",
+    cfg.fieldMap.amount,
+    cfg.fieldMap.currency,
+    cfg.fieldMap.occurredAt,
+    cfg.fieldMap.externalId,
+    cfg.fieldMap.metadata
+  ].filter(Boolean);
+  const rows = [];
+  let offset = 0;
+  while (rows.length < maxRows) {
+    const page = await entity.list("-created_date", pageSize, offset, fields);
+    if (!Array.isArray(page) || page.length === 0) break;
+    rows.push(...page);
+    offset += page.length;
+    if (page.length < pageSize) break;
+  }
+  return { rows: rows.slice(0, maxRows), truncated: rows.length >= maxRows };
+}
+
+const BASE44_REVERSAL_TYPES = new Set(["refunded", "reversed", "disputed"]);
+
+/**
+ * Reverse a verified PayPal refund, reversal or dispute in the Base44 ledger.
+ *
+ * The production totals live in `RevenueEvent`, so a negative row keyed to the
+ * capture PayPal says was refunded is what makes those totals honest. A
+ * reversal whose capture row cannot be found there is returned as a critical
+ * finding instead of being written against nothing.
+ */
+export async function createBase44RevenueReversal(base44, cfg, reversal, { pageSize, maxRows } = {}) {
+  const type = String(reversal?.type ?? "").trim().toLowerCase();
+  if (!BASE44_REVERSAL_TYPES.has(type)) {
+    throw new Error(`Not a refund, reversal or dispute: ${reversal?.type ?? "(none)"}`);
+  }
+  const captureId = String(reversal?.original_capture_id ?? "").trim();
+  const now = new Date().toISOString();
+  const metadataField = cfg.fieldMap.metadata;
+  const ledger = `the Base44 ${cfg.entityName} ledger`;
+
+  const unmatched = (reason) => ({
+    applied: false,
+    reason,
+    finding: reversalWithoutCaptureFinding(reversal, {
+      captureId: captureId || null,
+      reason,
+      now,
+      ledger
+    })
+  });
+
+  if (!captureId) return unmatched("capture_id_missing");
+  if (!base44) throw new Error("Base44 client not configured (missing BASE44_APP_ID / BASE44_SERVICE_TOKEN)");
+
+  const entity = base44.asServiceRole.entities[cfg.entityName];
+  const { rows, truncated } = await listRevenueRows(entity, cfg, { pageSize, maxRows });
+  const capture = rows.find((row) =>
+    !row?.[metadataField]?.reversal_of &&
+    captureIds(row, metadataField).includes(captureId)
+  );
+  if (!capture) return unmatched(truncated ? "capture_search_truncated" : "capture_not_found");
+
+  const declared = Number(reversal?.amount);
+  const captured = Math.abs(Number(capture?.[cfg.fieldMap.amount]));
+  const amount =
+    Number.isFinite(declared) && declared > 0
+      ? declared
+      : Number.isFinite(captured) && captured > 0
+        ? captured
+        : null;
+  if (amount == null) return unmatched("capture_amount_missing");
+
+  const currency = String(
+    reversal?.currency || capture?.[cfg.fieldMap.currency] || cfg.defaultCurrency || ""
+  ).toUpperCase();
+  const occurredAt = reversal?.occurredAt ?? now;
+  const reversalEventId = String(reversal?.externalId || `${type}_${captureId}`);
+  const refundId = reversal?.metadata?.paypal_refund_id ?? null;
+  const disputeId = reversal?.metadata?.paypal_dispute_id ?? null;
+
+  const event = {
+    amount: -amount,
+    currency,
+    occurredAt,
+    source: "paypal",
+    externalId: reversalEventId,
+    // The capture id is provider evidence, so the negative row is VERIFIED and
+    // counts in the totals it corrects.
+    status: "VERIFIED",
+    metadata: {
+      psp_transaction_id: captureId,
+      reversal_of: captureId,
+      reversal_type: type,
+      paypal_event_type: reversal?.metadata?.paypal_event_type ?? null,
+      paypal_event_id: reversal?.metadata?.paypal_event_id ?? null,
+      ...(refundId ? { paypal_refund_id: refundId } : {}),
+      ...(disputeId ? { paypal_dispute_id: disputeId } : {})
+    },
+    verification_proof: {
+      type: "paypal_capture_reversal",
+      psp_id: captureId,
+      amount,
+      currency,
+      timestamp: occurredAt,
+      ...(refundId ? { refund_id: refundId } : {}),
+      ...(disputeId ? { dispute_id: disputeId } : {})
+    }
+  };
+
+  const written = await createBase44RevenueEventIdempotent(base44, cfg, event, { dryRun: false });
+  const captureEventId = capture?.[cfg.fieldMap.externalId] ?? null;
+
+  if (written?.deduped) {
+    return { applied: false, reason: "already_reversed", reversal_event_id: reversalEventId, capture_event_id: captureEventId };
+  }
+
+  return {
+    applied: true,
+    reason: "reversed",
+    reversal_event_id: reversalEventId,
+    capture_event_id: captureEventId,
+    revenue_event_id: written?.id ?? null
+  };
 }
 
 export async function createBase44RevenueEventIdempotent(base44, cfg, event, { dryRun } = {}) {

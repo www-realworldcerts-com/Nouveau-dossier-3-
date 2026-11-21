@@ -59,7 +59,11 @@ export function readLedgerRecords(dir) {
 export function findCaptureRecord(records, captureId) {
     const id = String(captureId ?? '').trim();
     if (!id) return null;
-    return records.find(({ record }) => !record?.reversal_of && captureIds(record).includes(id)) ?? null;
+    return records.find(({ record }) =>
+        !record?.reversal_of &&
+        !record?.metadata?.reversal_of &&
+        captureIds(record).includes(id)
+    ) ?? null;
 }
 
 /** A reversal id that is stable across a replayed webhook. */
@@ -80,11 +84,17 @@ function amountOf(reversal, capture) {
     return Number.isFinite(captured) && captured > 0 ? captured : null;
 }
 
-/** The loud, actionable result when a reversal cannot be netted out. */
-function reversalWithoutCaptureFinding(reversal, {
+/**
+ * The loud, actionable result when a reversal cannot be netted out.
+ *
+ * `ledger` names the ledger searched, so a missing Base44 row cannot be
+ * mistaken for a missing local file (and the reverse).
+ */
+export function reversalWithoutCaptureFinding(reversal, {
     captureId = null,
     reason = 'capture_not_found',
-    now = new Date().toISOString()
+    now = new Date().toISOString(),
+    ledger = 'the local revenue ledger'
 } = {}) {
     const amount = reversal?.amount == null ? null : Number(reversal.amount);
     const currency = String(reversal?.currency || '').toUpperCase() || null;
@@ -97,13 +107,14 @@ function reversalWithoutCaptureFinding(reversal, {
         title: 'A refund, reversal or dispute has no matching capture in the ledger',
         detail:
             `A ${label}${amount != null ? ` of ${currency || '?'} ${amount}` : ''} ` +
-            `refers to ${subject}, but no revenue event in the ledger is keyed to it (${reason}).`,
+            `refers to ${subject}, but no revenue event in ${ledger} is keyed to it (${reason}).`,
         evidence: {
             reversal_event_id: reversal?.externalId ?? null,
             reversal_type: reversal?.type ?? null,
             capture_id: captureId,
             amount,
             currency,
+            ledger,
             reason
         },
         detected_at: now

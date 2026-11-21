@@ -18,6 +18,7 @@ import { mapPayPalWebhookToRevenueEvent } from "./paypal-event-mapper.mjs";
 import { dispatchVerifiedPayPalReversal } from "./real/ledger/reversal-dispatch.mjs";
 import {
   createBase44RevenueEventIdempotent,
+  createBase44RevenueReversal,
   getRevenueConfigFromEnv
 } from "./base44-revenue.mjs";
 import { maybeSendAlert } from "./alerts.mjs";
@@ -2738,11 +2739,14 @@ if (args.check === true || args["config-check"] === true) {
     const wantWriteEvent = shouldWriteToBase44();
     const wantMetrics = shouldWriteMetricsToBase44();
     const wantRevenueWrite = shouldWriteRevenueFromPayPal() && !!revenueEvent;
+    // The production ledger is Base44: a refund must reverse the capture row
+    // there, not only the local files, or reported revenue stays overstated.
+    const wantBase44Reversal = shouldWriteRevenueFromPayPal() && reversalResult.dispatched;
     const payoutUpdate = mapPayPalWebhookToPayoutItemUpdate(evt);
     const wantPayoutStatusWrite = shouldWritePayoutStatusFromPayPal() && !!payoutUpdate;
     const payoutBatchUpdate = mapPayPalWebhookToPayoutBatchUpdate(evt);
     const wantPayoutBatchWrite = shouldWritePayoutStatusFromPayPal() && !!payoutBatchUpdate;
-    const base44 = wantWriteEvent || wantMetrics || wantRevenueWrite || wantPayoutStatusWrite || wantPayoutBatchWrite ? buildBase44ServiceClient() : null;
+    const base44 = wantWriteEvent || wantMetrics || wantRevenueWrite || wantBase44Reversal || wantPayoutStatusWrite || wantPayoutBatchWrite ? buildBase44ServiceClient() : null;
 
     if (wantMetrics && base44) {
       await writeMetricToBase44(base44, evt, {
@@ -2810,6 +2814,32 @@ if (args.check === true || args["config-check"] === true) {
         }
 
         throw err;
+      }
+    }
+
+    let base44Reversal = null;
+    if (wantBase44Reversal && base44) {
+      try {
+        base44Reversal = await createBase44RevenueReversal(base44, revenueCfg, reversalResult.reversal);
+      } catch (err) {
+        base44Reversal = {
+          applied: false,
+          reason: "reversal_failed",
+          error: truncate(err?.message ?? String(err), 500)
+        };
+      }
+
+      if (base44Reversal.finding) {
+        process.stderr.write(
+          `FINDING ${base44Reversal.finding.code} [${base44Reversal.finding.severity}] ` +
+          `${base44Reversal.finding.detail}\n`
+        );
+      } else if (base44Reversal.reason === "reversal_failed") {
+        process.stderr.write(
+          `FINDING REVENUE_REVERSAL_NOT_RECORDED [critical] A verified ` +
+          `${reversalResult.reversal?.type ?? "reversal"} could not be written to the Base44 ` +
+          `${revenueCfg.entityName} ledger: ${base44Reversal.error}\n`
+        );
       }
     }
 
@@ -2906,7 +2936,18 @@ if (args.check === true || args["config-check"] === true) {
             reversal_event_id: reversalResult.reversal_event_id ?? null,
             capture_event_id: reversalResult.capture_event_id ?? null,
             finding: reversalResult.finding ?? null,
-            error: reversalResult.error ?? null
+            error: reversalResult.error ?? null,
+            base44: base44Reversal
+              ? {
+                  applied: base44Reversal.applied === true,
+                  reason: base44Reversal.reason,
+                  revenue_event_id: base44Reversal.revenue_event_id ?? null,
+                  reversal_event_id: base44Reversal.reversal_event_id ?? null,
+                  capture_event_id: base44Reversal.capture_event_id ?? null,
+                  finding: base44Reversal.finding ?? null,
+                  error: base44Reversal.error ?? null
+                }
+              : null
           }
         : { dispatched: false, reason: reversalResult.reason },
       payoutStatusUpdated: payoutStatusResult?.updated === true,

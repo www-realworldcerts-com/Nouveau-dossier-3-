@@ -39,26 +39,6 @@ export function buildTickAuditArgs({ webhookUrl = null, checkoutHealthUrl = null
     return args;
 }
 
-export function buildDrainArgs({ queueFile = null, limit = null } = {}) {
-    const args = ['--apply', '--json'];
-    if (queueFile) args.push('--queue', String(queueFile));
-    if (limit) args.push('--limit', String(limit));
-    return args;
-}
-
-function lastJsonLine(text) {
-    const lines = String(text || '').split('\n').map(line => line.trim()).filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-        if (!lines[i].startsWith('{')) continue;
-        try {
-            return JSON.parse(lines[i]);
-        } catch {
-            /* keep looking */
-        }
-    }
-    return null;
-}
-
 function runNode({ scriptPath, args, root, env, stdio, timeoutMs }) {
     return new Promise(resolve => {
         const startedAt = Date.now();
@@ -116,21 +96,17 @@ export function runTickAudit({
  * reconciliation counts its id as fulfilled because a line exists. Without a
  * scheduled drain such an order is only delivered if someone retries by hand.
  * This runs the idempotent drain (keyed by PayPal order id in the ledger), so
- * re-running never emails the same buyer twice.
+ * re-running never emails the same buyer twice. Its output is inherited, so the
+ * drain's own messages (including ESCALATED orders) land in the loop log.
  */
 export function runFulfillmentDrain({
     root = process.cwd(),
     script = path.join('scripts', 'drain-fulfillment.mjs'),
     env = process.env,
-    queueFile = env.FULFILLMENT_QUEUE_FILE || null,
-    limit = 25,
-    timeoutMs = 120000,
-    stdio = 'inherit'
+    timeoutMs = 120000
 } = {}) {
-    const args = buildDrainArgs({ queueFile, limit });
     const scriptPath = path.isAbsolute(script) ? script : path.join(root, script);
-    return runNode({ scriptPath, args, root, env, stdio, timeoutMs })
-        .then(result => ({ ...result, args, report: lastJsonLine(result.stdout) }));
+    return runNode({ scriptPath, args: ['--apply'], root, env, stdio: 'inherit', timeoutMs });
 }
 
 export default runTickAudit;

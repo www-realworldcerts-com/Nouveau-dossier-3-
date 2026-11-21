@@ -105,10 +105,6 @@ async function loop() {
                 console.error('fulfilment drain timed out; paid orders may still be queued');
             } else if (drain.code !== 0) {
                 console.error(`fulfilment drain exited ${drain.code}; paid orders may still be queued`);
-            } else if (drain.report?.queue_present === false) {
-                console.log(`fulfilment drain skipped: no queue at ${drain.report.queue_file}; nothing to deliver here`);
-            } else if (drain.report?.delivered?.length) {
-                console.log(`fulfilment drain delivered ${drain.report.delivered.length} paid order(s)`);
             }
         }
 

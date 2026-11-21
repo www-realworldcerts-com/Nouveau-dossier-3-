@@ -179,11 +179,23 @@ append-only queue used to count as fulfilled. Such an order sat `PENDING_EMAIL`,
 
 `scripts/drain-fulfillment.mjs` closes that hole. It reads the latest line per
 order id, and for every order that is not `DELIVERED` it re-reads the order from
-PayPal and re-runs `fulfillPaidOrder` — the same path the webhook uses. Delivery
-is keyed by the PayPal order id in the settlement ledger, so an order that was
-already emailed is returned as a duplicate rather than sent twice. Unpaid orders
-are skipped, per-order failures are reported and left in the queue, and
-`--limit` caps one run.
+PayPal and re-runs `fulfillPaidOrder` — the same path the webhook uses. Sending
+is deduplicated by the settlement ledger: a second attempt for an order whose
+prepayment recorded `email_status: sent` returns that delivery instead of
+emailing again, and the drain then marks the queue `DELIVERED` itself so a
+ledger-deduplicated order is not retried on every tick. Unpaid orders are
+skipped and `--limit` caps one run.
+
+Retries are bounded, so a permanently undeliverable order (rejected address,
+missing payer email, missing access secret) is not looked up and re-emailed on
+every tick forever. Each failed attempt appends a queue line with
+`drain.attempts`, `drain.last_reason` and `drain.next_attempt_at`; the retry
+delay doubles from `--backoff-minutes` (default 15) up to six hours, and an
+order that is still not due is not even looked up. After `--max-attempts`
+(default 5) failures the order becomes `DELIVERY_EXHAUSTED` with an
+action-required note: it is never retried automatically again, it is no longer
+counted as owed, and the drain and the supervisor report it (`ESCALATED`) so a
+human delivers or refunds it.
 
 The queue belongs to the host that runs the webhook, so the drain runs on that
 host: the local supervisor (`npm start`) applies the drain after every tick's

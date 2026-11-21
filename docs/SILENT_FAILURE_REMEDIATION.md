@@ -40,6 +40,7 @@ owner authorization and is never inferred by the swarm.
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
 | `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |
+| `CHECKOUT_GATE_BLOCKED` | critical | The deployed `/health` reports `blocks_checkout=true` |
 | `STOREFRONT_NOT_TRANSACTIONAL` | critical | An origin 200 response proves static HTML with no application runtime/API |
 | `STOREFRONT_UNREACHABLE` | warning | DNS/timeout/connection failure or persistent 502/503/504 after retries |
 | `STOREFRONT_HTTP_ERROR` | warning | The origin answered with an unexpected 4xx/5xx status |
@@ -105,6 +106,12 @@ charged, fulfilment never runs, and PayPal stops retrying. `--webhook-url`
 | 401/403/302/307 | deployment protection blocks PayPal |
 | 503 | route present, webhook id or credentials missing |
 | 5xx | server failure, fulfilment unproven |
+
+`--checkout-health-url` (or `CHECKOUT_HEALTH_URL`, then `<APP_ORIGIN>/health`)
+reads the same `/health` and records `CHECKOUT_GATE_BLOCKED` (critical) when the
+deployment reports `blocks_checkout=true`: every order then answers 503, which
+was otherwise visible only as a red tick run. A response that carries no gate
+verdict is not read as open, and an unset URL probes nothing.
 
 ```bash
 npm run resilience -- audit \

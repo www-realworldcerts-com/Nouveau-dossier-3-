@@ -15,6 +15,7 @@ import {
     planCheckoutReplayProtection,
     probeCheckoutAttemptStore
 } from '../src/sales/checkout-attempts.mjs';
+import { probeCheckoutGate, resolveCheckoutGateUrl } from '../src/resilience/checkout-gate-probe.mjs';
 import { intentStoreStatus } from '../src/sales/intent-store.mjs';
 import { resolvePriceQuoteKeys } from '../src/sales/price-quote.mjs';
 
@@ -23,62 +24,31 @@ const asJson = args.includes('--json');
 const offline = args.includes('--offline');
 const env = process.env;
 
-/**
- * Where the deployed /health is. The tick workflow runs on a runner whose own
- * environment is not the deployment's, so only this URL says whether the live
- * checkout gate is open.
- */
-function deployedHealthUrl() {
-    const explicit = String(env.CHECKOUT_HEALTH_URL ?? '').trim();
-    if (explicit) return explicit;
-    const origin = String(env.APP_ORIGIN ?? '').trim();
-    if (origin) return `${origin.replace(/\/+$/, '')}/health`;
-    return null;
-}
-
-/**
- * Read the deployed gate. `blocks_checkout` is the server's own verdict; a
- * response that carries no gate report is `reported: false`, never "open".
- */
-async function readDeployedGate(url) {
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const body = await response.json().catch(() => null);
-    const attempts = body?.config?.checkout_attempts ?? null;
-    return {
-        status: response.status,
-        reported: typeof attempts?.blocks_checkout === 'boolean',
-        blocks: attempts?.blocks_checkout === true,
-        block_reason: attempts?.block_reason ?? null,
-        replay_protection: attempts?.replay_protection ?? null
-    };
-}
-
 // The tick workflow runs this instead of the full preflight: its runner has no
 // production credentials, so only the deployed verdict can be trusted there.
 // An unset CHECKOUT_HEALTH_URL only warns, so a missing repository variable
 // cannot fail the tick; a configured gate that reports itself blocked does.
 if (args.includes('--deployed-checkout-gate')) {
-    const url = deployedHealthUrl();
+    const url = resolveCheckoutGateUrl({ env });
     if (!url) {
         console.log('::warning::no CHECKOUT_HEALTH_URL: cannot verify the deployed checkout gate');
         process.exit(0);
     }
-    try {
-        const gate = await readDeployedGate(url);
-        if (!gate.reported) {
-            console.log(`::warning::${url} did not report a checkout gate (HTTP ${gate.status}): cannot verify it`);
-            process.exit(0);
-        }
-        if (gate.blocks) {
-            console.error(`checkout gate BLOCKED at ${url}: ${gate.block_reason || 'blocks_checkout=true'} — every checkout order creation answers 503`);
-            process.exit(1);
-        }
-        console.log(`checkout gate open at ${url} (replay protection: ${gate.replay_protection || 'unknown'})`);
-        process.exit(0);
-    } catch (error) {
-        console.log(`::warning::could not read ${url}: ${error?.message ?? error}`);
+    const gate = await probeCheckoutGate(url);
+    if (gate.error) {
+        console.log(`::warning::could not read ${url}: ${gate.error}`);
         process.exit(0);
     }
+    if (!gate.reported) {
+        console.log(`::warning::${url} did not report a checkout gate (HTTP ${gate.status}): cannot verify it`);
+        process.exit(0);
+    }
+    if (gate.blocks) {
+        console.error(`checkout gate BLOCKED at ${url}: ${gate.block_reason || 'blocks_checkout=true'} — every checkout order creation answers 503`);
+        process.exit(1);
+    }
+    console.log(`checkout gate open at ${url} (replay protection: ${gate.replay_protection || 'unknown'})`);
+    process.exit(0);
 }
 
 const results = [];
@@ -228,14 +198,14 @@ if (attemptPlan.mode === 'provider') {
 // 5b ─ Checkout gate: a blocked gate takes no orders at all, so it is its own
 // failing step rather than a line in another step's detail. The local plan
 // decides before deploy; a reachable /health decides for the live deployment.
-const healthUrl = deployedHealthUrl();
+const healthUrl = resolveCheckoutGateUrl({ env });
 let deployedGate = null;
 let deployedGateError = null;
 if (healthUrl && !offline) {
-    try {
-        deployedGate = await readDeployedGate(healthUrl);
-    } catch (error) {
-        deployedGateError = error?.message ?? String(error);
+    deployedGate = await probeCheckoutGate(healthUrl);
+    if (deployedGate.error) {
+        deployedGateError = deployedGate.error;
+        deployedGate = null;
     }
 }
 const gateFix = { env: ['CHECKOUT_ATTEMPT_STORE_DIR', 'CHECKOUT_REPLAY_PROTECTION'], fix: 'A deploy in this state answers 503 on every checkout and takes no money' };

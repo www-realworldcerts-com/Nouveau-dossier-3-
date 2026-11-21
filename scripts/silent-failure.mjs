@@ -9,6 +9,7 @@ import {
     listMitigations,
     runSilentFailureAudit
 } from '../src/resilience/silent-failure.mjs';
+import { probeCheckoutGate, resolveCheckoutGateUrl } from '../src/resilience/checkout-gate-probe.mjs';
 import { ACTION_IDS, PROMPT_GENESIS, RedressEngine } from '../src/resilience/redress.mjs';
 import { probePaymentWebhook } from '../src/resilience/webhook-probe.mjs';
 import { reconcilePayPalOrders } from '../src/real/fulfillment/paypal-reconciliation.mjs';
@@ -112,6 +113,8 @@ Options:
   --silence-budget-hours <n> Escalate unresolved findings to critical after n hours (default 24)
   --fail-on <severity>       Exit 2 at or above this severity (default high)
   --webhook-url <url>        Probe a payment webhook (comma-separated; also PAYMENT_WEBHOOK_URL)
+  --checkout-health-url <url> Read the deployed /health checkout gate (default CHECKOUT_HEALTH_URL,
+                             then <APP_ORIGIN>/health); a blocked gate is a critical finding
   --reconcile-paypal         Dry-run PayPal reconciliation and report paid-but-unfulfilled orders
   --storefront-url <url>     Probe the storefront for an application runtime (default production domain;
                              also STOREFRONT_URL)
@@ -210,6 +213,13 @@ async function main() {
         }
         const storefrontUrl = resolveStorefrontUrl({ flag: flags['storefront-url'] });
         const storefrontProbe = await probeStorefront(storefrontUrl);
+        if (flags['checkout-health-url'] === true) {
+            throw new Error('--checkout-health-url requires a value (the deployed /health URL)');
+        }
+        const checkoutGateUrl = resolveCheckoutGateUrl({
+            flag: typeof flags['checkout-health-url'] === 'string' ? flags['checkout-health-url'] : null
+        });
+        const checkoutGate = checkoutGateUrl ? await probeCheckoutGate(checkoutGateUrl) : null;
         if (flags['checkout-url'] === true) {
             throw new Error('--checkout-url requires a value (an absolute http(s) URL)');
         }
@@ -255,7 +265,8 @@ async function main() {
             webhookProbes,
             paypalReconciliation,
             storefrontProbe,
-            shopifyPriceDrift
+            shopifyPriceDrift,
+            checkoutGate
         });
         printPlan(result, json);
         if (failOn !== 'none' && result.findings.some(finding => SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[failOn])) {

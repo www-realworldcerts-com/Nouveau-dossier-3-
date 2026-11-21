@@ -24,7 +24,7 @@ export function hasShopifyAdminCredentials(env = process.env) {
     );
 }
 
-export function buildTickAuditArgs({ webhookUrl = null, storefrontUrl = null, stallDays = 7, failOn = 'high', shopifyPriceDrift = false } = {}) {
+export function buildTickAuditArgs({ webhookUrl = null, checkoutHealthUrl = null, storefrontUrl = null, stallDays = 7, failOn = 'high', shopifyPriceDrift = false } = {}) {
     const args = [
         'audit',
         '--write',
@@ -33,6 +33,7 @@ export function buildTickAuditArgs({ webhookUrl = null, storefrontUrl = null, st
         '--reconcile-paypal'
     ];
     if (webhookUrl) args.push('--webhook-url', String(webhookUrl));
+    if (checkoutHealthUrl) args.push('--checkout-health-url', String(checkoutHealthUrl));
     if (storefrontUrl) args.push('--storefront-url', String(storefrontUrl));
     if (shopifyPriceDrift) args.push('--shopify-price-drift');
     return args;
@@ -43,6 +44,7 @@ export function runTickAudit({
     script = path.join('scripts', 'silent-failure.mjs'),
     env = process.env,
     webhookUrl = env.PAYMENT_WEBHOOK_URL || null,
+    checkoutHealthUrl = env.CHECKOUT_HEALTH_URL || null,
     storefrontUrl = env.STOREFRONT_URL || null,
     stallDays = 7,
     failOn = 'high',
@@ -53,7 +55,7 @@ export function runTickAudit({
     const includePriceDrift = shopifyPriceDrift === null
         ? hasShopifyAdminCredentials(env)
         : Boolean(shopifyPriceDrift);
-    const args = buildTickAuditArgs({ webhookUrl, storefrontUrl, stallDays, failOn, shopifyPriceDrift: includePriceDrift });
+    const args = buildTickAuditArgs({ webhookUrl, checkoutHealthUrl, storefrontUrl, stallDays, failOn, shopifyPriceDrift: includePriceDrift });
     const scriptPath = path.isAbsolute(script) ? script : path.join(root, script);
     return new Promise(resolve => {
         const startedAt = Date.now();

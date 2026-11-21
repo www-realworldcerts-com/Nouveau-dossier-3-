@@ -282,6 +282,19 @@ export const FINDING_CATALOG = {
         owner_action: 'Fix the deployment surface (route deployed, protection bypass or preview-only SSO) and verify with the P8 acceptance probe.',
         sla_hours: 4
     },
+    CHECKOUT_GATE_BLOCKED: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'Deployed checkout gate is blocked',
+        impact: 'Every checkout order creation answers 503 before PayPal is called: the store takes no money while the loop, the heartbeat and the deployment all look alive.',
+        containment: 'Do not report the storefront as selling; treat every checkout attempt as lost until the gate is open.',
+        obligation: 'Restore a checkout whose replay protection is durable, then prove a buyer can start an order again.',
+        remedy: 'Mount a volume shared by every instance and point CHECKOUT_ATTEMPT_STORE_DIR at it, or set CHECKOUT_REPLAY_PROTECTION=provider, then redeploy.',
+        mitigation: 'Every audit reads the deployed /health gate, so a blocked checkout is a finding in the incident ledger, not only a red workflow run.',
+        verification: 'The deployed /health reports blocks_checkout=false and the next audit reports no CHECKOUT_GATE_BLOCKED finding.',
+        owner_action: 'Fix the configuration named in block_reason, redeploy, then rerun the tick audit.',
+        sla_hours: 4
+    },
     SHOPIFY_PRICE_DRIFT: {
         domain: 'revenue',
         severity: 'high',
@@ -550,7 +563,8 @@ export function detectSilentFailures({
     webhookProbes,
     paypalReconciliation,
     storefrontProbe,
-    shopifyPriceDrift
+    shopifyPriceDrift,
+    checkoutGate
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -795,6 +809,14 @@ export function detectSilentFailures({
         });
     }
 
+    if (checkoutGate && typeof checkoutGate === 'object' && checkoutGate.reported && checkoutGate.blocks) {
+        add('CHECKOUT_GATE_BLOCKED', `${checkoutGate.url} reports blocks_checkout=true (${checkoutGate.block_reason || 'no reason given'}): every checkout order creation answers 503.`, {
+            status: checkoutGate.status,
+            block_reason: checkoutGate.block_reason,
+            replay_protection: checkoutGate.replay_protection
+        });
+    }
+
     const monotony = tickMonotony === undefined ? readTickMonotony(root) : tickMonotony;
     const duplicates = pos.length
         ? Object.entries(pos.reduce((acc, po) => {
@@ -831,6 +853,7 @@ export function detectSilentFailures({
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
             webhook_probes: probes,
+            checkout_gate: checkoutGate || null,
             paypal_reconciliation: paypalReconciliation || null,
             storefront_probe: storefrontProbe || null,
             shopify_price_drift: shopifyPriceDrift || null,
@@ -934,10 +957,11 @@ export function runSilentFailureAudit({
     webhookProbes = [],
     paypalReconciliation = null,
     storefrontProbe = null,
-    shopifyPriceDrift = null
+    shopifyPriceDrift = null,
+    checkoutGate = null
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -551,6 +552,79 @@ test('the audit skips reconciliation cleanly when PayPal credentials are absent'
     const payload = JSON.parse(run.stdout.slice(run.stdout.indexOf('{')));
     assert.ok(!payload.plan.findings.some(finding => finding.code === 'PAYPAL_UNFULFILLED_ORDERS'));
     assert.equal(payload.evidence.paypal_reconciliation.skipped, 'missing_paypal_credentials');
+});
+
+test('a blocked deployed checkout gate is a critical finding in the incident plan', () => {
+    const checkoutGate = {
+        url: 'https://checkout.example/health',
+        status: 200,
+        reported: true,
+        blocks: true,
+        block_reason: 'CHECKOUT_ATTEMPT_STORE_NOT_DURABLE',
+        replay_protection: 'store',
+        error: null
+    };
+    const { findings, evidence } = detectSilentFailures({ now: NOW, ...cleanOptions({ checkoutGate }) });
+
+    const finding = findings.find(item => item.code === 'CHECKOUT_GATE_BLOCKED');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'critical');
+    assert.match(finding.detail, /CHECKOUT_ATTEMPT_STORE_NOT_DURABLE/);
+    assert.equal(evidence.checkout_gate.block_reason, 'CHECKOUT_ATTEMPT_STORE_NOT_DURABLE');
+});
+
+test('an open or unreported checkout gate adds no finding', () => {
+    const open = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ checkoutGate: { url: 'https://checkout.example/health', reported: true, blocks: false } })
+    });
+    assert.deepEqual(open.findings, []);
+
+    const unreported = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ checkoutGate: { url: 'https://checkout.example/health', reported: false, blocks: false, status: 404 } })
+    });
+    assert.deepEqual(unreported.findings, []);
+
+    const unconfigured = detectSilentFailures({ now: NOW, ...cleanOptions() });
+    assert.equal(unconfigured.evidence.checkout_gate, null);
+});
+
+test('the CLI records a blocked checkout gate from CHECKOUT_HEALTH_URL', async (t) => {
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+            config: {
+                checkout_attempts: {
+                    blocks_checkout: true,
+                    block_reason: 'CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL',
+                    replay_protection: 'store'
+                }
+            }
+        }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => server.close());
+
+    const run = await new Promise(resolve => {
+        const child = spawn(process.execPath, [
+            path.join(process.cwd(), 'scripts', 'silent-failure.mjs'),
+            'audit', '--fail-on', 'none', '--json'
+        ], {
+            env: { ...process.env, CHECKOUT_HEALTH_URL: `http://127.0.0.1:${server.address().port}/health` }
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', chunk => { stdout += chunk; });
+        child.stderr.on('data', chunk => { stderr += chunk; });
+        child.on('close', status => resolve({ status, stdout, stderr }));
+    });
+    assert.equal(run.status, 0, run.stderr);
+
+    const payload = JSON.parse(run.stdout.slice(run.stdout.indexOf('{')));
+    const finding = payload.plan.findings.find(item => item.code === 'CHECKOUT_GATE_BLOCKED');
+    assert.ok(finding, run.stdout);
+    assert.match(finding.detail, /CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL/);
 });
 
 test('a healthy webhook probe adds no finding', () => {

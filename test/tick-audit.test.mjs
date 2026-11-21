@@ -49,6 +49,14 @@ test('the tick audit forwards the webhook URL when configured', () => {
     assert.equal(args[index + 1], 'https://host/api/webhooks/paypal');
 });
 
+test('the tick audit forwards the deployed checkout gate URL when configured', () => {
+    const args = buildTickAuditArgs({ checkoutHealthUrl: 'https://host/health' });
+    const index = args.indexOf('--checkout-health-url');
+    assert.notEqual(index, -1);
+    assert.equal(args[index + 1], 'https://host/health');
+    assert.ok(!buildTickAuditArgs().includes('--checkout-health-url'), 'an unset URL must not probe anything');
+});
+
 test('runTickAudit reports the audit exit code and output', async () => {
     const root = tempRoot();
     const script = fixtureScript(root, 'console.log("audit ran"); process.exit(0);\n');

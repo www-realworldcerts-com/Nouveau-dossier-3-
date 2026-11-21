@@ -1,0 +1,72 @@
+name: Tests
+
+# The revenue, quarantine and reversal suites only ran when someone typed the
+# command. A regression in the ledger maths could therefore reach master
+# unnoticed: verification could be loosened, a reversal could stop matching its
+# capture, or a reversal row could start counting as a capture.
+#
+# The `money` job is the fast focused gate for that. It is deliberately not the
+# only gate: the money suites import checkout and fulfilment code, so a
+# breakage in those tests would otherwise stay invisible. The `full-suite` job
+# runs everything so no tested path can regress on master unnoticed.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: money-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  money:
+    name: Revenue, quarantine and reversal suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run money tests
+        run: npm run test:money
+
+      - name: Revenue-proof audit
+        # The suites prove the code paths; this proves the recorded numbers.
+        # It is read-only and must not need PSP credentials to run.
+        run: npm run audit:revenue-proofs
+
+  full-suite:
+    name: Full test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run every test
+        # Same command developers run locally, so CI cannot drift from it.
+        # The Bun-only jarvis tests stay out of this suite and are not run here.
+        run: npm test

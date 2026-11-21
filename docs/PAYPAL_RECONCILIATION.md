@@ -197,6 +197,14 @@ action-required note: it is never retried automatically again, it is no longer
 counted as owed, and the drain and the supervisor report it (`ESCALATED`) so a
 human delivers or refunds it.
 
+That escalation is also a recorded incident, not only console output. Every
+audit reads the queue's latest line per order, and an order whose latest line is
+`DELIVERY_EXHAUSTED` becomes the critical silent-failure finding
+`FULFILLMENT_DELIVERY_EXHAUSTED` with its attempt count and last reason. A later
+`DELIVERED` line for the same order (manual delivery) clears the finding on the
+next audit. Because the supervisor drains after its audit, an order exhausted by
+one drain is recorded by the next tick's audit.
+
 The queue belongs to the host that runs the webhook, so the drain runs on that
 host: the local supervisor (`npm start`) applies the drain after every tick's
 audit. The GitHub workflow deliberately does **not** run it — a fresh runner

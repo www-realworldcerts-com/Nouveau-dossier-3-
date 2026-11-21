@@ -139,6 +139,19 @@ export const FINDING_CATALOG = {
         owner_action: 'Fulfil or refund the oldest pending orders.',
         sla_hours: 48
     },
+    FULFILLMENT_DELIVERY_EXHAUSTED: {
+        domain: 'fulfillment',
+        severity: 'critical',
+        title: 'Paid order stopped being delivered after exhausting its retries',
+        impact: 'The buyer was charged, delivery kept failing, and the drain has stopped retrying: without a human the order never delivers, so the customer sees a paid order with no product and a refund or chargeback follows.',
+        containment: 'Treat the fulfilment queue as unhealthy while a dead order sits in it; do not report the order as delivered or fulfilled.',
+        obligation: 'Deliver the purchased access manually or refund the captured payment.',
+        remedy: 'Read the recorded last_reason (payer email, FULFILLMENT_ACCESS_SECRET, Resend), fix the cause, deliver by hand, then append a DELIVERED line for the order id; refund instead if delivery is impossible.',
+        mitigation: 'The drain caps retries and writes DELIVERY_EXHAUSTED to the queue; every audit reads the queue and records it as an incident finding, so it is not left in drain/supervisor output only.',
+        verification: 'The latest queue line for each order is DELIVERED (or a recorded refund) and the next audit reports no FULFILLMENT_DELIVERY_EXHAUSTED finding.',
+        owner_action: 'Deliver or refund the listed orders and record the outcome in the fulfilment queue.',
+        sla_hours: 4
+    },
     SILENT_EXCEPTION_SWALLOW: {
         domain: 'code',
         severity: 'medium',
@@ -408,8 +421,9 @@ export function readProcurementPos(root = process.cwd()) {
     return new ProcurementStore({ dir }).listPos();
 }
 
-export function readFulfillmentQueue(root = process.cwd()) {
-    const file = path.join(root, 'logs', 'fulfillment_queue.log');
+export function readFulfillmentQueue(root = process.cwd(), { queueFile } = {}) {
+    // Same file the webhook and the drain use, including its env override.
+    const file = queueFile || path.join(root, 'logs', 'fulfillment_queue.log');
     if (!fs.existsSync(file)) return [];
     return fs.readFileSync(file, 'utf8')
         .split('\n')
@@ -674,7 +688,9 @@ export function detectSilentFailures({
         );
     }
 
-    const queue = fulfillment === undefined ? readFulfillmentQueue(root) : fulfillment;
+    const queue = fulfillment === undefined
+        ? readFulfillmentQueue(root, { queueFile: env?.FULFILLMENT_QUEUE_FILE || undefined })
+        : fulfillment;
     const pending = queue.filter(entry => String(entry.status || '').toUpperCase() === 'PENDING_DELIVERY');
     const pendingDays = pending.map(entry => {
         const time = Date.parse(entry.timestamp || '');
@@ -685,6 +701,31 @@ export function detectSilentFailures({
         add('FULFILLMENT_BACKLOG', `${pending.length} customer order(s) pending delivery, oldest ${round(oldestPending)} days.`, {
             pending_count: pending.length,
             oldest_days: round(oldestPending)
+        });
+    }
+
+    // The drain stops retrying an order after its attempt cap and records
+    // DELIVERY_EXHAUSTED as the queue's latest line. Detect it from the same
+    // last-line-wins view so a dead paid order becomes an incident finding, and
+    // a later DELIVERED line for that order clears it.
+    const latestByOrder = new Map();
+    for (const entry of queue) {
+        const orderId = entry?.order_id ? String(entry.order_id) : null;
+        if (orderId) latestByOrder.set(orderId, entry);
+    }
+    const exhausted = [...latestByOrder.values()]
+        .filter(entry => String(entry.status || '').toUpperCase() === 'DELIVERY_EXHAUSTED')
+        .map(entry => ({
+            order_id: String(entry.order_id),
+            attempts: Number(entry.drain?.attempts) || null,
+            last_reason: entry.drain?.last_reason || null,
+            action_required: entry.action_required || null,
+            exhausted_at: entry.timestamp || null
+        }));
+    if (exhausted.length) {
+        add('FULFILLMENT_DELIVERY_EXHAUSTED', `${exhausted.length} paid order(s) stopped being retried after delivery failed: ${exhausted.map(order => order.order_id).join(', ')}.`, {
+            exhausted_count: exhausted.length,
+            orders: exhausted
         });
     }
 
@@ -849,7 +890,11 @@ export function detectSilentFailures({
                 },
                 contentieux_cases: contentieux.cases
             },
-            fulfillment: { pending: pending.length, oldest_days: round(oldestPending) },
+            fulfillment: {
+                pending: pending.length,
+                oldest_days: round(oldestPending),
+                delivery_exhausted: exhausted.length
+            },
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
             webhook_probes: probes,
@@ -927,6 +972,7 @@ export function buildRedressPlan(findings, { now = new Date(), evidence = {}, re
                 contentieux_amount_mad: evidence.procurement?.contentieux?.amount_at_stake_mad || 0,
                 contentieux_cases: evidence.procurement?.contentieux?.cases || 0,
                 pending_fulfillments: evidence.fulfillment?.pending || 0,
+                exhausted_fulfillments: evidence.fulfillment?.delivery_exhausted || 0,
                 revenue_stalled_days: evidence.revenue?.stalled_days ?? null,
                 swallowed_exceptions: evidence.silent_catches?.count || 0
             },

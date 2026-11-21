@@ -37,6 +37,7 @@ owner authorization and is never inferred by the swarm.
 | `PROCUREMENT_DELIVERY_STALL` | high | POs placed/shipped longer than the stall window |
 | `DELIVERY_UNVERIFIED` | medium | Delivered/on-hold POs without completed verification |
 | `FULFILLMENT_BACKLOG` | high | `PENDING_DELIVERY` orders older than the stall window |
+| `FULFILLMENT_DELIVERY_EXHAUSTED` | critical | The fulfilment drain recorded `DELIVERY_EXHAUSTED` as an order's latest queue line |
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
 | `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |

@@ -166,6 +166,62 @@ test('aged pending customer fulfillments are flagged', () => {
     assert.equal(backlog.evidence.pending_count, 1);
 });
 
+test('an order the drain exhausted becomes a recorded silent-failure finding', () => {
+    const root = tempRoot();
+    fs.mkdirSync(path.join(root, 'logs'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'logs', 'fulfillment_queue.log'), [
+        JSON.stringify({ timestamp: '2026-11-10T09:00:00.000Z', status: 'PENDING_EMAIL', order_id: 'ORDER-9' }),
+        JSON.stringify({
+            timestamp: '2026-11-11T09:00:00.000Z',
+            status: 'DELIVERY_EXHAUSTED',
+            order_id: 'ORDER-9',
+            action_required: 'Delivery failed 5 time(s): missing payer email',
+            drain: { attempts: 5, last_reason: 'missing payer email', next_attempt_at: null }
+        })
+    ].join('\n') + '\n');
+
+    // env: {} so a developer's FULFILLMENT_QUEUE_FILE cannot redirect this read.
+    const { findings, evidence } = detectSilentFailures({
+        now: NOW,
+        root,
+        env: {},
+        ...cleanOptions({ fulfillment: undefined })
+    });
+
+    const finding = findings.find(item => item.code === 'FULFILLMENT_DELIVERY_EXHAUSTED');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'critical');
+    assert.match(finding.detail, /ORDER-9/);
+    assert.equal(finding.evidence.orders[0].attempts, 5);
+    assert.equal(finding.evidence.orders[0].last_reason, 'missing payer email');
+    assert.equal(evidence.fulfillment.delivery_exhausted, 1);
+
+    // The same finding is written to the incident ledger, not just detected.
+    const result = runSilentFailureAudit({
+        root,
+        now: NOW,
+        env: {},
+        write: true,
+        engine: { evaluate: () => ({ triggered: [] }) }
+    });
+    assert.ok(result.written.incident);
+    const incident = JSON.parse(fs.readFileSync(result.written.incident, 'utf8'));
+    const recorded = incident.plan.findings.find(item => item.code === 'FULFILLMENT_DELIVERY_EXHAUSTED');
+    assert.ok(recorded);
+    assert.equal(recorded.severity, 'critical');
+    assert.equal(recorded.evidence.orders[0].order_id, 'ORDER-9');
+    fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a paid order later delivered clears its exhausted finding', () => {
+    const queue = [
+        { timestamp: '2026-11-10T09:00:00.000Z', status: 'DELIVERY_EXHAUSTED', order_id: 'ORDER-10' },
+        { timestamp: '2026-11-11T09:00:00.000Z', status: 'DELIVERED', order_id: 'ORDER-10' }
+    ];
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: queue }) });
+    assert.ok(!codes(findings).includes('FULFILLMENT_DELIVERY_EXHAUSTED'));
+});
+
 test('empty catch blocks are found and logged catch blocks are ignored', () => {
     const root = tempRoot();
     fs.mkdirSync(path.join(root, 'src'), { recursive: true });

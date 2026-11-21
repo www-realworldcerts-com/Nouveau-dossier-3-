@@ -143,7 +143,7 @@ const SERVERLESS_RUNTIMES = [
     ['NETLIFY', 'netlify']
 ];
 
-function detectServerlessRuntime(env) {
+export function detectServerlessRuntime(env = process.env) {
     const has = name => Boolean(String(env?.[name] ?? '').trim());
     for (const [name, runtime] of SERVERLESS_RUNTIMES) {
         if (has(name)) return runtime;
@@ -599,6 +599,53 @@ function createDurableRegistry({ directory, ttlMs, now, claimTimeoutMs, claimSta
             }
         }
     };
+}
+
+/**
+ * Which layer makes quote replay protection durable, and whether a production
+ * money path must refuse to create orders.
+ *
+ * `provider` is the quote-bound `PayPal-Request-Id`: the quote expires, so PayPal
+ * returns the same order for any retry inside the only window in which that
+ * quote can be replayed. It is only the fallback for a serverless runtime with
+ * no directory configured. When a directory is configured, the measured storage
+ * governs: a network mount is real shared storage and wins, and instance-local
+ * storage is refused in production whether or not the host is serverless.
+ *
+ * `store` needs a directory every instance can read. An explicit
+ * `CHECKOUT_REPLAY_PROTECTION=provider|store` always wins, so `=store` on a
+ * serverless host refuses to run without one.
+ *
+ * The same plan drives the server's gate and `doctor:money`, so the two cannot
+ * disagree about when checkout is blocked.
+ */
+export function planCheckoutReplayProtection({ store = {}, storage = {}, env = process.env } = {}) {
+    const requested = String(env?.CHECKOUT_REPLAY_PROTECTION ?? '').trim().toLowerCase();
+    const explicit = requested === 'provider' || requested === 'paypal'
+        ? 'provider'
+        : requested === 'store'
+            ? 'store'
+            : null;
+    const runtime = storage?.runtime || detectServerlessRuntime(env);
+    // The runtime marker only decides when there is no directory to measure;
+    // otherwise `block_reason` follows what the storage actually is.
+    const auto = explicit === null && store?.configured !== true && Boolean(runtime);
+    const mode = explicit ?? (auto ? 'provider' : 'store');
+    const production = String(env?.SWARM_LIVE ?? '').trim().toLowerCase() === 'true'
+        || String(env?.VERCEL_ENV ?? '').trim().toLowerCase() === 'production'
+        || String(env?.NODE_ENV ?? '').trim().toLowerCase() === 'production';
+
+    const blockReason = mode === 'provider'
+        ? null
+        : store?.configured !== true
+            ? 'CHECKOUT_ATTEMPT_STORE_NOT_DURABLE'
+            : store?.ok !== true
+                ? 'CHECKOUT_ATTEMPT_STORE_UNWRITABLE'
+                : storage?.storage === 'instance_local'
+                    ? 'CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL'
+                    : null;
+
+    return { mode, auto, explicit: explicit !== null, runtime, production, block_reason: blockReason };
 }
 
 export function createCheckoutAttemptRegistry({

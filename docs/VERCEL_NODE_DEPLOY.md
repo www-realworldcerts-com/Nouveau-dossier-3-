@@ -58,15 +58,21 @@ function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
   no shared filesystem, so on Vercel the server reports any configured directory
   as instance-local and warns; set it only when checkout runs on a host with a
   mounted shared volume.
-- On a serverless deployment with no shared volume, set
-  `CHECKOUT_REPLAY_PROTECTION=provider` instead. Every order creation already
-  carries `PayPal-Request-Id` derived from the quote id, and the quote expires,
-  so PayPal returns the same order for any retry inside the only window in which
-  that quote can be replayed. In production (SWARM_LIVE, or
-  VERCEL_ENV/NODE_ENV=production) checkout order creation is refused with
-  `503 CHECKOUT_ATTEMPT_STORE_NOT_DURABLE` when neither a store nor that mode is
-  configured; the webhook keeps running so money already taken is still recorded
-  and delivered.
+- With no attempt store configured, a serverless deployment selects
+  `CHECKOUT_REPLAY_PROTECTION=provider` automatically instead of refusing
+  checkout. Every order creation already carries `PayPal-Request-Id` derived
+  from the quote id, and the quote expires, so PayPal returns the same order for
+  any retry inside the only window in which that quote can be replayed. The
+  startup log and `/health` say so.
+- Once a directory is configured, the measured storage decides, not the runtime
+  marker: a network mount is real shared storage and is used, and instance-local
+  storage (including a serverless instance's own disk, or tmpfs on any host) is
+  refused in production with `503 CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL`. An
+  unset directory on a non-serverless production host is refused with
+  `503 CHECKOUT_ATTEMPT_STORE_NOT_DURABLE`, and an unusable one with
+  `503 CHECKOUT_ATTEMPT_STORE_UNWRITABLE`. `CHECKOUT_REPLAY_PROTECTION=store`
+  or `=provider` overrides the fallback explicitly. The webhook keeps running in
+  all cases so money already taken is still recorded and delivered.
 - Optional `CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS` (how long a checkout waits for a
   competing creator before answering `409 CHECKOUT_IN_PROGRESS`; default 10000)
 - Optional `CHECKOUT_ATTEMPT_SIGNING_SECRET` (HMAC key for stored attempt

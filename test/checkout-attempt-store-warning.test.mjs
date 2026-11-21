@@ -77,7 +77,7 @@ function healthCheck(options) {
 test('an unset checkout attempt store warns at startup and in the config check', () => {
     const { run: cli, config } = configCheck();
 
-    assert.match(cli.stderr, /"warning":"checkout_attempt_store_not_durable"/, 'startup logs carry the warning');
+    assert.match(cli.stderr, /"warning":"checkout_replay_protection_provider"/, 'startup logs the serverless fallback');
     assert.equal(cli.stderr.trim().split('\n').length, 1);
     assert.match(cli.stderr, /CHECKOUT_ATTEMPT_STORE_DIR is not set/);
     assert.equal(config.checkout_attempts.durable, false);
@@ -153,7 +153,7 @@ test('a configured but unwritable checkout attempt store is not reported as dura
     try {
         const { run: cli, config } = configCheck({ storeDir: storePath });
 
-        assert.match(cli.stderr, /"warning":"checkout_attempt_store_unwritable"/, 'startup logs carry the warning');
+        assert.match(cli.stderr, /"warning":"checkout_attempt_store_unwritable"/, 'startup logs the unusable store');
         assert.equal(cli.stderr.trim().split('\n').length, 1);
         assert.match(cli.stderr, /is set but not writable/);
         assert.equal(config.checkout_attempts.durable, false, 'an unusable store is not durable');

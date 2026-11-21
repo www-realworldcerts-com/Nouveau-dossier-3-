@@ -251,7 +251,10 @@ function runProbe(script = probe, envOverrides = {}) {
                 CHECKOUT_ATTEMPT_STORE_DIR: store,
                 CHECKOUT_INTENTS_FILE: path.join(store, 'course-intents.ndjson'),
                 CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS: '250',
-                VERCEL: '1',
+                // No serverless marker on purpose: the store directory is on the
+                // host's own disk, which is a durable single-host volume. A
+                // serverless runtime would correctly refuse that same directory.
+                VERCEL: '',
                 PAYPAL_WEBHOOK_ID: 'WH-TEST',
                 PAYPAL_CLIENT_ID: 'test-client',
                 PAYPAL_CLIENT_SECRET: 'test-secret',

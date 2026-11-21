@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { planCheckoutReplayProtection } from '../src/sales/checkout-attempts.mjs';
+
 const PRODUCT = 'financial-risk-manager-test-bank';
 const RETURN_URL = encodeURIComponent('https://www.realworldcerts.com/buy/success');
 const CANCEL_URL = encodeURIComponent('https://www.realworldcerts.com/buy/cancel');
@@ -123,8 +125,17 @@ function configCheck(env) {
     return { stderr: result.stderr, config: JSON.parse(result.stdout.trim().split('\n').at(-1)).config };
 }
 
-test('production refuses to create a PayPal order without a durable attempt store', () => {
-    const probe = runProbe(baseEnv());
+function withoutServerlessMarker(env) {
+    const copy = { ...env };
+    delete copy.VERCEL;
+    delete copy.VERCEL_ENV;
+    delete copy.AWS_LAMBDA_FUNCTION_NAME;
+    delete copy.NETLIFY;
+    return copy;
+}
+
+test('production on a long-lived host refuses to create an order without a store', () => {
+    const probe = runProbe(withoutServerlessMarker(baseEnv()));
 
     assert.equal(probe.quote_status, 200, 'quoting still works; only order creation is refused');
     assert.equal(probe.create.status, 503);
@@ -141,7 +152,7 @@ test('production refuses to create a PayPal order without a durable attempt stor
 test('the same production checkout creates an order once the store is configured', () => {
     const store = fs.mkdtempSync(path.join(os.tmpdir(), 'checkout-gate-'));
     try {
-        const env = baseEnv();
+        const env = withoutServerlessMarker(baseEnv());
         env.CHECKOUT_ATTEMPT_STORE_DIR = store;
         env.CHECKOUT_ATTEMPT_SIGNING_SECRET = 'gate-signing-secret';
         const probe = runProbe(env);
@@ -170,28 +181,48 @@ test('a serverless production deployment can name provider idempotency as the du
 
     const { stderr, config } = configCheck(env);
     assert.equal(config.checkout_attempts.replay_protection, 'provider');
+    assert.equal(config.checkout_attempts.replay_protection_auto, false, 'explicitly chosen, not inferred');
     assert.equal(config.checkout_attempts.blocks_checkout, false);
     assert.equal(config.checkout_attempts.durable, false, 'no store means no local durability, and the report says so');
-    assert.match(stderr, /CHECKOUT_REPLAY_PROTECTION=provider/);
+    assert.match(stderr, /PayPal-Request-Id/);
     assert.match(stderr, /returns the same order/);
     assert.equal(config.ok, true);
 });
 
+test('a serverless production deploy uses provider dedupe automatically instead of blocking', () => {
+    const env = baseEnv();
+    const probe = runProbe(env);
+
+    assert.equal(probe.create.status, 200, probe.create.body);
+    assert.equal(probe.order_create_calls, 1);
+    const headers = probe.order_headers[0] || {};
+    assert.ok(headers['PayPal-Request-Id'] || headers['paypal-request-id']);
+
+    const { stderr, config } = configCheck(env);
+    assert.equal(config.checkout_attempts.replay_protection, 'provider');
+    assert.equal(config.checkout_attempts.replay_protection_auto, true);
+    assert.equal(config.checkout_attempts.blocks_checkout, false);
+    assert.match(stderr, /mount no shared filesystem/);
+    assert.match(stderr, /returns the same order/);
+    assert.match(stderr, /Checkout order creation stays enabled/);
+    assert.equal(config.ok, true);
+});
+
 test('the config check marks checkout as blocked, without failing the webhook config', () => {
-    const { stderr, config } = configCheck(baseEnv());
+    const { stderr, config } = configCheck(withoutServerlessMarker(baseEnv()));
 
     assert.equal(config.checkout_attempts.blocks_checkout, true);
     assert.equal(config.checkout_attempts.production, true);
     assert.equal(config.checkout_attempts.durable, false);
     assert.equal(config.ok, true, 'the webhook must keep accepting paid events');
     assert.match(stderr, /"severity":"critical"/);
-    assert.match(stderr, /Production checkout order creation is refused until it is set/);
+    assert.match(stderr, /Production checkout order creation is refused until a durable replay layer is configured/);
 });
 
 test('a configured store clears the production block', () => {
     const store = fs.mkdtempSync(path.join(os.tmpdir(), 'checkout-gate-config-'));
     try {
-        const env = baseEnv();
+        const env = withoutServerlessMarker(baseEnv());
         env.CHECKOUT_ATTEMPT_STORE_DIR = store;
         env.CHECKOUT_ATTEMPT_SIGNING_SECRET = 'gate-signing-secret';
         const { config } = configCheck(env);
@@ -202,6 +233,52 @@ test('a configured store clears the production block', () => {
     } finally {
         fs.rmSync(store, { recursive: true, force: true });
     }
+});
+
+test('the measured storage decides when a directory is configured, not the runtime marker', () => {
+    const shared = planCheckoutReplayProtection({
+        store: { configured: true, ok: true, directory: '/mnt/attempts' },
+        storage: { storage: 'shared', runtime: 'vercel' },
+        env: { VERCEL: '1', SWARM_LIVE: 'true' }
+    });
+    assert.equal(shared.mode, 'store', 'a proved network mount wins over the serverless fallback');
+    assert.equal(shared.auto, false);
+    assert.equal(shared.block_reason, null);
+
+    const serverlessLocal = planCheckoutReplayProtection({
+        store: { configured: true, ok: true, directory: '/tmp/attempts' },
+        storage: { storage: 'instance_local', runtime: 'vercel' },
+        env: { VERCEL: '1', SWARM_LIVE: 'true' }
+    });
+    assert.equal(serverlessLocal.mode, 'store', 'a claimed directory is judged by what it is');
+    assert.equal(serverlessLocal.auto, false);
+    assert.equal(serverlessLocal.block_reason, 'CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL');
+
+    const tmpfs = planCheckoutReplayProtection({
+        store: { configured: true, ok: true, directory: '/tmp/attempts' },
+        storage: { storage: 'instance_local', runtime: null },
+        env: { SWARM_LIVE: 'true' }
+    });
+    assert.equal(tmpfs.mode, 'store');
+    assert.equal(tmpfs.block_reason, 'CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL', 'tmpfs is refused on any host');
+});
+
+test('the runtime marker only decides when no directory is configured', () => {
+    const unconfigured = { configured: false, ok: false, directory: null };
+
+    const serverless = planCheckoutReplayProtection({
+        store: unconfigured,
+        storage: {},
+        env: { VERCEL: '1', SWARM_LIVE: 'true' }
+    });
+    assert.equal(serverless.mode, 'provider');
+    assert.equal(serverless.auto, true);
+    assert.equal(serverless.block_reason, null);
+
+    const host = planCheckoutReplayProtection({ store: unconfigured, storage: {}, env: { SWARM_LIVE: 'true' } });
+    assert.equal(host.mode, 'store');
+    assert.equal(host.auto, false);
+    assert.equal(host.block_reason, 'CHECKOUT_ATTEMPT_STORE_NOT_DURABLE');
 });
 
 test('a per-process store stays allowed outside the production money path', () => {

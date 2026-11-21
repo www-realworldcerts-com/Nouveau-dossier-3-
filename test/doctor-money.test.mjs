@@ -112,7 +112,9 @@ test('a fully configured deploy passes the preflight', async () => {
 });
 
 test('a serverless deploy without a durable funnel log is warned, not passed silently', async () => {
-    const run = await runDoctor({ overrides: { ...COMPLETE, VERCEL: '1' } });
+    // With no directory configured, a serverless runtime falls back to the
+    // quote-bound PayPal-Request-Id; a local directory here would be refused.
+    const run = await runDoctor({ overrides: { ...COMPLETE, VERCEL: '1', CHECKOUT_ATTEMPT_STORE_DIR: '' } });
     assert.equal(run.status, 0);
 
     const funnel = steps(run).find(step => step.id === 'funnel');

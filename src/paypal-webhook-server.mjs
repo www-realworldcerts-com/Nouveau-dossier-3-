@@ -31,6 +31,7 @@ import {
 import { enforceAuthorityProtocol } from "./authority.mjs";
 import { addSecurityHeaders, validateRequest, validateAuth } from "./security-middleware.mjs";
 import { escapeHtml, fulfillPaidOrder, verifyAccessToken } from "./financial/fulfillment-service.mjs";
+import { fulfillVerifiedWebhookEvent } from "./financial/webhook-fulfillment.mjs";
 import { loadCourseCatalog, productsFromCatalog, storefrontPricePayload } from "./sales/course-catalog.mjs";
 import {
   createPriceQuote,
@@ -2919,8 +2920,44 @@ if (args.check === true || args["config-check"] === true) {
       }
     }
 
+    // A buyer who pays is delivered from the verified event itself. The
+    // capture route only runs if their browser returns; this path covers the
+    // closed tab, the dead connection, and the approval that was never
+    // captured. Idempotent against the ledger's order key, so both paths can
+    // run without delivering twice.
+    let webhookFulfillment = null;
+    if (shouldFulfillPaidOrders()) {
+      try {
+        webhookFulfillment = await fulfillVerifiedWebhookEvent({
+          evt,
+          captureOrder: capturePayPalCheckoutOrder,
+          lookupOrder: getPayPalOrderDetails,
+          resolveProduct: (productId) => productId
+            ? publicProducts().find((item) => String(item.id ?? "") === String(productId)) || null
+            : null
+        });
+      } catch (err) {
+        webhookFulfillment = {
+          attempted: true,
+          ok: false,
+          reason: "FULFILLMENT_FAILED",
+          finding: {
+            code: "WEBHOOK_FULFILLMENT_FAILED",
+            severity: "critical",
+            detail: `A verified ${evt?.event_type ?? "event"} could not be fulfilled: ${truncate(err?.message ?? String(err), 500)}`
+          }
+        };
+      }
+      if (webhookFulfillment?.finding) {
+        process.stderr.write(
+          `FINDING ${webhookFulfillment.finding.code} [${webhookFulfillment.finding.severity}] ` +
+          `${webhookFulfillment.finding.detail}\n`
+        );
+      }
+    }
+
     dedupeStore.markDone(dedupeKey);
-    json(res, 200, {
+    json(res, 200,{
       ok: true,
       verified: true,
       stored: !!created,
@@ -2954,6 +2991,7 @@ if (args.check === true || args["config-check"] === true) {
       payoutStatusResult,
       payoutBatchStatusUpdated: payoutBatchStatusResult?.updated === true,
       payoutBatchStatusResult,
+      fulfillment: webhookFulfillment,
       eventDeduped: created?.deduped === true,
       dedupe: dedupeStore.stats(),
       webhook_receipt: webhookReceipt,

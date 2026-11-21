@@ -217,7 +217,13 @@ function getMissionHealthRequirements() {
   return {
     financial_mission: {
       min_heartbeat_hours: 24,
-      required_events: ["PAYMENT.CAPTURE.COMPLETED", "PAYMENT.PAYOUTS-ITEM.SUCCEEDED"],
+      required_events: [
+        "PAYMENT.CAPTURE.COMPLETED",
+        // Without this subscription an approved-but-uncaptured order is never
+        // captured automatically, so the buyer's payment is never taken.
+        "CHECKOUT.ORDER.APPROVED",
+        "PAYMENT.PAYOUTS-ITEM.SUCCEEDED"
+      ],
       min_ledger_writes: 1
     },
     operational_mission: {

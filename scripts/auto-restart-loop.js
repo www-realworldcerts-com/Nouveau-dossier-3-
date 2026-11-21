@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '../src/load-env.mjs';
 import { heartbeatPath, writeHeartbeat } from '../src/swarm/loop-health.mjs';
-import { runTickAudit } from '../src/swarm/tick-audit.mjs';
+import { runFulfillmentDrain, runTickAudit } from '../src/swarm/tick-audit.mjs';
 
 /**
  * Long-lived supervisor for local/VM deployment (`npm start`).
@@ -23,8 +23,8 @@ const LOCK_FILE = path.join(ROOT_DIR, 'data', 'swarm-loop.lock');
 
 const intervalMs = Math.max(60000, Number(process.env.SWARM_LOOP_INTERVAL_MS || 15 * 60 * 1000));
 const maxBackoffMs = Math.max(intervalMs, Number(process.env.SWARM_LOOP_MAX_BACKOFF_MS || 30 * 60 * 1000));
-// Run the same audit the CI workflow runs, including the PayPal dry-run
-// reconciliation, after every local tick. Disable with SWARM_TICK_AUDIT=false.
+// Run the same audit and fulfilment drain the CI workflow runs after every
+// local tick. Disable with SWARM_TICK_AUDIT=false.
 const auditEnabled = String(process.env.SWARM_TICK_AUDIT ?? 'true').toLowerCase() !== 'false';
 
 let stopping = false;
@@ -94,6 +94,21 @@ async function loop() {
                 console.error('tick audit reported findings; see data/resilience/incidents');
             } else if (audit.code !== 0) {
                 console.error(`tick audit exited ${audit.code}; see logs above`);
+            }
+
+            // A paid order whose access email failed sits PENDING_EMAIL in the
+            // queue forever unless something retries it. The CI workflow runs
+            // the same drain as its own step.
+            const drain = await runFulfillmentDrain({ root: ROOT_DIR });
+            if (stopping) break;
+            if (drain.timedOut) {
+                console.error('fulfilment drain timed out; paid orders may still be queued');
+            } else if (drain.code !== 0) {
+                console.error(`fulfilment drain exited ${drain.code}; paid orders may still be queued`);
+            } else if (drain.report?.queue_present === false) {
+                console.log(`fulfilment drain skipped: no queue at ${drain.report.queue_file}; nothing to deliver here`);
+            } else if (drain.report?.delivered?.length) {
+                console.log(`fulfilment drain delivered ${drain.report.delivered.length} paid order(s)`);
             }
         }
 

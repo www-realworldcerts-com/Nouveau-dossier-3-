@@ -4,7 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { buildTickAuditArgs, hasShopifyAdminCredentials, runTickAudit } from '../src/swarm/tick-audit.mjs';
+import {
+    buildDrainArgs,
+    buildTickAuditArgs,
+    hasShopifyAdminCredentials,
+    runFulfillmentDrain,
+    runTickAudit
+} from '../src/swarm/tick-audit.mjs';
 
 function tempRoot() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'tick-audit-'));
@@ -104,4 +110,34 @@ test('runTickAudit terminates a hung audit', async () => {
     const result = await runTickAudit({ root, script, stdio: 'pipe', env: process.env, timeoutMs: 1000 });
     assert.equal(result.timedOut, true);
     assert.notEqual(result.code, 0);
+});
+
+test('the fulfilment drain always applies and only forwards a configured queue', () => {
+    assert.deepEqual(buildDrainArgs(), ['--apply', '--json']);
+    const args = buildDrainArgs({ queueFile: 'logs/q.log', limit: 5 });
+    assert.ok(args.includes('--apply'));
+    assert.equal(args[args.indexOf('--queue') + 1], 'logs/q.log');
+    assert.equal(args[args.indexOf('--limit') + 1], '5');
+});
+
+test('runFulfillmentDrain applies the drain and returns its report', async () => {
+    const root = tempRoot();
+    const script = fixtureScript(root, [
+        'console.log(JSON.stringify({ pending: 2, delivered: [{ order_id: "ORD-1" }], remaining: 1 }));',
+        'console.log(JSON.stringify(process.argv.slice(2)));'
+    ].join('\n') + '\n');
+    const result = await runFulfillmentDrain({ root, script, stdio: 'pipe', env: process.env });
+    assert.equal(result.code, 0);
+    assert.ok(result.args.includes('--apply'));
+    assert.equal(result.report.delivered[0].order_id, 'ORD-1');
+    assert.equal(result.report.remaining, 1);
+    assert.ok(JSON.parse(result.stdout.trim().split('\n').pop()).includes('--apply'));
+});
+
+test('runFulfillmentDrain surfaces a failing drain instead of throwing', async () => {
+    const root = tempRoot();
+    const script = fixtureScript(root, 'console.error("no paypal"); process.exit(1);\n');
+    const result = await runFulfillmentDrain({ root, script, stdio: 'pipe', env: process.env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /no paypal/);
 });

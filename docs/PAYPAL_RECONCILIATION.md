@@ -170,9 +170,40 @@ Tests (`npm run test:reconcile`) cover the dry run, apply, a second run
 enqueueing nothing, pre-existing queue entries, explicit ids without search,
 unpaid/unknown orders, missing email, search failure, and enqueue failure.
 
+## Draining the queue
+
+Reconciliation finds orders that never reached the queue. It does not retry an
+order that reached the queue and then failed delivery, because any line in the
+append-only queue used to count as fulfilled. Such an order sat `PENDING_EMAIL`,
+`PENDING_ACCESS_SECRET` or `MISSING_PAYER_EMAIL` until someone fixed it by hand.
+
+`scripts/drain-fulfillment.mjs` closes that hole. It reads the latest line per
+order id, and for every order that is not `DELIVERED` it re-reads the order from
+PayPal and re-runs `fulfillPaidOrder` — the same path the webhook uses. Delivery
+is keyed by the PayPal order id in the settlement ledger, so an order that was
+already emailed is returned as a duplicate rather than sent twice. Unpaid orders
+are skipped, per-order failures are reported and left in the queue, and
+`--limit` caps one run.
+
+The queue belongs to the host that runs the webhook, so the drain runs on that
+host: the local supervisor (`npm start`) applies the drain after every tick's
+audit. The GitHub workflow deliberately does **not** run it — a fresh runner
+checkout has no `logs/fulfillment_queue.log`, so the step could only ever report
+an empty queue and look like a successful drain. Missing PayPal or email
+configuration leaves orders queued instead of losing them, and the doctor
+already reports that configuration as a money gap.
+
+When there is no queue file at all, the drain says so (`skipped_run:
+queue_missing`) instead of reporting zero pending orders, so a host that cannot
+see the queue is never mistaken for a host that delivered everything.
+
+```bash
+node scripts/drain-fulfillment.mjs            # dry run: who is still waiting
+node scripts/drain-fulfillment.mjs --apply    # deliver them
+```
+
 ## Limits
 
-This tool only queues delivery; the downstream deliverer still has to send the
-product. It needs live PayPal credentials with reporting access, and it does not
-move money. Run it after the webhook endpoint is reachable so that both paths
-agree.
+Reconciliation only queues delivery; the drain sends the product. Both need live
+PayPal credentials with reporting access, and neither moves money. Run them
+after the webhook endpoint is reachable so that every path agrees.

@@ -20,7 +20,8 @@ const STRIPPED = [
     'FULFILLMENT_ACCESS_LINK_ENABLED', 'FULFILLMENT_SUPPORT_EMAIL',
     'CHECKOUT_ATTEMPT_STORE_DIR', 'CHECKOUT_ATTEMPT_SIGNING_SECRET',
     'CHECKOUT_INTENTS_FILE', 'CHECKOUT_INTENTS_URL', 'CHECKOUT_INTENTS_TOKEN',
-    'SALES_DATA_DIR', 'VERCEL', 'AWS_LAMBDA_FUNCTION_NAME', 'NETLIFY'
+    'SALES_DATA_DIR', 'VERCEL', 'AWS_LAMBDA_FUNCTION_NAME', 'NETLIFY',
+    'CHECKOUT_HEALTH_URL', 'PAYMENT_WEBHOOK_URL', 'CHECKOUT_REPLAY_PROTECTION'
 ];
 
 // Asynchronous on purpose: the delivery-route checks need this process's event
@@ -178,4 +179,65 @@ test('a delivery route that answers for an invalid token is accepted', async (t)
     const link = steps(run).find(step => step.id === 'delivery_link');
     assert.equal(link.status, 'ok');
     assert.match(link.detail, /401/);
+});
+
+test('a blocked checkout gate is its own failing step, not a detail in another', async () => {
+    const run = await runDoctor({ overrides: { ...COMPLETE, VERCEL: '', CHECKOUT_ATTEMPT_STORE_DIR: '' } });
+    assert.equal(run.status, 1);
+
+    const gate = steps(run).find(step => step.id === 'checkout_gate');
+    assert.equal(gate.status, 'fail');
+    assert.match(gate.detail, /CHECKOUT_ATTEMPT_STORE_NOT_DURABLE/);
+});
+
+test('an open local gate passes the step', async () => {
+    const run = await runDoctor({ overrides: COMPLETE });
+    assert.equal(steps(run).find(step => step.id === 'checkout_gate').status, 'ok');
+});
+
+test('the tick check fails when the deployed /health reports blocks_checkout', async (t) => {
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+            ok: true,
+            config: {
+                checkout_attempts: {
+                    blocks_checkout: true,
+                    block_reason: 'CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL',
+                    replay_protection: 'store'
+                }
+            }
+        }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => server.close());
+    const url = `http://127.0.0.1:${server.address().port}/health`;
+
+    const run = await runDoctor({ args: ['--deployed-checkout-gate'], overrides: { CHECKOUT_HEALTH_URL: url } });
+    assert.equal(run.status, 1, run.stdout + run.stderr);
+    assert.match(run.stdout + run.stderr, /checkout gate BLOCKED/);
+    assert.match(run.stdout + run.stderr, /CHECKOUT_ATTEMPT_STORE_INSTANCE_LOCAL/);
+});
+
+test('the tick check passes when the deployed gate is open', async (t) => {
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+            config: { checkout_attempts: { blocks_checkout: false, replay_protection: 'provider' } }
+        }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => server.close());
+    const url = `http://127.0.0.1:${server.address().port}/health`;
+
+    const run = await runDoctor({ args: ['--deployed-checkout-gate'], overrides: { CHECKOUT_HEALTH_URL: url } });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /checkout gate open/);
+    assert.match(run.stdout, /provider/);
+});
+
+test('the tick check warns instead of failing when no health URL is configured', async () => {
+    const run = await runDoctor({ args: ['--deployed-checkout-gate'] });
+    assert.equal(run.status, 0);
+    assert.match(run.stdout, /::warning::/);
 });

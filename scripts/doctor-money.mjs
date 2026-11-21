@@ -10,7 +10,11 @@ import path from 'node:path';
 
 import { enforceAuthorityProtocol } from '../src/authority.mjs';
 import { loadCourseCatalog } from '../src/sales/course-catalog.mjs';
-import { probeCheckoutAttemptStore } from '../src/sales/checkout-attempts.mjs';
+import {
+    assessCheckoutAttemptStoreStorage,
+    planCheckoutReplayProtection,
+    probeCheckoutAttemptStore
+} from '../src/sales/checkout-attempts.mjs';
 import { intentStoreStatus } from '../src/sales/intent-store.mjs';
 import { resolvePriceQuoteKeys } from '../src/sales/price-quote.mjs';
 
@@ -18,6 +22,56 @@ const args = process.argv.slice(2);
 const asJson = args.includes('--json');
 const offline = args.includes('--offline');
 const env = process.env;
+
+/**
+ * Where the deployed /health is. The tick workflow runs on a runner whose own
+ * environment is not the deployment's, so only this URL says whether the live
+ * checkout gate is open.
+ */
+function deployedHealthUrl() {
+    const explicit = String(env.CHECKOUT_HEALTH_URL ?? '').trim();
+    if (explicit) return explicit;
+    const origin = String(env.APP_ORIGIN ?? '').trim();
+    if (origin) return `${origin.replace(/\/+$/, '')}/health`;
+    const webhook = String(env.PAYMENT_WEBHOOK_URL ?? '').split(',')[0].trim();
+    if (webhook) return `${webhook.replace(/\/+$/, '').replace(/\/paypal\/webhook$/, '')}/health`;
+    return null;
+}
+
+/** Read the deployed gate. `blocks_checkout` is the server's own verdict. */
+async function readDeployedGate(url) {
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const body = await response.json().catch(() => null);
+    const attempts = body?.config?.checkout_attempts ?? null;
+    return {
+        status: response.status,
+        blocks: attempts?.blocks_checkout === true,
+        block_reason: attempts?.block_reason ?? null,
+        replay_protection: attempts?.replay_protection ?? null
+    };
+}
+
+// The tick workflow runs this instead of the full preflight: its runner has no
+// production credentials, so only the deployed verdict can be trusted there.
+if (args.includes('--deployed-checkout-gate')) {
+    const url = deployedHealthUrl();
+    if (!url) {
+        console.log('::warning::no CHECKOUT_HEALTH_URL, APP_ORIGIN or PAYMENT_WEBHOOK_URL: cannot verify the deployed checkout gate');
+        process.exit(0);
+    }
+    try {
+        const gate = await readDeployedGate(url);
+        if (gate.blocks) {
+            console.error(`checkout gate BLOCKED at ${url}: ${gate.block_reason || 'blocks_checkout=true'} — every checkout order creation answers 503`);
+            process.exit(1);
+        }
+        console.log(`checkout gate open at ${url} (replay protection: ${gate.replay_protection || 'unknown'})`);
+        process.exit(0);
+    } catch (error) {
+        console.log(`::warning::could not read ${url}: ${error?.message ?? error}`);
+        process.exit(0);
+    }
+}
 
 const results = [];
 
@@ -122,33 +176,80 @@ if (orderStep?.status === 'ok') {
 }
 
 // 5 ─ Checkout attempt store: replay protection across instances.
-const productionMoney = envBool('SWARM_LIVE')
-    || String(env.NODE_ENV ?? '').toLowerCase() === 'production'
-    || String(env.VERCEL_ENV ?? '').toLowerCase() === 'production';
+// The server's gate and this preflight share one plan, so they cannot disagree
+// about which durable layer is in use or when checkout is blocked.
+const appOrigin = String(env.APP_ORIGIN ?? '').trim();
 const attemptDir = String(env.CHECKOUT_ATTEMPT_STORE_DIR ?? '').trim();
-const providerReplay = ['provider', 'paypal'].includes(String(env.CHECKOUT_REPLAY_PROTECTION ?? '').trim().toLowerCase());
-if (!attemptDir && providerReplay && productionMoney) {
+const attemptStore = attemptDir
+    ? probeCheckoutAttemptStore(attemptDir)
+    : { configured: false, ok: false, directory: null, code: null, error: null };
+const attemptPlan = planCheckoutReplayProtection({
+    store: attemptStore,
+    storage: attemptDir ? assessCheckoutAttemptStoreStorage(attemptDir, env) : {},
+    env
+});
+
+if (attemptPlan.mode === 'provider') {
     record('attempt_store', 'Checkout attempt store', 'ok',
-        'no directory, but CHECKOUT_REPLAY_PROTECTION=provider: durable dedupe is the quote-bound PayPal-Request-Id, so a retry inside the quote lifetime returns the same order');
+        'durable dedupe is the quote-bound PayPal-Request-Id, so a retry inside the quote lifetime returns the same order'
+        + (attemptPlan.explicit ? ' (CHECKOUT_REPLAY_PROTECTION=provider)' : '')
+        + (attemptDir ? '; the configured directory is not the durable layer' : ''));
 } else if (!attemptDir) {
-    // In production this is no longer a warning: /acp/v1/transactions refuses
-    // to create an order without a store every instance can read.
-    record('attempt_store', 'Checkout attempt store', productionMoney ? 'fail' : 'warn',
-        productionMoney
-            ? 'no CHECKOUT_ATTEMPT_STORE_DIR in production: checkout order creation is refused (503 CHECKOUT_ATTEMPT_STORE_NOT_DURABLE) because replay protection would be per process, so a restart or another instance could create a second order for a reused quote'
+    record('attempt_store', 'Checkout attempt store', attemptPlan.production ? 'fail' : 'warn',
+        attemptPlan.production
+            ? 'no CHECKOUT_ATTEMPT_STORE_DIR in production with CHECKOUT_REPLAY_PROTECTION=store: checkout order creation is refused (503 CHECKOUT_ATTEMPT_STORE_NOT_DURABLE) because replay protection would be per process, so a restart or another instance could create a second order for a reused quote'
             : 'no CHECKOUT_ATTEMPT_STORE_DIR: quote replay protection is per process, and a restart can create a second order for a reused quote',
-        { env: ['CHECKOUT_ATTEMPT_STORE_DIR'], fix: 'Point CHECKOUT_ATTEMPT_STORE_DIR at a volume shared by every instance' });
+        { env: ['CHECKOUT_ATTEMPT_STORE_DIR'], fix: 'Point CHECKOUT_ATTEMPT_STORE_DIR at a volume shared by every instance, or set CHECKOUT_REPLAY_PROTECTION=provider' });
+} else if (!attemptStore.ok) {
+    record('attempt_store', 'Checkout attempt store', 'fail',
+        `cannot write to ${attemptStore.directory}: ${attemptStore.error}`,
+        { env: ['CHECKOUT_ATTEMPT_STORE_DIR'] });
+} else if (attemptPlan.production && attemptPlan.block_reason) {
+    // A shared volume was claimed, but this one is per process: production
+    // refuses to create an order rather than pretend it is protected.
+    record('attempt_store', 'Checkout attempt store', 'fail',
+        `${attemptStore.directory} is on instance-local storage: checkout order creation is refused (503 ${attemptPlan.block_reason}) because it cannot be the durable layer. Mount a shared volume, or set CHECKOUT_REPLAY_PROTECTION=provider.`,
+        { env: ['CHECKOUT_ATTEMPT_STORE_DIR', 'CHECKOUT_REPLAY_PROTECTION'] });
 } else {
-    const probe = probeCheckoutAttemptStore(attemptDir);
-    if (probe.ok) {
-        const signed = has('CHECKOUT_ATTEMPT_SIGNING_SECRET') || has('PRICE_QUOTE_SECRET');
-        record('attempt_store', 'Checkout attempt store', 'ok',
-            `${probe.directory} is writable, records ${signed ? 'signed' : 'unsigned (set CHECKOUT_ATTEMPT_SIGNING_SECRET)'}`);
-    } else {
-        record('attempt_store', 'Checkout attempt store', 'fail',
-            `cannot write to ${probe.directory}: ${probe.error}`,
-            { env: ['CHECKOUT_ATTEMPT_STORE_DIR'] });
+    const signed = has('CHECKOUT_ATTEMPT_SIGNING_SECRET') || has('PRICE_QUOTE_SECRET');
+    record('attempt_store', 'Checkout attempt store', 'ok',
+        `${attemptStore.directory} is writable, records ${signed ? 'signed' : 'unsigned (set CHECKOUT_ATTEMPT_SIGNING_SECRET)'}`
+        + (attemptPlan.block_reason ? ' (instance-local: not durable, refused in production)' : ''));
+}
+
+// 5b ─ Checkout gate: a blocked gate takes no orders at all, so it is its own
+// failing step rather than a line in another step's detail. The local plan
+// decides before deploy; a reachable /health decides for the live deployment.
+const healthUrl = deployedHealthUrl();
+let deployedGate = null;
+let deployedGateError = null;
+if (healthUrl && !offline) {
+    try {
+        deployedGate = await readDeployedGate(healthUrl);
+    } catch (error) {
+        deployedGateError = error?.message ?? String(error);
     }
+}
+const gateFix = { env: ['CHECKOUT_ATTEMPT_STORE_DIR', 'CHECKOUT_REPLAY_PROTECTION'], fix: 'A deploy in this state answers 503 on every checkout and takes no money' };
+if (deployedGate?.blocks) {
+    record('checkout_gate', 'Checkout gate', 'fail',
+        `the deployed /health at ${healthUrl} reports blocks_checkout=true (${deployedGate.block_reason || 'unknown reason'}): checkout order creation answers 503`,
+        { ...gateFix, env: ['CHECKOUT_HEALTH_URL', ...gateFix.env] });
+} else if (attemptPlan.production && attemptPlan.block_reason) {
+    record('checkout_gate', 'Checkout gate', 'fail',
+        `this configuration blocks checkout with 503 ${attemptPlan.block_reason}: no durable replay layer, so no order can be created`,
+        gateFix);
+} else if (deployedGateError) {
+    record('checkout_gate', 'Checkout gate', 'warn',
+        `could not verify the deployed gate at ${healthUrl}: ${deployedGateError}`,
+        { env: ['CHECKOUT_HEALTH_URL'] });
+} else if (deployedGate) {
+    record('checkout_gate', 'Checkout gate', 'ok',
+        `deployed gate at ${healthUrl} is open (replay protection: ${deployedGate.replay_protection || 'unknown'})`);
+} else {
+    record('checkout_gate', 'Checkout gate', 'ok',
+        'open in this configuration'
+        + (healthUrl ? ' (not checked: --offline)' : '; set CHECKOUT_HEALTH_URL to verify the deployed gate'));
 }
 
 // 6 ─ Fulfilment: the step that silently queues today.
@@ -177,7 +278,6 @@ if (String(env.FULFILLMENT_ENABLED ?? 'true').toLowerCase() === 'false') {
 // 7 ─ The online copy of the link. It is only emailed when explicitly enabled:
 // delivery is the attached pass, so a 404 route is not a failed delivery.
 const accessLinkEnabled = /^(1|true|yes|on)$/i.test(String(env.FULFILLMENT_ACCESS_LINK_ENABLED ?? '').trim());
-const appOrigin = String(env.APP_ORIGIN ?? '').trim();
 if (!accessLinkEnabled) {
     record('delivery_link', 'Access link route', 'ok',
         'not used: the emailed access pass is self-contained, so delivery does not need the app server');

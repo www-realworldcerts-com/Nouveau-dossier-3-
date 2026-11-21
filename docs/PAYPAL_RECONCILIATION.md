@@ -202,12 +202,12 @@ audit reads the queue's latest line per order, and an order whose latest line is
 `DELIVERY_EXHAUSTED` becomes the critical silent-failure finding
 `FULFILLMENT_DELIVERY_EXHAUSTED` with its attempt count and last reason. A later
 `DELIVERED` line for the same order (manual delivery) clears the finding on the
-next audit. Because the supervisor drains after its audit, an order exhausted by
-one drain is recorded by the next tick's audit.
+next audit. Because the supervisor drains before it audits, an order exhausted by
+one drain is recorded by that same tick's audit.
 
 The queue belongs to the host that runs the webhook, so the drain runs on that
-host: the local supervisor (`npm start`) applies the drain after every tick's
-audit. The GitHub workflow deliberately does **not** run it — a fresh runner
+host: the local supervisor (`npm start`) applies the drain before every tick's
+audit, so an escalation is recorded in the tick that produced it. The GitHub workflow deliberately does **not** run it — a fresh runner
 checkout has no `logs/fulfillment_queue.log`, so the step could only ever report
 an empty queue and look like a successful drain. Missing PayPal or email
 configuration leaves orders queued instead of losing them, and the doctor

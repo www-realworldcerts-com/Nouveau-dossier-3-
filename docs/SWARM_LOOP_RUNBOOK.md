@@ -85,9 +85,11 @@ node scripts/swarm-doctor.mjs --clear-stale-freeze --ack-owner \
 
 * Every tick writes `data/swarm-heartbeat.json` with `status` (`ok`, `blocked`,
   `failed`), `tick_at`, `last_success_at`, `missing_env` and `last_error`.
-* After every local tick (`npm start`), the supervisor runs the same
-  silent-failure audit as CI, including the PayPal dry-run reconciliation, so
-  paid-but-unfulfilled orders raise `PAYPAL_UNFULFILLED_ORDERS` on a VM too.
+* After every local tick (`npm start`), the supervisor retries the fulfilment
+  queue and then runs the same silent-failure audit as CI, including the PayPal
+  dry-run reconciliation, so paid-but-unfulfilled orders raise
+  `PAYPAL_UNFULFILLED_ORDERS` on a VM too and an order that just exhausted its
+  delivery retries raises `FULFILLMENT_DELIVERY_EXHAUSTED` in that same tick.
   Findings are written to `data/resilience/incidents/` and
   `audits/autonomous/`; disable with `SWARM_TICK_AUDIT=false`.
 * `scripts/auto-restart-loop.js` also writes a `supervising` heartbeat between

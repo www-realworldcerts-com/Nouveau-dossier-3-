@@ -86,6 +86,19 @@ async function loop() {
         if (stopping) break;
 
         if (auditEnabled) {
+            // A paid order whose access email failed sits PENDING_EMAIL in the
+            // queue forever unless something retries it. The queue belongs to
+            // this host, so the drain runs here, not in CI. Draining before the
+            // audit lets an order that just exhausted its retries be recorded
+            // as an incident in this same tick.
+            const drain = await runFulfillmentDrain({ root: ROOT_DIR });
+            if (stopping) break;
+            if (drain.timedOut) {
+                console.error('fulfilment drain timed out; paid orders may still be queued');
+            } else if (drain.code !== 0) {
+                console.error(`fulfilment drain exited ${drain.code}; paid orders may still be queued`);
+            }
+
             const audit = await runTickAudit({ root: ROOT_DIR });
             if (stopping) break;
             if (audit.timedOut) {
@@ -94,17 +107,6 @@ async function loop() {
                 console.error('tick audit reported findings; see data/resilience/incidents');
             } else if (audit.code !== 0) {
                 console.error(`tick audit exited ${audit.code}; see logs above`);
-            }
-
-            // A paid order whose access email failed sits PENDING_EMAIL in the
-            // queue forever unless something retries it. The CI workflow runs
-            // the same drain as its own step.
-            const drain = await runFulfillmentDrain({ root: ROOT_DIR });
-            if (stopping) break;
-            if (drain.timedOut) {
-                console.error('fulfilment drain timed out; paid orders may still be queued');
-            } else if (drain.code !== 0) {
-                console.error(`fulfilment drain exited ${drain.code}; paid orders may still be queued`);
             }
         }
 

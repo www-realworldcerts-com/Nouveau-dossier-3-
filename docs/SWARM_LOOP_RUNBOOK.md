@@ -98,6 +98,10 @@ node scripts/swarm-doctor.mjs --clear-stale-freeze --ack-owner \
 * A tick that runs but is blocked by missing configuration keeps a fresh
   heartbeat and prints an Actions warning (`::warning::`) instead of failing
   every 15 minutes — check the doctor step in the run summary.
+* The workflow's "Checkout gate" step fails only when the deployed `/health`
+  reports `blocks_checkout=true`. Set the repository **variable**
+  `CHECKOUT_HEALTH_URL` to that URL; unset, the step prints a warning and
+  passes, because the runner cannot see the deployment's environment.
 * `npm test -- test/swarm-loop-health.test.mjs` (or
   `node --test test/swarm-loop-health.test.mjs`) covers heartbeat staleness,
   env preflight, stale-freeze detection and both daemon state formats.

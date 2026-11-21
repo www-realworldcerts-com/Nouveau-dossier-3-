@@ -33,18 +33,20 @@ function deployedHealthUrl() {
     if (explicit) return explicit;
     const origin = String(env.APP_ORIGIN ?? '').trim();
     if (origin) return `${origin.replace(/\/+$/, '')}/health`;
-    const webhook = String(env.PAYMENT_WEBHOOK_URL ?? '').split(',')[0].trim();
-    if (webhook) return `${webhook.replace(/\/+$/, '').replace(/\/paypal\/webhook$/, '')}/health`;
     return null;
 }
 
-/** Read the deployed gate. `blocks_checkout` is the server's own verdict. */
+/**
+ * Read the deployed gate. `blocks_checkout` is the server's own verdict; a
+ * response that carries no gate report is `reported: false`, never "open".
+ */
 async function readDeployedGate(url) {
     const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const body = await response.json().catch(() => null);
     const attempts = body?.config?.checkout_attempts ?? null;
     return {
         status: response.status,
+        reported: typeof attempts?.blocks_checkout === 'boolean',
         blocks: attempts?.blocks_checkout === true,
         block_reason: attempts?.block_reason ?? null,
         replay_protection: attempts?.replay_protection ?? null
@@ -53,14 +55,20 @@ async function readDeployedGate(url) {
 
 // The tick workflow runs this instead of the full preflight: its runner has no
 // production credentials, so only the deployed verdict can be trusted there.
+// An unset CHECKOUT_HEALTH_URL only warns, so a missing repository variable
+// cannot fail the tick; a configured gate that reports itself blocked does.
 if (args.includes('--deployed-checkout-gate')) {
     const url = deployedHealthUrl();
     if (!url) {
-        console.log('::warning::no CHECKOUT_HEALTH_URL, APP_ORIGIN or PAYMENT_WEBHOOK_URL: cannot verify the deployed checkout gate');
+        console.log('::warning::no CHECKOUT_HEALTH_URL: cannot verify the deployed checkout gate');
         process.exit(0);
     }
     try {
         const gate = await readDeployedGate(url);
+        if (!gate.reported) {
+            console.log(`::warning::${url} did not report a checkout gate (HTTP ${gate.status}): cannot verify it`);
+            process.exit(0);
+        }
         if (gate.blocks) {
             console.error(`checkout gate BLOCKED at ${url}: ${gate.block_reason || 'blocks_checkout=true'} — every checkout order creation answers 503`);
             process.exit(1);
@@ -231,14 +239,18 @@ if (healthUrl && !offline) {
     }
 }
 const gateFix = { env: ['CHECKOUT_ATTEMPT_STORE_DIR', 'CHECKOUT_REPLAY_PROTECTION'], fix: 'A deploy in this state answers 503 on every checkout and takes no money' };
-if (deployedGate?.blocks) {
-    record('checkout_gate', 'Checkout gate', 'fail',
-        `the deployed /health at ${healthUrl} reports blocks_checkout=true (${deployedGate.block_reason || 'unknown reason'}): checkout order creation answers 503`,
-        { ...gateFix, env: ['CHECKOUT_HEALTH_URL', ...gateFix.env] });
-} else if (attemptPlan.production && attemptPlan.block_reason) {
+if (attemptPlan.production && attemptPlan.block_reason) {
     record('checkout_gate', 'Checkout gate', 'fail',
         `this configuration blocks checkout with 503 ${attemptPlan.block_reason}: no durable replay layer, so no order can be created`,
         gateFix);
+} else if (deployedGate && !deployedGate.reported) {
+    record('checkout_gate', 'Checkout gate', 'warn',
+        `${healthUrl} did not report a checkout gate (HTTP ${deployedGate.status}): cannot verify the deployed gate`,
+        { env: ['CHECKOUT_HEALTH_URL'] });
+} else if (deployedGate?.blocks) {
+    record('checkout_gate', 'Checkout gate', 'fail',
+        `the deployed /health at ${healthUrl} reports blocks_checkout=true (${deployedGate.block_reason || 'unknown reason'}): checkout order creation answers 503`,
+        { ...gateFix, env: ['CHECKOUT_HEALTH_URL', ...gateFix.env] });
 } else if (deployedGateError) {
     record('checkout_gate', 'Checkout gate', 'warn',
         `could not verify the deployed gate at ${healthUrl}: ${deployedGateError}`,

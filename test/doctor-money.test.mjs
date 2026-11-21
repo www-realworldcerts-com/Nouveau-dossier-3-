@@ -240,4 +240,27 @@ test('the tick check warns instead of failing when no health URL is configured',
     const run = await runDoctor({ args: ['--deployed-checkout-gate'] });
     assert.equal(run.status, 0);
     assert.match(run.stdout, /::warning::/);
+
+    // A webhook URL is not a health URL: deriving one would probe a wrong path.
+    const webhookOnly = await runDoctor({
+        args: ['--deployed-checkout-gate'],
+        overrides: { PAYMENT_WEBHOOK_URL: 'https://checkout.example/api/webhooks/paypal' }
+    });
+    assert.equal(webhookOnly.status, 0);
+    assert.match(webhookOnly.stdout, /no CHECKOUT_HEALTH_URL/);
+});
+
+test('the tick check does not read a non-gate response as an open gate', async (t) => {
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => server.close());
+    const url = `http://127.0.0.1:${server.address().port}/health`;
+
+    const run = await runDoctor({ args: ['--deployed-checkout-gate'], overrides: { CHECKOUT_HEALTH_URL: url } });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /did not report a checkout gate/);
+    assert.doesNotMatch(run.stdout, /checkout gate open/);
 });

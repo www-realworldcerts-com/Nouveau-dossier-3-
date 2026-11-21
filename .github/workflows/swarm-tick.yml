@@ -52,9 +52,10 @@ jobs:
         # A blocked checkout gate answers 503 on every order, so the storefront
         # takes no money while the loop still looks alive. The runner's own env
         # is not the deployment's, so this asks the deployed /health instead.
+        # An unset variable only warns; the step fails on a gate that reports
+        # itself blocked.
         env:
           CHECKOUT_HEALTH_URL: ${{ vars.CHECKOUT_HEALTH_URL }}
-          PAYMENT_WEBHOOK_URL: ${{ vars.PAYMENT_WEBHOOK_URL }}
         run: node scripts/doctor-money.mjs --deployed-checkout-gate
 
       - name: Tick

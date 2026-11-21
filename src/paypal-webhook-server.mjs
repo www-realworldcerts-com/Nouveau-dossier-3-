@@ -153,9 +153,47 @@ function instanceLocalStorageReason(storage) {
  * attempt written now is visible to another instance and after a restart, so it
  * requires both a successful write and storage that is not instance-local.
  */
+/**
+ * True when this process is serving real buyers.
+ *
+ * Replay protection that lives only in one process is not replay protection
+ * there: a second instance, or a cold start, would create a second PayPal order
+ * for the same reused quote. `SWARM_LIVE` is the flag that lets the money path
+ * run at all; the framework markers catch a deploy that forgot it.
+ */
+function isProductionMoneyPath() {
+  if (getEnvBool("SWARM_LIVE", false)) return true;
+  if (String(process.env.VERCEL_ENV ?? "").toLowerCase() === "production") return true;
+  return String(process.env.NODE_ENV ?? "").toLowerCase() === "production";
+}
+
+/**
+ * Where durable replay protection comes from.
+ *
+ * `store` (default) needs a directory every instance can read. `provider` is
+ * the serverless deployment where no shared filesystem exists: every order
+ * creation carries `PayPal-Request-Id` derived from the quote, and the quote
+ * expires, so PayPal itself returns the same order for any retry inside the
+ * only window in which a quote can be replayed. It is an explicit choice, not
+ * a default, so a per-process registry is never mistaken for a guarantee.
+ */
+function checkoutReplayProtectionMode() {
+  const requested = String(process.env.CHECKOUT_REPLAY_PROTECTION ?? "").trim().toLowerCase();
+  return requested === "provider" || requested === "paypal" ? "provider" : "store";
+}
+
 function checkoutAttemptStoreReport({ store, storage }) {
+  const production = isProductionMoneyPath();
+  const mode = checkoutReplayProtectionMode();
   return {
     durable: store.ok === true && storage.storage !== "instance_local",
+    production,
+    replay_protection: mode,
+    // Refused unless a durable layer exists: a configured store, or the
+    // provider idempotency key the checkout already sends. A configured store
+    // that cannot be written fails at the first claim; one on instance-local
+    // storage is reported as not durable so the operator can move it.
+    blocks_checkout: production && mode === "store" && store.configured !== true,
     // True only when records are actually persisted and this process signs
     // them. Without a store there are no stored records; without a secret the
     // files on a writable volume are plain JSON that anyone with write access
@@ -200,12 +238,18 @@ function checkoutAttemptStoreWarningFor({ store, storage }) {
 const startupCheckoutAttemptStore = checkoutAttemptStoreCheckCached();
 const startupCheckoutAttemptStoreWarning = checkoutAttemptStoreWarningFor(startupCheckoutAttemptStore);
 if (startupCheckoutAttemptStoreWarning) {
+  const startupReport = checkoutAttemptStoreReport(startupCheckoutAttemptStore);
   process.stderr.write(
     `${JSON.stringify({
       ok: false,
+      severity: startupReport.blocks_checkout ? "critical" : "warning",
       warning: startupCheckoutAttemptStoreWarning.code,
-      error: startupCheckoutAttemptStoreWarning.error,
-      checkout_attempts: checkoutAttemptStoreReport(startupCheckoutAttemptStore)
+      error: startupReport.blocks_checkout
+        ? `${startupCheckoutAttemptStoreWarning.error} Production checkout order creation is refused until it is set.`
+        : startupReport.replay_protection === "provider" && startupReport.production
+          ? `${startupCheckoutAttemptStoreWarning.error} CHECKOUT_REPLAY_PROTECTION=provider: durable dedupe is the quote-bound PayPal-Request-Id, so a retry inside the quote's lifetime returns the same order.`
+          : startupCheckoutAttemptStoreWarning.error,
+      checkout_attempts: startupReport
     })}\n`
   );
 }
@@ -2207,6 +2251,30 @@ if (args.check === true || args["config-check"] === true) {
       // is also the PayPal idempotency key, so retries of this attempt stay
       // deduplicated even on another instance.
       const requestId = checkoutAttemptKey(quote.qid);
+      // Refuse to create a real order on replay protection that dies with this
+      // process. A second instance, or a restart between two requests on the
+      // same quote, would otherwise start a second PayPal order for the same
+      // money. The webhook keeps running: money already taken still has to be
+      // recorded and delivered.
+      const attemptStore = checkoutAttemptStoreCheckCached();
+      if (
+        isProductionMoneyPath() &&
+        checkoutReplayProtectionMode() === "store" &&
+        attemptStore.store.configured !== true
+      ) {
+        json(res, 503, {
+          ok: false,
+          code: "CHECKOUT_ATTEMPT_STORE_NOT_DURABLE",
+          error:
+            "Refusing to create a PayPal order: CHECKOUT_ATTEMPT_STORE_DIR is not set, so " +
+            "quote replay protection lives in this process only and a restart or another " +
+            "instance could create a duplicate PayPal order for the same quote. Point it at " +
+            "a volume shared by every instance, or set CHECKOUT_REPLAY_PROTECTION=provider on " +
+            "a deployment whose quote-bound PayPal-Request-Id is the durable dedupe layer.",
+          checkout_attempts: checkoutAttemptStoreReport(attemptStore)
+        });
+        return;
+      }
       let order;
       try {
         ({ order } = await checkoutAttempts.run(

@@ -56,8 +56,17 @@ function exceeds Vercel's size limit and returns `FUNCTION_INVOCATION_FAILED`.
   instance, so quote replay protection survives restarts; the config check and
   `/health` write and remove a probe file to confirm it). Vercel functions mount
   no shared filesystem, so on Vercel the server reports any configured directory
-  as instance-local and warns; leave it unset there, and set it only when
-  checkout runs on a host with a mounted shared volume.
+  as instance-local and warns; set it only when checkout runs on a host with a
+  mounted shared volume.
+- On a serverless deployment with no shared volume, set
+  `CHECKOUT_REPLAY_PROTECTION=provider` instead. Every order creation already
+  carries `PayPal-Request-Id` derived from the quote id, and the quote expires,
+  so PayPal returns the same order for any retry inside the only window in which
+  that quote can be replayed. In production (SWARM_LIVE, or
+  VERCEL_ENV/NODE_ENV=production) checkout order creation is refused with
+  `503 CHECKOUT_ATTEMPT_STORE_NOT_DURABLE` when neither a store nor that mode is
+  configured; the webhook keeps running so money already taken is still recorded
+  and delivered.
 - Optional `CHECKOUT_ATTEMPT_CLAIM_TIMEOUT_MS` (how long a checkout waits for a
   competing creator before answering `409 CHECKOUT_IN_PROGRESS`; default 10000)
 - Optional `CHECKOUT_ATTEMPT_SIGNING_SECRET` (HMAC key for stored attempt

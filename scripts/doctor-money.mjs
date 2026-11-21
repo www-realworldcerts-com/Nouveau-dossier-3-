@@ -122,11 +122,22 @@ if (orderStep?.status === 'ok') {
 }
 
 // 5 ─ Checkout attempt store: replay protection across instances.
+const productionMoney = envBool('SWARM_LIVE')
+    || String(env.NODE_ENV ?? '').toLowerCase() === 'production'
+    || String(env.VERCEL_ENV ?? '').toLowerCase() === 'production';
 const attemptDir = String(env.CHECKOUT_ATTEMPT_STORE_DIR ?? '').trim();
-if (!attemptDir) {
-    record('attempt_store', 'Checkout attempt store', 'warn',
-        'no CHECKOUT_ATTEMPT_STORE_DIR: quote replay protection is per process, and a restart can create a second order for a reused quote',
-        { env: ['CHECKOUT_ATTEMPT_STORE_DIR'] });
+const providerReplay = ['provider', 'paypal'].includes(String(env.CHECKOUT_REPLAY_PROTECTION ?? '').trim().toLowerCase());
+if (!attemptDir && providerReplay && productionMoney) {
+    record('attempt_store', 'Checkout attempt store', 'ok',
+        'no directory, but CHECKOUT_REPLAY_PROTECTION=provider: durable dedupe is the quote-bound PayPal-Request-Id, so a retry inside the quote lifetime returns the same order');
+} else if (!attemptDir) {
+    // In production this is no longer a warning: /acp/v1/transactions refuses
+    // to create an order without a store every instance can read.
+    record('attempt_store', 'Checkout attempt store', productionMoney ? 'fail' : 'warn',
+        productionMoney
+            ? 'no CHECKOUT_ATTEMPT_STORE_DIR in production: checkout order creation is refused (503 CHECKOUT_ATTEMPT_STORE_NOT_DURABLE) because replay protection would be per process, so a restart or another instance could create a second order for a reused quote'
+            : 'no CHECKOUT_ATTEMPT_STORE_DIR: quote replay protection is per process, and a restart can create a second order for a reused quote',
+        { env: ['CHECKOUT_ATTEMPT_STORE_DIR'], fix: 'Point CHECKOUT_ATTEMPT_STORE_DIR at a volume shared by every instance' });
 } else {
     const probe = probeCheckoutAttemptStore(attemptDir);
     if (probe.ok) {

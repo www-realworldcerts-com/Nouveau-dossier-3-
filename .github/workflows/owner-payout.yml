@@ -1,0 +1,94 @@
+name: Owner payout
+
+# One deliberate money movement, started by hand, on the PayPal rail only.
+# The step env maps the dispatch inputs to INPUT_* because workflow_dispatch
+# inputs are not exported as environment variables to `run` steps.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rail:
+        description: Payout rail (only PayPal is implemented in this workflow)
+        type: choice
+        required: false
+        default: paypal
+        options:
+          - paypal
+      amount:
+        description: Amount to send (positive number)
+        type: string
+        required: true
+      currency:
+        description: ISO currency code
+        type: string
+        required: true
+        default: USD
+      email:
+        description: Owner PayPal account (must be in src/policy/RecipientRegistry.mjs)
+        type: string
+        required: true
+      note:
+        description: Note shown to the recipient
+        type: string
+        required: false
+        default: Owner payout
+
+permissions:
+  contents: read
+
+concurrency:
+  group: owner-payout
+  cancel-in-progress: false
+
+jobs:
+  payout:
+    name: Send one PayPal payout
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: payouts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Execute PayPal payout
+        id: payout
+        env:
+          INPUT_RAIL: ${{ inputs.rail }}
+          INPUT_AMOUNT: ${{ inputs.amount }}
+          INPUT_CURRENCY: ${{ inputs.currency }}
+          INPUT_EMAIL: ${{ inputs.email }}
+          INPUT_NOTE: ${{ inputs.note }}
+          PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
+          PAYPAL_CLIENT_SECRET: ${{ secrets.PAYPAL_CLIENT_SECRET }}
+          PAYPAL_MODE: ${{ vars.PAYPAL_MODE || 'live' }}
+          PAYPAL_DISABLED: ${{ vars.PAYPAL_DISABLED || 'false' }}
+          PAYPAL_PPP2_APPROVED: ${{ vars.PAYPAL_PPP2_APPROVED || 'false' }}
+          PAYPAL_PPP2_ENABLE_SEND: ${{ vars.PAYPAL_PPP2_ENABLE_SEND || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "$INPUT_RAIL" != "paypal" ]; then
+            echo "::error::Only the PayPal rail is supported by this workflow; no payout was attempted."
+            exit 1
+          fi
+          node ./scripts/payout-paypal-once.mjs --confirm \
+            --amount "$INPUT_AMOUNT" \
+            --currency "$INPUT_CURRENCY" \
+            --email "$INPUT_EMAIL" \
+            --note "$INPUT_NOTE" > out.json
+          cat out.json
+          node ./scripts/check-owner-payout-result.mjs < out.json
+
+      - name: Keep the payout result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owner-payout-result
+          path: out.json
+          if-no-files-found: warn
+          retention-days: 90

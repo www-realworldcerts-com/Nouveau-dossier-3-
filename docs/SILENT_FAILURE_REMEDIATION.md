@@ -39,6 +39,7 @@ owner authorization and is never inferred by the swarm.
 | `FULFILLMENT_BACKLOG` | high | Orders whose latest queue line is `PENDING_DELIVERY`, older than the stall window |
 | `FULFILLMENT_QUEUE_STALLED` | high | Drain-tracked orders (`PENDING_EMAIL` etc.) whose latest queue line has not moved for the stall window; an aged `PENDING_DELIVERY` order is the backlog row above |
 | `FULFILLMENT_DELIVERY_EXHAUSTED` | critical | The fulfilment drain recorded `DELIVERY_EXHAUSTED` as an order's latest queue line |
+| `REVENUE_REVERSED_AFTER_FULFILLMENT` | high | A refund/reversal/dispute row in the revenue ledger names a capture whose fulfilment queue line is `DELIVERED`, within the reversal window (default 30 days) |
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
 | `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |
@@ -205,6 +206,32 @@ exposes `evidence.fulfillment.last_skip_at`, `skip_age_hours` and
 statement the queue supports, instead of looking identical to a drain that never
 ran. A dry run writes no skip line, and a queue line without a parsable
 timestamp cannot be aged and is ignored rather than reported as stalled forever.
+
+### A reversal on a delivered order
+
+`reversals.mjs` writes the negative row when PayPal refunds, reverses or
+disputes a capture, but nothing read those rows back: a buyer who received
+access and then had the payment returned looked like ordinary, slightly smaller
+revenue. The audit now matches every reversal to the fulfilment queue on the
+capture id a delivered order records. `REVENUE_REVERSED_AFTER_FULFILLMENT`
+(high) lists the order, capture, reversal type, amount, when the money was
+returned and when the order was delivered, for reversals inside the last 30 days
+(`DEFAULT_REVERSAL_WINDOW_DAYS`). A refund after delivery may be an owner
+decision; a dispute or reversal is a chargeback the provider already took back
+and which has to be answered with delivery evidence. Either way the buyer kept
+the product, so the redress is a recorded decision per order — accept the refund
+or contest the dispute — not a silent write-off.
+
+Three limits are stated rather than hidden. Reversals outside the window are not
+re-raised (the ledger row remains). A reversal whose date cannot be parsed is
+counted in `evidence.fulfillment.undated_reversals` instead of being given an
+invented date. And only queue lines that carry a `capture_id` can be joined.
+Every line `fulfillPaidOrder` writes now carries it, and the drain preserves it
+when it appends `DELIVERED` or a retry, so a delivery made since this change is
+covered; lines written before it cannot be joined, and that gap is visible in
+the evidence rather than reported as a clean result. A reversal
+whose capture is missing from the ledger is already
+`REVENUE_REVERSAL_WITHOUT_CAPTURE` at write time and is not reported twice.
 
 ## Redress: what "full" means here
 

@@ -102,6 +102,9 @@ test('a captured order is prepaid from swarm revenue and emailed access', async 
 
   assert.equal(queued.length, 1);
   assert.equal(queued[0].status, 'DELIVERED');
+  // A reversal names the capture, so the delivered line has to carry it or the
+  // resilience audit can never match a refund to the delivery it paid for.
+  assert.equal(queued[0].capture_id, 'CAP-1');
   assert.equal(queued[0].funding.prepaid_by, 'swarm');
   assert.equal(queued[0].funding.funding_source, 'swarm_revenue');
   assert.equal(queued[0].access_pass.filename, emailBody.attachments[0].filename);

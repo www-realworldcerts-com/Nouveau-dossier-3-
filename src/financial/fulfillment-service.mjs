@@ -85,6 +85,10 @@ export function capturedOrderDetails(order) {
   const amount = Number(capture?.amount?.value ?? unit?.amount?.value ?? NaN);
   return {
     orderId: order?.id ? String(order.id) : null,
+    // The capture is what PayPal issued the money against. It is the only id a
+    // refund or chargeback names, so it has to reach the queue for a reversal
+    // to be matched to the delivery it was paid for.
+    captureId: capture?.id ? String(capture.id) : null,
     productId: parsePayPalCustomId(unit?.custom_id).productId,
     productName: String(unit?.description || '').trim() || null,
     amount: Number.isFinite(amount) ? amount : null,
@@ -291,6 +295,7 @@ export async function fulfillPaidOrder({
   if (!prepayment.ok) {
     await enqueue(queue, {
       id: details.orderId,
+      capture_id: details.captureId,
       product: product?.name || details.productName || 'Paid order',
       customer_email: details.payerEmail,
       revenue: details.amount,
@@ -352,6 +357,7 @@ export async function fulfillPaidOrder({
   if (!details.payerEmail) {
     await enqueue(queue, {
       id: details.orderId,
+      capture_id: details.captureId,
       product: productName,
       customer_email: null,
       revenue: details.amount,
@@ -369,6 +375,7 @@ export async function fulfillPaidOrder({
   if (!accessUrl) {
     await enqueue(queue, {
       id: details.orderId,
+      capture_id: details.captureId,
       product: productName,
       customer_email: details.payerEmail,
       revenue: details.amount,
@@ -412,6 +419,7 @@ export async function fulfillPaidOrder({
 
   const queued = await enqueue(queue, {
     id: details.orderId,
+    capture_id: details.captureId,
     product: productName,
     customer_email: details.payerEmail,
     revenue: details.amount,

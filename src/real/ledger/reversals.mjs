@@ -36,12 +36,22 @@ function captureIds(record) {
         .map((value) => String(value).trim());
 }
 
-/** Every revenue record in a directory with the file it lives in. */
-export function readLedgerRecords(dir) {
+/**
+ * Every revenue record in a directory with the file it lives in.
+ *
+ * `fileFilter` narrows the scan by file name: reversal rows live in their own
+ * `reversal_*.json` files, so an audit that only wants those does not have to
+ * read a ledger of thousands of batches.
+ */
+export function readLedgerRecords(dir, { fileFilter = null } = {}) {
     const resolved = path.resolve(dir);
     const records = [];
     if (!fs.existsSync(resolved)) return { directory: resolved, records };
-    for (const name of fs.readdirSync(resolved).filter((file) => file.endsWith('.json')).sort()) {
+    const names = fs.readdirSync(resolved)
+        .filter((file) => file.endsWith('.json'))
+        .filter((file) => (fileFilter ? fileFilter(file) : true))
+        .sort();
+    for (const name of names) {
         const file = path.join(resolved, name);
         let stored;
         try {

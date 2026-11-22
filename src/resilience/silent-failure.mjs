@@ -15,6 +15,7 @@ import { buildContentieuxCases } from '../procurement/contentieux.mjs';
 import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
 import { storefrontVerdictHint } from './storefront-probe.mjs';
+import { readLedgerRecords } from '../real/ledger/reversals.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") protocol.
@@ -33,6 +34,7 @@ export const SEVERITY_RANK = { low: 1, warning: 2, medium: 2, high: 3, critical:
 export const DEFAULT_MAX_SILENCE_MIN = 90;
 export const DEFAULT_STALL_DAYS = 7;
 export const DEFAULT_SILENCE_BUDGET_HOURS = 24;
+export const DEFAULT_REVERSAL_WINDOW_DAYS = 30;
 
 export const FINDING_CATALOG = {
     LOOP_HEARTBEAT_MISSING: {
@@ -164,6 +166,19 @@ export const FINDING_CATALOG = {
         verification: 'The latest queue line for each order is DELIVERED (or a recorded refund) and the next audit reports no FULFILLMENT_DELIVERY_EXHAUSTED finding.',
         owner_action: 'Deliver or refund the listed orders and record the outcome in the fulfilment queue.',
         sla_hours: 4
+    },
+    REVENUE_REVERSED_AFTER_FULFILLMENT: {
+        domain: 'revenue',
+        severity: 'high',
+        title: 'A delivered order was refunded, reversed or disputed',
+        impact: 'The buyer paid, received the product, and the money was returned. A refund after delivery erases revenue that was already earned, and a dispute or reversal is a chargeback the provider already took back: unanswered, it becomes a permanent loss plus a fee.',
+        containment: 'Do not re-charge the buyer or delete the reversal row; treat the delivered order as disputed until the reason is reviewed.',
+        obligation: 'Decide whether each reversal is an accepted refund, and answer every dispute with delivery evidence.',
+        remedy: 'Read the reversal and its capture row, confirm what was delivered to the buyer, then either accept the refund or submit the access pass, delivery time and support thread to PayPal for the dispute.',
+        mitigation: 'Every audit nets reversal rows against their capture and matches them to the fulfilment queue by capture id, so a reversed delivered order is an incident finding instead of only a smaller revenue total.',
+        verification: 'Each listed order has a recorded decision (refund accepted or dispute contested) and the next audit reports no REVENUE_REVERSED_AFTER_FULFILLMENT finding for it.',
+        owner_action: 'Review the reversed orders and record whether the refund is accepted or the dispute is contested with delivery evidence.',
+        sla_hours: 24
     },
     SILENT_EXCEPTION_SWALLOW: {
         domain: 'code',
@@ -452,6 +467,22 @@ export function readFulfillmentQueue(root = process.cwd(), { queueFile } = {}) {
         .filter(Boolean);
 }
 
+/**
+ * Reversal rows written by `reversals.mjs` (refund, reversal or dispute).
+ *
+ * Only the `reversal_*.json` files are read: the rest of the ledger is
+ * thousands of batch files this audit has no business scanning on every tick.
+ */
+export function readRevenueReversals(root = process.cwd(), { ledgerDir } = {}) {
+    const dir = ledgerDir
+        || process.env.REVENUE_LEDGER_DIR
+        || process.env.LEDGER_DIR
+        || path.join(root, 'data', 'autonomous', 'ledger');
+    return readLedgerRecords(dir, {
+        fileFilter: name => name.toLowerCase().startsWith('reversal_')
+    });
+}
+
 export function scanSilentCatchBlocks(root = process.cwd(), { dirs = ['src', 'scripts'] } = {}) {
     const pattern = /catch\s*(?:\([^)]*\))?\s*\{\s*(?:(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*)*\}/g;
     const samples = [];
@@ -591,7 +622,9 @@ export function detectSilentFailures({
     paypalReconciliation,
     storefrontProbe,
     shopifyPriceDrift,
-    checkoutGate
+    checkoutGate,
+    reversals,
+    reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -804,6 +837,58 @@ export function detectSilentFailures({
         ? notPaidSkips.map(item => item.at).sort().pop()
         : null;
 
+    // A reversal nets a capture to zero, but the buyer keeps the product. No
+    // other step reads reversal rows back once they are written, so a chargeback
+    // or refund on a delivered order would otherwise appear only as a smaller
+    // revenue number. The join key is the capture id the fulfilment path now
+    // records on the queue line of a delivered order.
+    const ledgerReversals = reversals === undefined ? readRevenueReversals(root) : reversals;
+    const deliveredByCapture = new Map();
+    for (const entry of latest) {
+        const captureId = String(entry.capture_id || '').trim();
+        if (!captureId) continue;
+        if (String(entry.status || '').toUpperCase() !== 'DELIVERED') continue;
+        deliveredByCapture.set(captureId, entry);
+    }
+    const reversedAfterFulfillment = [];
+    let undatedReversals = 0;
+    for (const { record } of ledgerReversals.records || []) {
+        const captureId = String(record?.reversal_of ?? '').trim();
+        if (!captureId) continue;
+        const delivered = deliveredByCapture.get(captureId);
+        if (!delivered) continue;
+        const reversedAt = record?.occurred_at ?? record?.created_at ?? null;
+        const reversedMs = Date.parse(reversedAt || '');
+        // An undateable row cannot be placed in the window; count it rather than
+        // either inventing a date or dropping it silently.
+        if (!Number.isFinite(reversedMs)) {
+            undatedReversals += 1;
+            continue;
+        }
+        if ((at.getTime() - reversedMs) / 86400000 > reversalWindowDays) continue;
+        const amount = Number(record?.amount);
+        reversedAfterFulfillment.push({
+            order_id: String(delivered.order_id),
+            capture_id: captureId,
+            reversal_event_id: record?.event_id ?? null,
+            reversal_type: String(record?.status || 'reversal').toLowerCase(),
+            amount: Number.isFinite(amount) ? Math.abs(amount) : null,
+            currency: String(record?.currency || '').toUpperCase() || null,
+            reversed_at: reversedAt,
+            delivered_at: delivered.timestamp || null,
+            product: delivered.product || null
+        });
+    }
+    if (reversedAfterFulfillment.length) {
+        add('REVENUE_REVERSED_AFTER_FULFILLMENT', `${reversedAfterFulfillment.length} delivered order(s) had their payment refunded, reversed or disputed within ${reversalWindowDays} days: ${reversedAfterFulfillment.map(order => order.order_id).join(', ')}. The buyer kept the product.`, {
+            count: reversedAfterFulfillment.length,
+            window_days: reversalWindowDays,
+            undated_reversals: undatedReversals,
+            ledger: ledgerReversals.directory || null,
+            orders: reversedAfterFulfillment
+        });
+    }
+
     const catches = silentCatches === undefined ? scanSilentCatchBlocks(root) : silentCatches;
     if (catches?.count > 0) {
         add('SILENT_EXCEPTION_SWALLOW', `${catches.count} empty catch block(s) hide failures.`, {
@@ -971,6 +1056,8 @@ export function detectSilentFailures({
                 delivery_exhausted: exhausted.length,
                 queue_stalled: stalledQueue.length,
                 not_paid_skips: notPaidSkips.length,
+                reversed_after_fulfillment: reversedAfterFulfillment.length,
+                undated_reversals: undatedReversals,
                 last_skip_at: lastSkipAt,
                 skip_age_hours: lastSkipAt
                     ? round((at.getTime() - Date.parse(lastSkipAt)) / 3600000)
@@ -1055,6 +1142,7 @@ export function buildRedressPlan(findings, { now = new Date(), evidence = {}, re
                 pending_fulfillments: evidence.fulfillment?.pending || 0,
                 exhausted_fulfillments: evidence.fulfillment?.delivery_exhausted || 0,
                 stalled_fulfillments: evidence.fulfillment?.queue_stalled || 0,
+                reversed_after_fulfillment: evidence.fulfillment?.reversed_after_fulfillment || 0,
                 revenue_stalled_days: evidence.revenue?.stalled_days ?? null,
                 swallowed_exceptions: evidence.silent_catches?.count || 0
             },
@@ -1086,10 +1174,12 @@ export function runSilentFailureAudit({
     paypalReconciliation = null,
     storefrontProbe = null,
     shopifyPriceDrift = null,
-    checkoutGate = null
+    checkoutGate = null,
+    reversals,
+    reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate, reversals, reversalWindowDays });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

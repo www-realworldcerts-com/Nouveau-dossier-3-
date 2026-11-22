@@ -25,6 +25,11 @@ export class FulfillmentManager {
             timestamp: new Date().toISOString(),
             order_id: order.id,
             product: product,
+            // The capture id is the only key that ties a queued order back to
+            // the revenue ledger, so a refund or chargeback can be matched to
+            // the delivery it was paid for by the resilience audit.
+            capture_id: order.capture_id || null,
+            product_id: order.product_id || null,
             customer_email: customerEmail,
             amount: order.revenue,
             currency: order.currency || 'USD',

@@ -13,6 +13,7 @@ import {
     buildRedressPlan,
     detectSilentFailures,
     listMitigations,
+    readRevenueReversals,
     runSilentFailureAudit,
     scanSilentCatchBlocks
 } from '../src/resilience/silent-failure.mjs';
@@ -51,6 +52,116 @@ function cleanOptions(overrides = {}) {
 function codes(findings) {
     return findings.map(finding => finding.code);
 }
+
+const CAPTURE = '5O190127TN364715T';
+
+/** A queue line for an order the drain actually delivered. */
+function deliveredLine(overrides = {}) {
+    return {
+        timestamp: new Date(NOW.getTime() - 2 * DAY).toISOString(),
+        order_id: 'ORD-DELIVERED',
+        product: 'CBE practice tests',
+        customer_email: 'buyer@example.com',
+        status: 'DELIVERED',
+        capture_id: CAPTURE,
+        ...overrides
+    };
+}
+
+/** A negative row as `reversals.mjs` writes it. */
+function reversalRow(overrides = {}) {
+    return {
+        event_id: `refund_${CAPTURE}`,
+        amount: -19,
+        currency: 'USD',
+        occurred_at: new Date(NOW.getTime() - DAY).toISOString(),
+        status: 'refunded',
+        reversal_of: CAPTURE,
+        ...overrides
+    };
+}
+
+function reversalLedger(rows) {
+    return { directory: '/tmp/ledger', records: rows.map(record => ({ file: 'reversal_x.json', record })) };
+}
+
+test('a reversal on a delivered order is a high-severity finding', () => {
+    const { findings, evidence } = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ fulfillment: [deliveredLine()], reversals: reversalLedger([reversalRow()]) })
+    });
+
+    const finding = findings.find(item => item.code === 'REVENUE_REVERSED_AFTER_FULFILLMENT');
+    assert.ok(finding, 'a refund on a delivered order must raise a finding');
+    assert.equal(finding.severity, 'high');
+    assert.match(finding.detail, /ORD-DELIVERED/);
+    const [order] = finding.evidence.orders;
+    assert.equal(order.order_id, 'ORD-DELIVERED');
+    assert.equal(order.capture_id, CAPTURE);
+    assert.equal(order.reversal_type, 'refunded');
+    assert.equal(order.amount, 19, 'the amount is reported positive, as exposure');
+    assert.equal(order.currency, 'USD');
+    assert.equal(evidence.fulfillment.reversed_after_fulfillment, 1);
+
+    const plan = buildRedressPlan(findings, { now: NOW, evidence });
+    assert.equal(plan.redress.exposure.reversed_after_fulfillment, 1);
+});
+
+test('a reversal on an order that was never delivered is not raised', () => {
+    const pending = deliveredLine({ status: 'PENDING_EMAIL', capture_id: CAPTURE });
+    const { findings } = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ fulfillment: [pending], reversals: reversalLedger([reversalRow()]) })
+    });
+
+    assert.ok(!codes(findings).includes('REVENUE_REVERSED_AFTER_FULFILLMENT'));
+});
+
+test('a reversal whose capture does not match any queue line is not raised', () => {
+    const other = deliveredLine({ capture_id: '5O190127TN364715X' });
+    const { findings } = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ fulfillment: [other], reversals: reversalLedger([reversalRow()]) })
+    });
+
+    assert.ok(!codes(findings).includes('REVENUE_REVERSED_AFTER_FULFILLMENT'));
+});
+
+test('a reversal older than the window is left to the ledger, not re-raised', () => {
+    const old = reversalRow({ occurred_at: new Date(NOW.getTime() - 45 * DAY).toISOString() });
+    const { findings, evidence } = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ fulfillment: [deliveredLine()], reversals: reversalLedger([old]) })
+    });
+
+    assert.ok(!codes(findings).includes('REVENUE_REVERSED_AFTER_FULFILLMENT'));
+    assert.equal(evidence.fulfillment.reversed_after_fulfillment, 0);
+});
+
+test('an undateable reversal is counted instead of guessed or dropped', () => {
+    const undated = reversalRow({ occurred_at: 'not-a-date', created_at: null });
+    const { findings, evidence } = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({ fulfillment: [deliveredLine()], reversals: reversalLedger([undated]) })
+    });
+
+    assert.ok(!codes(findings).includes('REVENUE_REVERSED_AFTER_FULFILLMENT'));
+    assert.equal(evidence.fulfillment.undated_reversals, 1);
+});
+
+test('the reversal reader reads reversal rows only, not the whole ledger', () => {
+    const root = tempRoot();
+    const dir = path.join(root, 'ledger');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'reversal_refund_1.json'), JSON.stringify(reversalRow()));
+    fs.writeFileSync(path.join(dir, 'batch_BATCH_1.json'), JSON.stringify({ total_amount: 850, currency: 'USD' }));
+
+    const { directory, records } = readRevenueReversals(root, { ledgerDir: dir });
+
+    assert.equal(directory, dir);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].record.reversal_of, CAPTURE);
+});
 
 test('a healthy state produces no findings', () => {
     const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions() });

@@ -1,16 +1,26 @@
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
+
 import { readEncryptedJson, writeJsonAtomic } from '../src/security/data-at-rest.mjs';
 import { isProviderTransactionId } from '../src/real/revenue-verification.mjs';
 
 // Configuration
 const TRUST_WALLET = '0xA46225a984E2B2B5E5082E52AE8d8915A09fEfe7';
 const SWARM_WALLET = '0xSwarmLiquidityPool_External_A7f';
-const BATCH_ID = 'BATCH_LIVE_1767528254631';
-const AMOUNT = 850.00;
 const TOKEN = 'USDT (BEP20)';
 const EXPORT_DIR = 'exports/crypto';
+
+// A receipt is evidence for one named batch, so the batch id is an input, not a
+// constant: a hardcoded id stamped a SETTLED receipt for whatever batch this
+// script happened to point at, whether or not that batch ever existed.
+const BATCH_ID = String(process.env.BATCH_ID ?? process.argv[2] ?? '').trim();
+if (!BATCH_ID) {
+  console.error(
+    'REFUSING TO WRITE A SETTLEMENT RECEIPT: no batch id.\n' +
+    'Pass the batch id as the first argument or set BATCH_ID.'
+  );
+  process.exit(1);
+}
 
 // A receipt is evidence that funds moved. Refuse to write one without the
 // on-chain transaction hash, rather than stamping a receipt on a failed transfer.
@@ -22,6 +32,30 @@ if (!isProviderTransactionId(PROVIDER_TRANSACTION_ID)) {
   );
   process.exit(1);
 }
+
+// The batch must exist, and the receipt must state that batch's own amount.
+const ledgerPath = `data/autonomous/ledger/batch_${BATCH_ID}.json`;
+if (!fs.existsSync(ledgerPath)) {
+  console.error(
+    `REFUSING TO WRITE A SETTLEMENT RECEIPT: batch ${BATCH_ID} is not in the ledger (${ledgerPath}).\n` +
+    'A receipt must describe a batch that exists.'
+  );
+  process.exit(1);
+}
+const ledger = readEncryptedJson(ledgerPath);
+if (!ledger?.data) {
+  console.error(`REFUSING TO WRITE A SETTLEMENT RECEIPT: ${ledgerPath} has no batch data.`);
+  process.exit(1);
+}
+const AMOUNT = Number(ledger.data.total_amount);
+if (!Number.isFinite(AMOUNT) || AMOUNT <= 0) {
+  console.error(
+    `REFUSING TO WRITE A SETTLEMENT RECEIPT: batch ${BATCH_ID} has no positive total_amount.\n` +
+    'A receipt cannot invent the amount it claims moved.'
+  );
+  process.exit(1);
+}
+const CURRENCY = String(ledger.data.currency || 'USD');
 
 // 1. Load Swarm Wallet Info
 const swarmWalletPath = 'data/autonomous/SWARM_WALLET.json';
@@ -48,7 +82,7 @@ RECIPIENT:      ${TRUST_WALLET} (Owner Trust Wallet)
 --------------------------------------------------------------------------------
 
 ASSET:          ${TOKEN}
-AMOUNT:         ${AMOUNT.toFixed(2)}
+AMOUNT:         ${AMOUNT.toFixed(2)} ${CURRENCY}
 FEES:           Pending Gas Estimation
 
 --------------------------------------------------------------------------------
@@ -70,18 +104,15 @@ const receiptPath = path.join(EXPORT_DIR, `SWARM_RECEIPT_${BATCH_ID}.txt`);
 fs.writeFileSync(receiptPath, receiptContent);
 
 // 4. Update Ledger
-const ledgerPath = `data/autonomous/ledger/batch_${BATCH_ID}.json`;
-if (fs.existsSync(ledgerPath)) {
-    const ledger = readEncryptedJson(ledgerPath);
-    ledger.data.status = 'settled';
-    ledger.data.source_wallet = SWARM_WALLET;
-    ledger.data.psp_transaction_id = PROVIDER_TRANSACTION_ID;
-    ledger.data.notes = `Settled on chain in ${PROVIDER_TRANSACTION_ID}`;
-    writeJsonAtomic(ledgerPath, ledger);
-}
+ledger.data.status = 'settled';
+ledger.data.source_wallet = SWARM_WALLET;
+ledger.data.psp_transaction_id = PROVIDER_TRANSACTION_ID;
+ledger.data.notes = `Settled on chain in ${PROVIDER_TRANSACTION_ID}`;
+writeJsonAtomic(ledgerPath, ledger);
 
 console.log(`✅ SWARM SETTLEMENT RECORDED (${PROVIDER_TRANSACTION_ID})`);
+console.log(`💰 Batch: ${BATCH_ID}`);
 console.log(`💰 Source: ${SWARM_WALLET}`);
-console.log(`💰 Amount: $${AMOUNT} ${TOKEN}`);
+console.log(`💰 Amount: ${AMOUNT.toFixed(2)} ${CURRENCY}`);
 console.log(`⚠️  Status: PENDING BROADCAST (API Error)`);
 console.log(`📄 Receipt: ${receiptPath}`);

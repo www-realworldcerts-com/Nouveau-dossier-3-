@@ -116,7 +116,7 @@ test('a dry run reads the order but sends nothing', async () => {
     assert.equal(report.remaining, 1);
 });
 
-test('an unpaid order stays queued and is never delivered', async () => {
+test('an unpaid order stays queued and the skip is recorded instead of writing nothing', async () => {
     const queueFile = tempQueue([{ order_id: 'ORD-1', status: 'PENDING_EMAIL' }]);
     const paypal = fakePaypal({ 'ORD-1': { id: 'ORD-1', status: 'CREATED', purchase_units: [] } });
     let calls = 0;
@@ -128,8 +128,43 @@ test('an unpaid order stays queued and is never delivered', async () => {
         now: NOW
     });
     assert.equal(calls, 0);
-    assert.deepEqual(report.skipped, [{ order_id: 'ORD-1', reason: 'not_paid: CREATED' }]);
+    assert.deepEqual(report.skipped, [{ order_id: 'ORD-1', reason: 'not_paid: CREATED', recorded: true }]);
     assert.equal(report.remaining, 1);
+
+    const recorded = latestQueueEntries(queueFile).get('ORD-1');
+    assert.equal(recorded.status, 'PENDING_EMAIL', 'a skip does not change the delivery state');
+    assert.equal(recorded.timestamp, NOW.toISOString(), 'the order must keep aging from its last real line');
+    assert.equal(recorded.drain.last_skip_at, NOW.toISOString());
+    assert.equal(recorded.drain.last_skip_reason, 'not_paid: CREATED');
+    assert.equal(recorded.drain.attempts, undefined, 'a skip is not a failed delivery attempt');
+    assert.equal(undeliveredQueueEntries(queueFile).length, 1, 'the order is still owed');
+});
+
+test('a repeated skip writes at most one heartbeat line an hour', async () => {
+    const queueFile = tempQueue([{ order_id: 'ORD-1', status: 'PENDING_DELIVERY' }]);
+    const paypal = fakePaypal({ 'ORD-1': { id: 'ORD-1', status: 'CREATED' } });
+    const lines = () => fs.readFileSync(queueFile, 'utf8').trim().split('\n').length;
+    const later = minutes => new Date(NOW.getTime() + minutes * 60000);
+
+    await drainFulfillmentQueue({ queueFile, paypal: paypal.api, apply: true, now: NOW });
+    assert.equal(lines(), 2, 'the first skip is recorded');
+
+    const throttled = await drainFulfillmentQueue({ queueFile, paypal: paypal.api, apply: true, now: later(5) });
+    assert.equal(throttled.skipped[0].recorded, false);
+    assert.equal(lines(), 2, 'one line per tick would be a log, not a heartbeat');
+
+    const heartbeat = await drainFulfillmentQueue({ queueFile, paypal: paypal.api, apply: true, now: later(61) });
+    assert.equal(heartbeat.skipped[0].recorded, true);
+    assert.equal(lines(), 3);
+    assert.equal(latestQueueEntries(queueFile).get('ORD-1').drain.last_skip_at, later(61).toISOString());
+});
+
+test('a dry run records no skip line', async () => {
+    const queueFile = tempQueue([{ order_id: 'ORD-1', status: 'PENDING_DELIVERY' }]);
+    const paypal = fakePaypal({ 'ORD-1': { id: 'ORD-1', status: 'CREATED' } });
+    const report = await drainFulfillmentQueue({ queueFile, paypal: paypal.api, now: NOW });
+    assert.deepEqual(report.skipped, [{ order_id: 'ORD-1', reason: 'not_paid: CREATED', recorded: false }]);
+    assert.equal(fs.readFileSync(queueFile, 'utf8').trim().split('\n').length, 1);
 });
 
 test('one failing order does not stop the others and stays queued', async () => {

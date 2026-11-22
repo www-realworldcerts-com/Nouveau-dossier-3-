@@ -729,8 +729,9 @@ export function detectSilentFailures({
     // A running drain appends a queue line for every attempt it makes — success,
     // failure or the next retry time — so an undelivered order whose latest line
     // is older than the stall window has nothing advancing it: the drain is not
-    // running, is stuck, or keeps skipping the order without recording why (an
-    // order PayPal no longer reports as captured takes no line at all).
+    // running, or it is stuck. An unpaid order records only a throttled
+    // `drain.last_skip_at` heartbeat and keeps aging, which is the intended
+    // signal that a human has to resolve it.
     // `PENDING_DELIVERY` is FULFILLMENT_BACKLOG's finding — it is reported there
     // by the same age — so it is excluded here to keep the two disjoint. Terminal
     // lines are excluded because they are already done.
@@ -786,6 +787,22 @@ export function detectSilentFailures({
             orders: exhausted
         });
     }
+
+    // The drain records each unpaid-order skip, throttled to once an hour per
+    // order, on the order's latest line. The newest of those records is what
+    // separates "the drain ran and found nothing paid" from "the drain never
+    // ran": the queue alone cannot say which, because both leave the delivery
+    // state untouched.
+    const notPaidSkips = latest
+        .map(entry => ({
+            order_id: String(entry.order_id),
+            at: entry.drain?.last_skip_at || null,
+            reason: entry.drain?.last_skip_reason || null
+        }))
+        .filter(item => item.at && Number.isFinite(Date.parse(item.at)));
+    const lastSkipAt = notPaidSkips.length
+        ? notPaidSkips.map(item => item.at).sort().pop()
+        : null;
 
     const catches = silentCatches === undefined ? scanSilentCatchBlocks(root) : silentCatches;
     if (catches?.count > 0) {
@@ -952,7 +969,12 @@ export function detectSilentFailures({
                 pending: pending.length,
                 oldest_days: round(oldestPending),
                 delivery_exhausted: exhausted.length,
-                queue_stalled: stalledQueue.length
+                queue_stalled: stalledQueue.length,
+                not_paid_skips: notPaidSkips.length,
+                last_skip_at: lastSkipAt,
+                skip_age_hours: lastSkipAt
+                    ? round((at.getTime() - Date.parse(lastSkipAt)) / 3600000)
+                    : null
             },
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },

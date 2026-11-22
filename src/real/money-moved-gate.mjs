@@ -1,7 +1,11 @@
 // src/real/money-moved-gate.mjs
 import { ProofValidator } from './proof-validator.mjs';
 import { EvidenceIntegrityChain } from './evidence-integrity.mjs';
+import { classifyRevenueProof } from './revenue-verification.mjs';
 import { RedressEngine } from '../resilience/redress.mjs';
+
+/** The only statuses that can mean money moved. */
+const MOVED_STATUSES = ['VERIFIED', 'settled', 'paid_out'];
 
 export class MoneyMovedGate {
   /**
@@ -27,30 +31,36 @@ export class MoneyMovedGate {
       throw new Error('MONEY_GATE_FAIL: hallucinated_event');
     }
 
-    // 1. Proof must be invariant-valid
-    await ProofValidator.assertValid(event);
-
-    // 2. Evidence must be immutably chained
-    await EvidenceIntegrityChain.assertEventBound(event.id);
-
-    // 3. Event must not already be settled (if we are gating settlement)
-    // Wait, if it's already settled, we don't need to gate "settlement".
-    // But if we are gating "reporting", it might be settled.
-    // The text says: "Event must not already be settled"
-    // This implies this gate is used *at the moment of settlement*.
-    if (event.settled === true) {
-      // throw new Error('MONEY_GATE_FAIL: already_settled');
-      // Relaxing this for idempotent re-runs or reporting checks
+    // 1. The proof object must name a transaction a provider issued. A proof
+    //    the system generated about itself (`autonomous_execution`, a
+    //    `PROOF_*` id) is a claim, not evidence that money moved, so the gate
+    //    refuses it here instead of trusting a downstream validator to keep
+    //    noticing.
+    const proof = event.verification_proof || event.metadata?.verification_proof || null;
+    if (proof) {
+      const verdict = classifyRevenueProof(proof);
+      if (!verdict.verified) {
+        const id = verdict.psp_id ? `: ${verdict.psp_id}` : '';
+        throw new Error(`MONEY_GATE_FAIL: proof_not_provider_backed (${verdict.reason}${id})`);
+      }
     }
 
-    // 4. Explicit status enforcement
-    if (event.status !== 'VERIFIED' && event.status !== 'settled' && event.status !== 'paid_out') {
-       // If we are *in* the process of verifying, it might be 'pending_verification'.
-       // But this gate asserts "Money MOVED", so it should be VERIFIED.
-       // We'll stick to the text but allow 'settled'/'paid_out' as they imply verified.
-       if (event.status !== 'VERIFIED') {
-           // throw new Error(`MONEY_GATE_FAIL: invalid_status (${event.status})`);
-       }
+    // 2. Proof must be invariant-valid
+    await ProofValidator.assertValid(event);
+
+    // 3. Evidence must be immutably chained
+    await EvidenceIntegrityChain.assertEventBound(event.id);
+
+    // 4. Settlement is a one-way door: an event that is already settled must
+    //    not be settled (or reported as newly moved money) a second time.
+    if (event.settled === true) {
+      throw new Error('MONEY_GATE_FAIL: already_settled');
+    }
+
+    // 5. The event must claim money moved. Anything else is still verifying,
+    //    and this gate is not the place to confirm it.
+    if (!MOVED_STATUSES.includes(event.status)) {
+      throw new Error(`MONEY_GATE_FAIL: invalid_status (${event.status})`);
     }
 
     // If this returns, money is REAL

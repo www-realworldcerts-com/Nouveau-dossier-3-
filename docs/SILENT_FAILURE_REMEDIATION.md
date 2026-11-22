@@ -175,7 +175,8 @@ npm run reconcile:paypal -- --apply     # replay after reviewing the finding
 
 The queue is append-only and the drain writes a line for every attempt it makes
 — a success (`DELIVERED`), a failure with `drain.attempts`/`drain.last_reason`,
-or the next `next_attempt_at`. So an undelivered order whose latest line has not
+or the next `next_attempt_at` — plus a throttled skip record for an order PayPal
+reports as unpaid. So an undelivered order whose latest line has not
 moved for the stall window (`--stall-days`, default 7) is not merely slow:
 nothing is advancing it, and no later tick will. `FULFILLMENT_QUEUE_STALLED`
 (high) reports those orders with their last status, their recorded attempt
@@ -192,12 +193,18 @@ they are done, and an exhausted order is already
 `FULFILLMENT_DELIVERY_EXHAUSTED`. A retry line younger than the stall window
 clears the stall finding on the next audit.
 
-The drain writes no line for an order PayPal no longer reports as captured: it
-re-checks it every tick and skips it as `not_paid`. Such an order keeps aging
-and eventually trips this finding too, which is the intended signal — its queue
-line still needs a manual `DELIVERED` line or a recorded refund. A queue line
-without a parsable timestamp cannot be aged and is ignored rather than reported
-as stalled forever.
+When the drain re-checks an order and PayPal reports it as not captured, it
+skips delivery as `not_paid` and records that skip on the order's latest line at
+most once an hour (`drain.last_skip_at` and `drain.last_skip_reason`; the drain's
+`skipped` list marks whether the line was written with `recorded`). The line
+copies the delivery state and the original `timestamp`, so the order keeps aging
+into `FULFILLMENT_BACKLOG` — a skip is not progress, and a human still has to
+record a `DELIVERED` line or a refund. What it buys is liveness: the audit
+exposes `evidence.fulfillment.last_skip_at`, `skip_age_hours` and
+`not_paid_skips`, so "the drain ran two hours ago and found nothing paid" is a
+statement the queue supports, instead of looking identical to a drain that never
+ran. A dry run writes no skip line, and a queue line without a parsable
+timestamp cannot be aged and is ignored rather than reported as stalled forever.
 
 ## Redress: what "full" means here
 

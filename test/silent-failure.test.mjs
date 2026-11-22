@@ -212,6 +212,39 @@ test('a queue that stops advancing is a stalled-drain finding', () => {
     assert.ok(!codes(findings).includes('FULFILLMENT_BACKLOG'));
 });
 
+test('a skip heartbeat tells a running drain from a drain that never ran', () => {
+    const line = {
+        timestamp: new Date(NOW.getTime() - 9 * DAY).toISOString(),
+        status: 'PENDING_DELIVERY',
+        order_id: 'unpaid'
+    };
+
+    // No skip record: the queue cannot say whether the drain ran at all.
+    const dead = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: [line] }) });
+    assert.equal(dead.evidence.fulfillment.not_paid_skips, 0);
+    assert.equal(dead.evidence.fulfillment.last_skip_at, null);
+    assert.equal(dead.evidence.fulfillment.skip_age_hours, null);
+
+    // The drain looked at it and found it unpaid two hours ago.
+    const skippedAt = new Date(NOW.getTime() - 2 * 3600000).toISOString();
+    const running = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({
+            fulfillment: [line, { ...line, drain: { last_skip_at: skippedAt, last_skip_reason: 'not_paid: CREATED' } }]
+        })
+    });
+    assert.equal(running.evidence.fulfillment.not_paid_skips, 1);
+    assert.equal(running.evidence.fulfillment.last_skip_at, skippedAt);
+    assert.equal(running.evidence.fulfillment.skip_age_hours, 2);
+
+    // A skip is not a delivery state change: the order still ages into backlog
+    // and a human still has to resolve it.
+    const backlog = running.findings.find(finding => finding.code === 'FULFILLMENT_BACKLOG');
+    assert.ok(backlog);
+    assert.equal(backlog.evidence.oldest_days, 9);
+    assert.ok(!codes(running.findings).includes('FULFILLMENT_QUEUE_STALLED'));
+});
+
 test('a retry inside the stall window means the queue is still advancing', () => {
     const queue = [
         { timestamp: new Date(NOW.getTime() - 20 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'ORDER-11' },

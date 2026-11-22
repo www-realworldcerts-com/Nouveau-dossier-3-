@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 
 // Load system components
 import { AutonomousSettlementEngine } from '../data/full_autonomous_system.js';
@@ -91,9 +92,13 @@ async function generateStimulus() {
   
   // 5. Verify Triage Logic
   console.log('\n🔍 Verifying Triage Classification...');
-  const { execSync } = await import('child_process');
+  const { execFileSync } = await import('child_process');
+  // Absolute path: a cwd-relative 'scripts/triage_earnings.mjs' only resolved
+  // when this ran from the repository root. Triage itself still scans the
+  // ledger under the current directory, which is where the batch above went.
+  const triageScript = fileURLToPath(new URL('./triage_earnings.mjs', import.meta.url));
   try {
-    const triageOutput = execSync('node scripts/triage_earnings.mjs').toString();
+    const triageOutput = execFileSync(process.execPath, [triageScript], { encoding: 'utf8' });
     console.log(triageOutput);
   } catch (err) {
     console.error('Triage verification failed:', err.message);

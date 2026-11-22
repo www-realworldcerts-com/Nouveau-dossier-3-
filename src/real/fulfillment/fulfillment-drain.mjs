@@ -29,6 +29,13 @@ import { DEFAULT_QUEUE_FILE, isPaidOrder, readFulfillmentQueue } from './paypal-
  * failures the order becomes `DELIVERY_EXHAUSTED`, is never retried again, and
  * is reported for a human to deliver or refund.
  *
+ * An order PayPal reports as not captured is skipped, not delivered, and the
+ * skip is recorded too: a line that copies the delivery state, keeps its
+ * original `timestamp` and adds `drain.last_skip_at`. Without it a queue full
+ * of unpaid orders is indistinguishable from a drain that never ran. The line
+ * is written at most once per `SKIP_HEARTBEAT_MS` per order, so an unpaid order
+ * does not append a line on every tick.
+ *
  * The queue belongs to the host that runs the webhook. A machine that does not
  * have it must not report a clean drain: a missing queue is reported as
  * `skipped_run: 'queue_missing'`.
@@ -39,6 +46,7 @@ export const EXHAUSTED_STATUS = 'DELIVERY_EXHAUSTED';
 export const DEFAULT_MAX_ATTEMPTS = 5;
 export const DEFAULT_BASE_BACKOFF_MS = 15 * 60 * 1000;
 export const DEFAULT_MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
+export const SKIP_HEARTBEAT_MS = 60 * 60 * 1000;
 
 const DEFAULT_LIMIT = 25;
 
@@ -72,6 +80,34 @@ export function drainState(entry) {
         next_attempt_at: Number.isFinite(nextAt) ? new Date(nextAt) : null,
         last_reason: drain.last_reason || null
     };
+}
+
+/**
+ * Record that the drain looked at an order and found it unpaid.
+ *
+ * The delivery state is copied unchanged and the original `timestamp` is kept,
+ * so the order keeps aging for `FULFILLMENT_BACKLOG`; only `drain.last_skip_at`
+ * and `drain.last_skip_reason` move. Throttled so one unpaid order cannot append
+ * a line on every tick.
+ */
+function recordSkip(queueFile, entry, reason, at, nowMs) {
+    const latest = latestQueueEntries(queueFile).get(entry.order_id) || {};
+    const previous = Date.parse(latest.drain?.last_skip_at || '');
+    if (Number.isFinite(previous) && nowMs - previous < SKIP_HEARTBEAT_MS) return false;
+    appendEntry(queueFile, {
+        ...latest,
+        // Ageing reads `timestamp`; a skip is not a delivery state change, so
+        // the order must not look fresher than its last real queue line.
+        timestamp: latest.timestamp || entry.queued_at || at,
+        order_id: entry.order_id,
+        status: latest.status || entry.status || null,
+        drain: {
+            ...(latest.drain && typeof latest.drain === 'object' ? latest.drain : {}),
+            last_skip_at: at,
+            last_skip_reason: reason
+        }
+    });
+    return true;
 }
 
 /** Exponential backoff after `attempts` failures, capped. */
@@ -216,7 +252,11 @@ export async function drainFulfillmentQueue({
         }
 
         if (!isPaidOrder(order)) {
-            report.skipped.push({ order_id: entry.order_id, reason: `not_paid: ${order?.status || 'unknown'}` });
+            const reason = `not_paid: ${order?.status || 'unknown'}`;
+            // A dry run writes nothing; the tick runs with --apply, so the
+            // audit has a skip record whenever the drain is actually running.
+            const recorded = apply ? recordSkip(queueFile, entry, reason, at, nowMs) : false;
+            report.skipped.push({ order_id: entry.order_id, reason, recorded });
             continue;
         }
 

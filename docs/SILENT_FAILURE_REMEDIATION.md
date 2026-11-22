@@ -39,7 +39,8 @@ owner authorization and is never inferred by the swarm.
 | `FULFILLMENT_BACKLOG` | high | Orders whose latest queue line is `PENDING_DELIVERY`, older than the stall window |
 | `FULFILLMENT_QUEUE_STALLED` | high | Drain-tracked orders (`PENDING_EMAIL` etc.) whose latest queue line has not moved for the stall window; an aged `PENDING_DELIVERY` order is the backlog row above |
 | `FULFILLMENT_DELIVERY_EXHAUSTED` | critical | The fulfilment drain recorded `DELIVERY_EXHAUSTED` as an order's latest queue line |
-| `REVENUE_REVERSED_AFTER_FULFILLMENT` | high | A refund/reversal/dispute row in the revenue ledger names a capture whose fulfilment queue line is `DELIVERED`, within the reversal window (default 30 days) |
+| `REVENUE_REVERSED_AFTER_FULFILLMENT` | high | A refund/reversal/dispute row in the local revenue ledger or the Base44 ledger names a capture whose fulfilment queue line is `DELIVERED`, within the reversal window (default 30 days) |
+| `REVENUE_SETTLEMENT_BLOCKED` | critical | The PayPal webhook matched a successful payout item to a revenue row and the money-moved gate refused to mark it `paid_out`, with no later settlement of the same row closing the block |
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
 | `PAYMENT_WEBHOOK_UNREACHABLE` | critical | Public webhook probe returns anything but `400 invalid_json` |
@@ -212,8 +213,8 @@ timestamp cannot be aged and is ignored rather than reported as stalled forever.
 `reversals.mjs` writes the negative row when PayPal refunds, reverses or
 disputes a capture, but nothing read those rows back: a buyer who received
 access and then had the payment returned looked like ordinary, slightly smaller
-revenue. The audit now matches every reversal to the fulfilment queue on the
-capture id a delivered order records. `REVENUE_REVERSED_AFTER_FULFILLMENT`
+revenue. The audit reads reversals from both ledgers that carry them and matches every
+one to the fulfilment queue on the capture id a delivered order records. `REVENUE_REVERSED_AFTER_FULFILLMENT`
 (high) lists the order, capture, reversal type, amount, when the money was
 returned and when the order was delivered, for reversals inside the last 30 days
 (`DEFAULT_REVERSAL_WINDOW_DAYS`). A refund after delivery may be an owner
@@ -222,16 +223,62 @@ and which has to be answered with delivery evidence. Either way the buyer kept
 the product, so the redress is a recorded decision per order — accept the refund
 or contest the dispute — not a silent write-off.
 
-Three limits are stated rather than hidden. Reversals outside the window are not
+Production reversals mostly do not live in the local ledger at all: the
+webhook writes them into Base44 through `createBase44RevenueReversal`, so a
+local-only audit was blind to the source that matters. `readBase44RevenueReversals`
+now reads those rows and normalises them to the same shape the audit joins on —
+`metadata.reversal_of` becomes the capture key, and `metadata.reversal_type`
+becomes `status` (`refunded`, `reversed`, `disputed`), because a Base44 reversal
+row's own status column is `VERIFIED`. The two sources are merged by
+`mergeRevenueReversals`, deduplicated by reversal event id (falling back to the
+capture and amount), with the Base44 row winning when the same refund appears in
+both. The audit CLI does this automatically: it reads Base44 when
+`BASE44_APP_ID` and `BASE44_SERVICE_TOKEN` exist, and when they do not it still
+runs on the local ledger and records `evidence.reversals.base44.status` as
+`unavailable` with the missing names, so a clean result is never mistaken for a
+complete one.
+
+The limits are stated rather than hidden. Reversals outside the window are not
 re-raised (the ledger row remains). A reversal whose date cannot be parsed is
 counted in `evidence.fulfillment.undated_reversals` instead of being given an
-invented date. And only queue lines that carry a `capture_id` can be joined.
-Every line `fulfillPaidOrder` writes now carries it, and the drain preserves it
-when it appends `DELIVERED` or a retry, so a delivery made since this change is
+invented date. Only queue lines that carry a `capture_id` can be joined. Every
+line `fulfillPaidOrder` writes now carries it, and the drain preserves it when
+it appends `DELIVERED` or a retry, so a delivery made since this change is
 covered; lines written before it cannot be joined, and that gap is visible in
-the evidence rather than reported as a clean result. A reversal
-whose capture is missing from the ledger is already
-`REVENUE_REVERSAL_WITHOUT_CAPTURE` at write time and is not reported twice.
+the evidence rather than reported as a clean result. A reversal whose capture is
+missing from the ledger is already `REVENUE_REVERSAL_WITHOUT_CAPTURE` at write
+time and is not reported twice. The Base44 read is newest-first and capped; if
+it hits the cap `evidence.reversals.base44.truncated` is `true`, which means the
+audit did **not** see the whole window and its silence about older reversals
+proves nothing. A Base44 read that fails is `status: error` with the message,
+not an empty result.
+
+### A payout that succeeded while its revenue row did not settle
+
+`applyPayoutItemUpdate` marks a revenue row `paid_out` only after
+`authorizeRevenueSettlement` passes, and a refusal writes nothing. That refusal
+used to reach the process's stderr and nothing else: on a serverless host no one
+reads stderr, and PayPal had already paid the recipient, so the payout was gone
+while the revenue row still counted as unpaid. The webhook now appends every
+refused settlement to `data/resilience/settlement-blocks.ndjson` (override with
+`SETTLEMENT_BLOCK_LOG`); the file is created by the first block, so a
+deployment that has never refused one keeps no file at all. A later settlement
+of the same revenue row appends a closing line — from the webhook, or from
+`ledger-sync.mjs` when the payout-batch sync settles the row. Both writers key
+the line on the revenue row id, so refusal and close always meet. The audit
+reads the log back and raises
+`REVENUE_SETTLEMENT_BLOCKED` (critical) for every row whose latest line is still
+a block, listing the revenue row, the payout transaction, the gate's reason and
+how long ago it was refused. The latest line wins, so a PayPal webhook replay
+adds no second finding and a later settlement clears it.
+
+Two limits are stated rather than hidden. The log is a file on the instance's
+disk, so the finding is only visible to an audit running where that file lives —
+the same boundary the verified-webhook registry and the evidence chain have. And
+the recorder never throws: if the disk refuses the append the result says
+`recorded: false`, the webhook still returns what PayPal needs, and the refusal
+is again only on stderr. That case is the reason this section is not titled
+"solved".
 
 ## Redress: what "full" means here
 

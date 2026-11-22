@@ -16,6 +16,7 @@ import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
 import { storefrontVerdictHint } from './storefront-probe.mjs';
 import { readLedgerRecords } from '../real/ledger/reversals.mjs';
+import { openSettlementBlocks, readSettlementBlocks } from './settlement-blocks.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") protocol.
@@ -179,6 +180,19 @@ export const FINDING_CATALOG = {
         verification: 'Each listed order has a recorded decision (refund accepted or dispute contested) and the next audit reports no REVENUE_REVERSED_AFTER_FULFILLMENT finding for it.',
         owner_action: 'Review the reversed orders and record whether the refund is accepted or the dispute is contested with delivery evidence.',
         sla_hours: 24
+    },
+    REVENUE_SETTLEMENT_BLOCKED: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'A payout succeeded but its revenue row was not marked paid_out',
+        impact: 'PayPal paid the recipient while the ledger still says the money is unpaid. The payout is gone and the revenue it settled keeps being counted as outstanding, so every balance and every later payout decision is computed from a row that is already wrong.',
+        containment: 'Do not replay the payout and do not hand-edit the revenue row without the provider evidence; treat the row as unknown until it is reconciled.',
+        obligation: 'Reconcile the revenue row against the provider payout and record the outcome.',
+        remedy: 'Read the recorded reason (self-issued proof, no provider id, gate refusal, update failure), confirm the capture against PayPal, then settle the row through the gated path or correct the proof so the gate can pass.',
+        mitigation: 'The webhook appends every refused settlement to data/resilience/settlement-blocks.ndjson and every audit reads it back; a later successful settlement of the same row appends a closing line.',
+        verification: 'The listed revenue rows are paid_out with a provider-confirmed proof and the next audit reports no REVENUE_SETTLEMENT_BLOCKED finding.',
+        owner_action: 'Reconcile each listed revenue row against the PayPal payout and settle or correct it.',
+        sla_hours: 4
     },
     SILENT_EXCEPTION_SWALLOW: {
         domain: 'code',
@@ -483,6 +497,44 @@ export function readRevenueReversals(root = process.cwd(), { ledgerDir } = {}) {
     });
 }
 
+/**
+ * One reversal list from several ledgers.
+ *
+ * Production reversals land in Base44; the loop's own reversals land in the
+ * local ledger. The same refund can be in both (a local run and a deployed
+ * webhook), so records are deduplicated by their event id, falling back to
+ * the capture the reversal names. Sources are merged in the order given, and
+ * the first record for an id wins, so a caller that passes the production
+ * ledger first gets its row rather than the local copy.
+ */
+export function mergeRevenueReversals(sources = [], { base44 = null } = {}) {
+    const records = [];
+    const seen = new Set();
+    const parts = [];
+    for (const source of sources) {
+        if (!source) continue;
+        if (source.directory) parts.push(source.directory);
+        for (const entry of source.records || []) {
+            const record = entry?.record ?? {};
+            const identity = record.event_id
+                ? `event:${record.event_id}`
+                : (record.reversal_of
+                    ? `capture:${record.reversal_of}|${record.status || ''}|${record.amount ?? ''}`
+                    : null);
+            if (identity) {
+                if (seen.has(identity)) continue;
+                seen.add(identity);
+            }
+            records.push(entry);
+        }
+    }
+    return {
+        directory: parts.join(' + ') || null,
+        records,
+        ...(base44 ? { base44 } : {})
+    };
+}
+
 export function scanSilentCatchBlocks(root = process.cwd(), { dirs = ['src', 'scripts'] } = {}) {
     const pattern = /catch\s*(?:\([^)]*\))?\s*\{\s*(?:(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*)*\}/g;
     const samples = [];
@@ -624,7 +676,8 @@ export function detectSilentFailures({
     shopifyPriceDrift,
     checkoutGate,
     reversals,
-    reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS
+    reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS,
+    settlementBlocks
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -885,8 +938,42 @@ export function detectSilentFailures({
             window_days: reversalWindowDays,
             undated_reversals: undatedReversals,
             ledger: ledgerReversals.directory || null,
+            base44: ledgerReversals.base44 || null,
             orders: reversedAfterFulfillment
         });
+    }
+
+    // A payout PayPal reported as succeeded whose revenue row stayed unpaid used
+    // to leave a trace only in stderr. The webhook appends that refusal to an
+    // append-only log, so the block is a finding until a later settlement of the
+    // same revenue row closes it.
+    const settlementBlockLog = settlementBlocks === undefined
+        ? readSettlementBlocks(root, { env })
+        : settlementBlocks;
+    const blockedSettlements = openSettlementBlocks(settlementBlockLog.records || []).map(record => {
+        const blockedAt = record.at || null;
+        const blockedMs = Date.parse(blockedAt || '');
+        return {
+            revenue_event_id: record.revenue_event_id || null,
+            psp_transaction_id: record.psp_transaction_id || null,
+            reason: record.reason || null,
+            error: record.error || null,
+            webhook_event_id: record.webhook_event_id || null,
+            blocked_at: blockedAt,
+            age_hours: Number.isFinite(blockedMs) ? round((at.getTime() - blockedMs) / 3600000) : null
+        };
+    });
+    if (blockedSettlements.length) {
+        add(
+            'REVENUE_SETTLEMENT_BLOCKED',
+            `${blockedSettlements.length} payout(s) succeeded while the revenue row was not marked paid_out: ` +
+                `${blockedSettlements.map(row => row.revenue_event_id).join(', ')}.`,
+            {
+                count: blockedSettlements.length,
+                log: settlementBlockLog.path || null,
+                blocks: blockedSettlements
+            }
+        );
     }
 
     const catches = silentCatches === undefined ? scanSilentCatchBlocks(root) : silentCatches;
@@ -1063,6 +1150,15 @@ export function detectSilentFailures({
                     ? round((at.getTime() - Date.parse(lastSkipAt)) / 3600000)
                     : null
             },
+            reversals: {
+                ledger: ledgerReversals.directory || null,
+                scanned: (ledgerReversals.records || []).length,
+                base44: ledgerReversals.base44 || null
+            },
+            settlement_blocks: {
+                open: blockedSettlements.length,
+                path: settlementBlockLog.path || null
+            },
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
             webhook_probes: probes,
@@ -1176,10 +1272,11 @@ export function runSilentFailureAudit({
     shopifyPriceDrift = null,
     checkoutGate = null,
     reversals,
-    reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS
+    reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS,
+    settlementBlocks
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate, reversals, reversalWindowDays });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate, reversals, reversalWindowDays, settlementBlocks });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

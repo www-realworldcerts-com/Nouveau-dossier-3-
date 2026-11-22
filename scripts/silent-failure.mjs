@@ -3,10 +3,13 @@ import fs from 'node:fs';
 
 import {
     DEFAULT_MAX_SILENCE_MIN,
+    DEFAULT_REVERSAL_WINDOW_DAYS,
     DEFAULT_SILENCE_BUDGET_HOURS,
     DEFAULT_STALL_DAYS,
     SEVERITY_RANK,
     listMitigations,
+    mergeRevenueReversals,
+    readRevenueReversals,
     runSilentFailureAudit
 } from '../src/resilience/silent-failure.mjs';
 import { probeCheckoutGate, resolveCheckoutGateUrl } from '../src/resilience/checkout-gate-probe.mjs';
@@ -81,6 +84,51 @@ function printPlan(result, json) {
     }
     if (result.triggered?.length) console.log(`  Redress actions triggered: ${result.triggered.join(', ')}`);
     if (result.written?.incident) console.log(`  Incident written: ${result.written.incident}`);
+}
+
+/**
+ * Reversals from both ledgers the system actually writes.
+ *
+ * Local `reversal_*.json` rows are the loop's own; production refunds,
+ * chargebacks and disputes land in Base44 through the webhook. Reading only
+ * the local ledger made the audit blind to the source most reversals come
+ * from. Base44 is read when credentials exist; when they do not, the local
+ * read still runs and the evidence says which source was missing, so a clean
+ * result is never mistaken for a complete one.
+ */
+async function collectRevenueReversals(root) {
+    const local = readRevenueReversals(root);
+    const missing = ['BASE44_APP_ID', 'BASE44_SERVICE_TOKEN'].filter(name => !process.env[name]);
+    if (missing.length) {
+        return mergeRevenueReversals([local], {
+            base44: { status: 'unavailable', reason: 'missing_base44_credentials', missing }
+        });
+    }
+    try {
+        const [{ buildBase44ServiceClient }, { getRevenueConfigFromEnv, readBase44RevenueReversals }] = await Promise.all([
+            import('../src/base44-client.mjs'),
+            import('../src/base44-revenue.mjs')
+        ]);
+        const since = new Date(Date.now() - DEFAULT_REVERSAL_WINDOW_DAYS * 86400000).toISOString();
+        const base44 = await readBase44RevenueReversals(
+            buildBase44ServiceClient(),
+            getRevenueConfigFromEnv(),
+            { since }
+        );
+        return mergeRevenueReversals([base44, local], {
+            base44: {
+                status: 'ok',
+                since,
+                scanned: base44.scanned,
+                reversals: base44.records.length,
+                truncated: base44.truncated
+            }
+        });
+    } catch (error) {
+        return mergeRevenueReversals([local], {
+            base44: { status: 'error', error: error.message }
+        });
+    }
 }
 
 function buildEngine(flags) {
@@ -256,6 +304,7 @@ async function main() {
                 }
             }
         }
+        const reversals = await collectRevenueReversals(flags.root || process.cwd());
         const result = runSilentFailureAudit({
             root: flags.root || process.cwd(),
             maxSilenceMin: Number(flags['max-silence-min'] || DEFAULT_MAX_SILENCE_MIN),
@@ -266,7 +315,8 @@ async function main() {
             paypalReconciliation,
             storefrontProbe,
             shopifyPriceDrift,
-            checkoutGate
+            checkoutGate,
+            reversals
         });
         printPlan(result, json);
         if (failOn !== 'none' && result.findings.some(finding => SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[failOn])) {

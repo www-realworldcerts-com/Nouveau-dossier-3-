@@ -208,6 +208,7 @@ async function listRevenueRows(entity, cfg, { pageSize = 250, maxRows = 5000 } =
     cfg.fieldMap.currency,
     cfg.fieldMap.occurredAt,
     cfg.fieldMap.externalId,
+    cfg.fieldMap.status,
     cfg.fieldMap.metadata
   ].filter(Boolean);
   const rows = [];
@@ -324,6 +325,70 @@ export async function createBase44RevenueReversal(base44, cfg, reversal, { pageS
     reversal_event_id: reversalEventId,
     capture_event_id: captureEventId,
     revenue_event_id: written?.id ?? null
+  };
+}
+
+/**
+ * Reversal rows as they exist in the production ledger.
+ *
+ * `createBase44RevenueReversal` writes a negative row whose metadata names the
+ * capture (`reversal_of`) and the reversal kind (`reversal_type`), while its
+ * own `status` column says `VERIFIED` because the capture id is provider
+ * evidence. The silent-failure audit reads reversals in the ledger-file shape,
+ * where `status` is the reversal kind (`refunded`, `reversed`, `disputed`), so
+ * this reader normalises at the boundary instead of teaching the audit two
+ * record shapes.
+ *
+ * Only rows whose metadata names a capture are reversals; every other revenue
+ * row is skipped. `since` bounds the scan to the audit window; `truncated`
+ * says the scan hit its row cap and the audit cannot claim it saw everything.
+ */
+export async function readBase44RevenueReversals(base44, cfg, { pageSize, maxRows, since = null } = {}) {
+  if (!base44) throw new Error("Base44 client not configured (missing BASE44_APP_ID / BASE44_SERVICE_TOKEN)");
+
+  const entity = base44.asServiceRole.entities[cfg.entityName];
+  const { rows, truncated } = await listRevenueRows(entity, cfg, { pageSize, maxRows });
+  const metadataField = cfg.fieldMap.metadata;
+  const sinceMs = since ? Date.parse(since) : NaN;
+  const records = [];
+
+  for (const row of rows) {
+    const meta = (metadataField ? row?.[metadataField] : null) ?? {};
+    const captureId = String(meta.reversal_of ?? "").trim();
+    if (!captureId) continue;
+
+    const occurredAt = row?.[cfg.fieldMap.occurredAt] ?? row?.created_date ?? null;
+    const occurredMs = Date.parse(occurredAt || "");
+    if (Number.isFinite(sinceMs) && Number.isFinite(occurredMs) && occurredMs < sinceMs) continue;
+
+    const amount = Number(row?.[cfg.fieldMap.amount]);
+    const reversalType = String(meta.reversal_type ?? "").trim().toLowerCase() || null;
+    records.push({
+      file: `base44:${row?.id ?? captureId}`,
+      source: "base44",
+      record: {
+        event_id: row?.[cfg.fieldMap.externalId] ?? null,
+        amount: Number.isFinite(amount) ? amount : null,
+        currency: String(row?.[cfg.fieldMap.currency] ?? "").toUpperCase() || null,
+        occurred_at: occurredAt,
+        // The audit reads `status` as the reversal kind; the ledger's own
+        // column is kept beside it rather than overwritten.
+        status: reversalType || "reversal",
+        ledger_status: row?.[cfg.fieldMap.status] ?? null,
+        reversal_of: captureId,
+        reversal_type: reversalType,
+        ...(meta.paypal_refund_id ? { paypal_refund_id: meta.paypal_refund_id } : {}),
+        ...(meta.paypal_dispute_id ? { paypal_dispute_id: meta.paypal_dispute_id } : {}),
+        base44_record_id: row?.id ?? null
+      }
+    });
+  }
+
+  return {
+    directory: `base44:${cfg.entityName}`,
+    records,
+    scanned: rows.length,
+    truncated
   };
 }
 

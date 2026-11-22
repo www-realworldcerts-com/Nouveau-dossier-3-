@@ -24,6 +24,7 @@ import {
 } from "./base44-revenue.mjs";
 import { maybeSendAlert } from "./alerts.mjs";
 import { createDedupeStore } from "./dedupe-store.mjs";
+import { recordSettlementBlock, recordSettlementSettled } from "./resilience/settlement-blocks.mjs";
 import {
   identifiersFromPayPalEvent,
   recordVerifiedWebhook,
@@ -1242,7 +1243,9 @@ async function applyPayoutBatchUpdate(base44, update) {
   return { ok: true, updated: true, batchId: batch?.[payoutBatchCfg.fieldMap.batchId] ?? null, id: updated?.id ?? batch.id };
 }
 
-async function applyPayoutItemUpdate(base44, update) {
+// Exported so the settlement-log wiring can be exercised without binding a
+// port or verifying a webhook signature.
+export async function applyPayoutItemUpdate(base44, update) {
   const payoutItemCfg = getPayoutItemConfigFromEnv();
   const payoutBatchCfg = getPayoutBatchConfigFromEnv();
   const txCfg = getTransactionLogConfigFromEnv();
@@ -1359,6 +1362,30 @@ async function applyPayoutItemUpdate(base44, update) {
           `but revenue ${revenueEventId} was not marked paid_out: ${revenueSettlement.reason}` +
           `${revenueSettlement.error ? ` (${revenueSettlement.error})` : ""}\n`
       );
+      // stderr is not read on a serverless host. Append the refusal where the
+      // silent-failure audit looks, so a payout that succeeded while its
+      // revenue row stayed unpaid is an incident until a later settlement of
+      // the same row appends a closing line.
+      const blockLog = recordSettlementBlock(process.cwd(), {
+        revenue_event_id: revenueEventId,
+        psp_transaction_id: update.paypalTxnId,
+        reason: revenueSettlement.reason,
+        error: revenueSettlement.error ?? null,
+        webhook_event_id: update.webhookEventId ?? null
+      });
+      // On a read-only filesystem the block cannot be recorded, and a finding
+      // that is itself silent is the failure this log exists to end.
+      if (!blockLog.recorded) {
+        process.stderr.write(
+          `FINDING REVENUE_SETTLEMENT_LOG_UNWRITTEN [warning] the refusal for revenue ${String(revenueEventId)} ` +
+            `could not be recorded (${blockLog.reason ?? blockLog.error})\n`
+        );
+      }
+    } else {
+      recordSettlementSettled(process.cwd(), {
+        revenue_event_id: revenueEventId,
+        psp_transaction_id: update.paypalTxnId
+      });
     }
   }
 

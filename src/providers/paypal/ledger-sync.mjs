@@ -5,6 +5,7 @@ import { proveMoneyMoved } from "../../proofs/prove-money-moved.mjs";
 import { EvidenceIntegrityChain } from "../../real/evidence-integrity.mjs";
 import { MoneyMovedGate } from "../../real/money-moved-gate.mjs";
 import { OWNER_ACCOUNTS } from "../../owner-directive.mjs";
+import { recordSettlementSettled } from "../../resilience/settlement-blocks.mjs";
 
 async function findOneBy(entity, filter) {
   const res = await entity.filter(filter, "-created_date", 1, 0);
@@ -221,6 +222,12 @@ export async function syncPayPalBatchToLedger(base44, { batchId, paypalBatchId, 
                }
                
                await revEntity.update(revId, updatePayload);
+               if (revStatus === "paid_out") {
+                 // This is the other path that settles revenue. Without a
+                 // closing line here, a block the webhook wrote for this row
+                 // would stay open forever after the batch sync fixed it.
+                 recordSettlementSettled(process.cwd(), { revenue_event_id: revId });
+               }
              }
           }
         }

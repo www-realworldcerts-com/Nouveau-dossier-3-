@@ -16,34 +16,22 @@
 
 import { createPayPalPayoutBatch } from "../src/paypal-api.mjs";
 import { ALLOWED_BENEFICIARIES } from "../src/policy/RecipientRegistry.mjs";
+import { readArgs } from "./lib/cli-args.mjs";
 
 const MAX_AMOUNT = 100000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// PayPal's payout batch statuses. Only these mean the batch was taken for
+// processing; anything else (FAILED, BLOCKED, a missing status) is not a
+// submission, however successful the HTTP response looked.
+const ACCEPTED_BATCH_STATUSES = new Set(["PENDING", "PROCESSING", "SUCCESS"]);
+const UNPROCESSED_BATCH_STATUSES = new Set(["DENIED", "CANCELED", "CANCELLED"]);
+
+const LIVE_PAYPAL_API = "https://api-m.paypal.com";
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
 function truthyFlag(name) {
   return String(process.env[name] ?? "").trim().toLowerCase() === "true";
-}
-
-function readArgs(argv) {
-  const args = {};
-  for (let i = 0; i < argv.length; i++) {
-    const token = argv[i];
-    if (!token.startsWith("--")) continue;
-    const eq = token.indexOf("=");
-    if (eq !== -1) {
-      args[token.slice(2, eq)] = token.slice(eq + 1);
-      continue;
-    }
-    const key = token.slice(2);
-    const next = argv[i + 1];
-    if (next == null || next.startsWith("--")) {
-      args[key] = true;
-      continue;
-    }
-    args[key] = next;
-    i++;
-  }
-  return args;
 }
 
 function print(payload) {
@@ -79,8 +67,23 @@ function refuseNoCredentials(missing) {
   });
 }
 
-function invalidArguments(error) {
-  refuse({ code: "INVALID_ARGUMENTS", error });
+function payoutBaseUrl() {
+  const raw = String(process.env.PAYPAL_API_BASE_URL ?? "").trim();
+  return raw ? raw.replace(/\/+$/, "") : LIVE_PAYPAL_API;
+}
+
+// Loopback is the only non-live endpoint this script will talk to, so the
+// tests can run against a stub. Anything else is a sandbox or a
+// misconfiguration, and a payout against it would look successful on the
+// workflow summary while moving no real money.
+function isLoopbackEndpoint(url) {
+  try {
+    const parsed = new URL(url);
+    const httpish = parsed.protocol === "http:" || parsed.protocol === "https:";
+    return httpish && LOOPBACK_HOSTS.has(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function parseAmount(raw) {
@@ -104,19 +107,26 @@ async function main() {
 
   const amount = parseAmount(args.amount);
   if (amount == null) {
-    invalidArguments(
-      `--amount must be a number greater than 0 and at most ${MAX_AMOUNT} (got ${JSON.stringify(args.amount ?? null)}).`
-    );
+    refuse({
+      code: "INVALID_ARGUMENTS",
+      error: `--amount must be a number greater than 0 and at most ${MAX_AMOUNT} (got ${JSON.stringify(args.amount ?? null)}).`
+    });
   }
 
   const currency = String(args.currency ?? "").trim().toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) {
-    invalidArguments(`--currency must be a 3-letter ISO code (got ${JSON.stringify(args.currency ?? null)}).`);
+    refuse({
+      code: "INVALID_ARGUMENTS",
+      error: `--currency must be a 3-letter ISO code (got ${JSON.stringify(args.currency ?? null)}).`
+    });
   }
 
   const email = String(args.email ?? "").trim();
   if (!EMAIL_RE.test(email)) {
-    invalidArguments(`--email must be a valid email address (got ${JSON.stringify(args.email ?? null)}).`);
+    refuse({
+      code: "INVALID_ARGUMENTS",
+      error: `--email must be a valid email address (got ${JSON.stringify(args.email ?? null)}).`
+    });
   }
 
   // Owner-only settlement: a free-text recipient from the dispatch form must
@@ -131,7 +141,7 @@ async function main() {
 
   const note = String(args.note ?? "").trim();
   if (note.length > 400) {
-    invalidArguments("--note must be 400 characters or fewer.");
+    refuse({ code: "INVALID_ARGUMENTS", error: "--note must be 400 characters or fewer." });
   }
 
   if (args.confirm !== true) {
@@ -158,6 +168,15 @@ async function main() {
       code: "PAYPAL_PPP2_DISABLED",
       error:
         "PAYPAL_PPP2_APPROVED and PAYPAL_PPP2_ENABLE_SEND must both be true before PayPal Payouts may send money."
+    });
+  }
+
+  const baseUrl = payoutBaseUrl();
+  const paypalMode = String(process.env.PAYPAL_MODE ?? "live").trim().toLowerCase();
+  if (!isLoopbackEndpoint(baseUrl) && (baseUrl !== LIVE_PAYPAL_API || paypalMode === "sandbox")) {
+    refuse({
+      code: "PAYPAL_NOT_LIVE",
+      error: `Refusing to pay out against ${baseUrl} (PAYPAL_MODE=${paypalMode}): owner payouts must use the live PayPal API ${LIVE_PAYPAL_API}.`
     });
   }
 
@@ -195,9 +214,9 @@ async function main() {
         }
       }
     });
-    return;
   }
 
+  // print() exits, so the request-failure branch above ends the run here.
   const header = batch?.batch_header ?? {};
   const batchId = header.payout_batch_id ?? batch?.payout_batch_id ?? null;
   const paypalStatus = String(header.batch_status ?? batch?.batch_status ?? "").toUpperCase();
@@ -212,15 +231,32 @@ async function main() {
         }
       }
     });
-    return;
   }
 
-  if (paypalStatus === "DENIED" || paypalStatus === "CANCELED" || paypalStatus === "CANCELLED") {
+  if (UNPROCESSED_BATCH_STATUSES.has(paypalStatus)) {
+    // DENIED/CANCELED mean PayPal rejected the batch before processing it.
     refuse({
       code: "PAYPAL_BATCH_NOT_ACCEPTED",
       error: `PayPal refused the batch (${paypalStatus}); no funds left the account.`
     });
-    return;
+  }
+
+  if (!ACCEPTED_BATCH_STATUSES.has(paypalStatus)) {
+    // A status we do not recognise is not proof that nothing was sent, so this
+    // branch deliberately omits no_funds_moved (refuse() would add it): the
+    // checker then says the outcome is unknown and asks for a PayPal check
+    // before any retry, instead of inviting a second payment.
+    print({
+      ok: false,
+      result: {
+        payout: {
+          code: "PAYPAL_BATCH_NOT_ACCEPTED",
+          status: "UNKNOWN",
+          paypal_status: paypalStatus || "MISSING",
+          error: `PayPal did not accept the batch (status ${paypalStatus || "missing"}); treat the payout as unconfirmed and check PayPal before retrying.`
+        }
+      }
+    });
   }
 
   print({

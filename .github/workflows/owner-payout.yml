@@ -44,7 +44,7 @@ jobs:
   payout:
     name: Send one PayPal payout
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment: payouts
 
     steps:
@@ -67,6 +67,11 @@ jobs:
           PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
           PAYPAL_CLIENT_SECRET: ${{ secrets.PAYPAL_CLIENT_SECRET }}
           PAYPAL_MODE: ${{ vars.PAYPAL_MODE || 'live' }}
+          # The token layer refuses a sandbox endpoint only when live mode is
+          # declared; without these, a sandbox base URL would pay out for real
+          # money's worth of nothing.
+          SWARM_LIVE: 'true'
+          NO_PLATFORM_WALLET: 'true'
           PAYPAL_DISABLED: ${{ vars.PAYPAL_DISABLED || 'false' }}
           PAYPAL_PPP2_APPROVED: ${{ vars.PAYPAL_PPP2_APPROVED || 'false' }}
           PAYPAL_PPP2_ENABLE_SEND: ${{ vars.PAYPAL_PPP2_ENABLE_SEND || 'false' }}
@@ -86,11 +91,30 @@ jobs:
           cat out.json
           node ./scripts/check-owner-payout-result.mjs < out.json
 
+      - name: Confirm the batch with PayPal
+        env:
+          PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
+          PAYPAL_CLIENT_SECRET: ${{ secrets.PAYPAL_CLIENT_SECRET }}
+          PAYPAL_MODE: ${{ vars.PAYPAL_MODE || 'live' }}
+        run: |
+          set -euo pipefail
+          # A submitted batch is not a settled one. Poll PayPal's batch details
+          # so FAILED, UNCLAIMED or still-processing items fail this run instead
+          # of leaving a green summary and a 90-day artifact nobody reads.
+          set +e
+          node ./scripts/confirm-owner-payout.mjs --from-result out.json \
+            --wait-seconds 180 --interval-seconds 10 > confirmation.json
+          status=$?
+          cat confirmation.json
+          exit "$status"
+
       - name: Keep the payout result
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: owner-payout-result
-          path: out.json
+          path: |
+            out.json
+            confirmation.json
           if-no-files-found: warn
           retention-days: 90

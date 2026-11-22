@@ -46,7 +46,7 @@
     "test:procurement": "node --test test/procurement.test.mjs test/procurement-import.test.mjs",
     "test:contentieux": "node --test test/contentieux.test.mjs",
     "test:attijari": "node --test test/attijari-csv.test.mjs",
-    "test:payouts": "node --test test/attijari-csv.test.mjs test/payout-ledger.test.mjs test/payout-statements.test.mjs scripts/check-owner-payout-result.test.mjs",
+    "test:payouts": "node --test test/attijari-csv.test.mjs test/payout-ledger.test.mjs test/payout-statements.test.mjs scripts/check-owner-payout-result.test.mjs scripts/payout-paypal-once.test.mjs scripts/confirm-owner-payout.test.mjs",
     "test:resilience": "node --test test/redress.test.mjs test/silent-failure.test.mjs test/storefront-probe.test.mjs test/settlement-block-log.test.mjs test/base44-reversal-audit.test.mjs",
     "test:reconcile": "node --test test/paypal-reconciliation.test.mjs test/paypal-api.test.mjs",
     "test:money": "node --test test/revenue-verification.test.mjs test/revenue-quarantine.test.mjs test/revenue-reversal.test.mjs test/base44-reversal.test.mjs test/paypal-webhook-reversal-dispatch.test.mjs test/base44RevenueIdempotent.test.mjs test/base44Earning.test.mjs test/revenue-settlement-gate.test.mjs test/payout-item-settlement-log.test.mjs test/earning-creation-guard.test.mjs test/capture-reconciliation.test.mjs test/settlement-prepay.test.mjs test/webhook-fulfillment.test.mjs test/fulfillment-drain.test.mjs test/checkout-durability-gate.test.mjs",

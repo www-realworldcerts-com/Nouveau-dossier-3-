@@ -139,6 +139,19 @@ export const FINDING_CATALOG = {
         owner_action: 'Fulfil or refund the oldest pending orders.',
         sla_hours: 48
     },
+    FULFILLMENT_QUEUE_STALLED: {
+        domain: 'fulfillment',
+        severity: 'high',
+        title: 'Fulfillment queue stopped advancing',
+        impact: 'Orders are still owed delivery, but no attempt, retry or delivery line has been written for longer than the stall window. The drain is not running, is stuck, or keeps skipping the order without recording an attempt, so the queue looks merely old while nothing will move it.',
+        containment: 'Treat the drain as down: do not report fulfilment as healthy or the pending orders as progressing, and stop promising delivery dates until it advances again.',
+        obligation: 'Restore a drain that appends a queue line for every attempt, and deliver or refund every order still pending.',
+        remedy: 'Check that the supervisor/tick runs the fulfilment drain (it drains before the audit) and read its output for the failing step; fix the cause, run `npm run fulfillment:drain -- --apply`, and confirm each order\'s latest queue line moves.',
+        mitigation: 'Every drain attempt appends a queue line with attempt bookkeeping, and every audit compares each undelivered order\'s latest line against the stall window.',
+        verification: 'No undelivered order outside the pending-delivery backlog has its latest queue line older than the stall window.',
+        owner_action: 'Check the drain output and whether the loop is running it, then rerun the drain and confirm the queue advances.',
+        sla_hours: 24
+    },
     FULFILLMENT_DELIVERY_EXHAUSTED: {
         domain: 'fulfillment',
         severity: 'critical',
@@ -713,6 +726,47 @@ export function detectSilentFailures({
         });
     }
 
+    // A running drain appends a queue line for every attempt it makes — success,
+    // failure or the next retry time — so an undelivered order whose latest line
+    // is older than the stall window has nothing advancing it: the drain is not
+    // running, is stuck, or keeps skipping the order without recording why (an
+    // order PayPal no longer reports as captured takes no line at all).
+    // `PENDING_DELIVERY` is FULFILLMENT_BACKLOG's finding — it is reported there
+    // by the same age — so it is excluded here to keep the two disjoint. Terminal
+    // lines are excluded because they are already done.
+    const terminalStatuses = ['DELIVERED', 'DELIVERY_EXHAUSTED'];
+    const stalledQueue = latest
+        .filter(entry => {
+            const status = String(entry.status || '').toUpperCase();
+            return !terminalStatuses.includes(status) && status !== 'PENDING_DELIVERY';
+        })
+        .map(entry => {
+            const time = Date.parse(entry.timestamp || '');
+            // Every writer stamps an ISO timestamp, so a line that cannot be
+            // aged is a corrupt append, not proof the queue stopped advancing.
+            if (!Number.isFinite(time)) return null;
+            const days = (at.getTime() - time) / 86400000;
+            return {
+                order_id: String(entry.order_id),
+                status: entry.status || null,
+                attempts: Number(entry.drain?.attempts) || 0,
+                last_line_at: entry.timestamp,
+                stalled_days: round(days),
+                next_attempt_at: entry.drain?.next_attempt_at || null,
+                days
+            };
+        })
+        .filter(entry => entry && entry.days >= stallDays)
+        .map(({ days, ...entry }) => entry);
+    if (stalledQueue.length) {
+        const oldest = Math.max(...stalledQueue.map(order => order.stalled_days));
+        add('FULFILLMENT_QUEUE_STALLED', `${stalledQueue.length} undelivered order(s) have had no queue line for at least ${stallDays} days (oldest ${oldest}) — nothing is advancing ${stalledQueue.map(order => order.order_id).join(', ')}.`, {
+            stalled_count: stalledQueue.length,
+            stall_window_days: stallDays,
+            orders: stalledQueue
+        });
+    }
+
     // The drain stops retrying an order after its attempt cap and records
     // DELIVERY_EXHAUSTED as the queue's latest line. Detect it from the same
     // latest-line view so a dead paid order becomes an incident finding, and a
@@ -897,7 +951,8 @@ export function detectSilentFailures({
             fulfillment: {
                 pending: pending.length,
                 oldest_days: round(oldestPending),
-                delivery_exhausted: exhausted.length
+                delivery_exhausted: exhausted.length,
+                queue_stalled: stalledQueue.length
             },
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
@@ -977,6 +1032,7 @@ export function buildRedressPlan(findings, { now = new Date(), evidence = {}, re
                 contentieux_cases: evidence.procurement?.contentieux?.cases || 0,
                 pending_fulfillments: evidence.fulfillment?.pending || 0,
                 exhausted_fulfillments: evidence.fulfillment?.delivery_exhausted || 0,
+                stalled_fulfillments: evidence.fulfillment?.queue_stalled || 0,
                 revenue_stalled_days: evidence.revenue?.stalled_days ?? null,
                 swallowed_exceptions: evidence.silent_catches?.count || 0
             },

@@ -37,6 +37,7 @@ owner authorization and is never inferred by the swarm.
 | `PROCUREMENT_DELIVERY_STALL` | high | POs placed/shipped longer than the stall window |
 | `DELIVERY_UNVERIFIED` | medium | Delivered/on-hold POs without completed verification |
 | `FULFILLMENT_BACKLOG` | high | Orders whose latest queue line is `PENDING_DELIVERY`, older than the stall window |
+| `FULFILLMENT_QUEUE_STALLED` | high | Drain-tracked orders (`PENDING_EMAIL` etc.) whose latest queue line has not moved for the stall window; an aged `PENDING_DELIVERY` order is the backlog row above |
 | `FULFILLMENT_DELIVERY_EXHAUSTED` | critical | The fulfilment drain recorded `DELIVERY_EXHAUSTED` as an order's latest queue line |
 | `SILENT_EXCEPTION_SWALLOW` | medium | Empty (or comment-only) `catch` blocks in `src/`, `scripts/` |
 | `AUDIT_BLINDSPOT` | medium | No audit entry for 7 days while heartbeats keep arriving |
@@ -169,6 +170,34 @@ state.
 npm run resilience -- audit --reconcile-paypal --fail-on high
 npm run reconcile:paypal -- --apply     # replay after reviewing the finding
 ```
+
+### Fulfilment queue that stops advancing
+
+The queue is append-only and the drain writes a line for every attempt it makes
+— a success (`DELIVERED`), a failure with `drain.attempts`/`drain.last_reason`,
+or the next `next_attempt_at`. So an undelivered order whose latest line has not
+moved for the stall window (`--stall-days`, default 7) is not merely slow:
+nothing is advancing it, and no later tick will. `FULFILLMENT_QUEUE_STALLED`
+(high) reports those orders with their last status, their recorded attempt
+count, when the queue last advanced, and the retry time the drain promised.
+
+The two fulfilment findings are disjoint. `FULFILLMENT_BACKLOG` owns orders
+whose latest line is `PENDING_DELIVERY` and older than the window;
+`FULFILLMENT_QUEUE_STALLED` covers the states that only the drain writes —
+`PENDING_EMAIL`, `PENDING_ACCESS_SECRET` and any other non-terminal line — so an
+order raises one finding, not both. Backlog says a buyer has waited too long;
+stalled says a delivery the drain already took on has had no attempt, retry or
+outcome since. Terminal lines (`DELIVERED`, `DELIVERY_EXHAUSTED`) are excluded —
+they are done, and an exhausted order is already
+`FULFILLMENT_DELIVERY_EXHAUSTED`. A retry line younger than the stall window
+clears the stall finding on the next audit.
+
+The drain writes no line for an order PayPal no longer reports as captured: it
+re-checks it every tick and skips it as `not_paid`. Such an order keeps aging
+and eventually trips this finding too, which is the intended signal — its queue
+line still needs a manual `DELIVERED` line or a recorded refund. A queue line
+without a parsable timestamp cannot be aged and is ignored rather than reported
+as stalled forever.
 
 ## Redress: what "full" means here
 

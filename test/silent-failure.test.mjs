@@ -158,12 +158,13 @@ test('recorded but unverified deliveries are flagged', () => {
     assert.ok(codes(findings).includes('DELIVERY_UNVERIFIED'));
 });
 
-test('aged pending customer fulfillments are flagged', () => {
+test('aged pending customer fulfillments are a backlog finding, not a stall', () => {
     const queue = [{ timestamp: new Date(NOW.getTime() - 9 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'o1' }];
     const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: queue }) });
     const backlog = findings.find(finding => finding.code === 'FULFILLMENT_BACKLOG');
     assert.ok(backlog);
     assert.equal(backlog.evidence.pending_count, 1);
+    assert.ok(!codes(findings).includes('FULFILLMENT_QUEUE_STALLED'), 'the same aged order must not raise both findings');
 });
 
 test('backlog counts only orders whose latest line is still pending', () => {
@@ -185,6 +186,62 @@ test('backlog counts only orders whose latest line is still pending', () => {
 
     const exhausted = findings.find(finding => finding.code === 'FULFILLMENT_DELIVERY_EXHAUSTED');
     assert.deepEqual(exhausted.evidence.orders.map(order => order.order_id), ['exhausted-later']);
+});
+
+test('a queue that stops advancing is a stalled-drain finding', () => {
+    const queue = [
+        { timestamp: new Date(NOW.getTime() - 30 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'stuck' },
+        // The last line the drain wrote: an attempt failed and nothing followed.
+        { timestamp: new Date(NOW.getTime() - 9 * DAY).toISOString(), status: 'PENDING_EMAIL', order_id: 'stuck' },
+        { timestamp: new Date(NOW.getTime() - 30 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'moving' },
+        { timestamp: new Date(NOW.getTime() - 3600000).toISOString(), status: 'PENDING_EMAIL', order_id: 'moving' }
+    ];
+    const { findings, evidence } = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: queue }) });
+
+    const stalled = findings.find(finding => finding.code === 'FULFILLMENT_QUEUE_STALLED');
+    assert.ok(stalled, 'an abandoned drain-tracked order is reported even when backlog does not cover it');
+    assert.equal(stalled.severity, 'high');
+    assert.equal(stalled.evidence.stalled_count, 1);
+    assert.equal(stalled.evidence.orders[0].order_id, 'stuck');
+    assert.equal(stalled.evidence.orders[0].status, 'PENDING_EMAIL');
+    assert.equal(stalled.evidence.orders[0].stalled_days, 9);
+    assert.match(stalled.detail, /stuck/);
+    assert.equal(evidence.fulfillment.queue_stalled, 1);
+    // 'moving' still has a fresh line, so its 30-day-old PENDING_DELIVERY line
+    // is neither a backlog nor a stall.
+    assert.ok(!codes(findings).includes('FULFILLMENT_BACKLOG'));
+});
+
+test('a retry inside the stall window means the queue is still advancing', () => {
+    const queue = [
+        { timestamp: new Date(NOW.getTime() - 20 * DAY).toISOString(), status: 'PENDING_DELIVERY', order_id: 'ORDER-11' },
+        {
+            timestamp: new Date(NOW.getTime() - 2 * 3600000).toISOString(),
+            status: 'PENDING_EMAIL',
+            order_id: 'ORDER-11',
+            drain: { attempts: 2, last_reason: 'resend_timeout', next_attempt_at: new Date(NOW.getTime() + 13 * 60000).toISOString() }
+        }
+    ];
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: queue }) });
+    assert.ok(!codes(findings).includes('FULFILLMENT_QUEUE_STALLED'));
+});
+
+test('a queue line without a timestamp cannot be called stalled', () => {
+    // Every writer stamps an ISO timestamp, so an undated line is a corrupt
+    // append: it cannot be aged, and must not report a stall forever.
+    const queue = [{ status: 'PENDING_EMAIL', order_id: 'undated' }];
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: queue }) });
+    assert.ok(!codes(findings).includes('FULFILLMENT_QUEUE_STALLED'));
+});
+
+test('delivered and exhausted orders are not a stalled queue', () => {
+    const queue = [
+        { timestamp: new Date(NOW.getTime() - 20 * DAY).toISOString(), status: 'DELIVERED', order_id: 'done' },
+        { timestamp: new Date(NOW.getTime() - 20 * DAY).toISOString(), status: 'DELIVERY_EXHAUSTED', order_id: 'dead' }
+    ];
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ fulfillment: queue }) });
+    assert.ok(!codes(findings).includes('FULFILLMENT_QUEUE_STALLED'));
+    assert.ok(codes(findings).includes('FULFILLMENT_DELIVERY_EXHAUSTED'));
 });
 
 test('an order the drain exhausted becomes a recorded silent-failure finding', () => {

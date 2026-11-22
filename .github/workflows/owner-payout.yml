@@ -72,7 +72,9 @@ jobs:
           PAYPAL_PPP2_ENABLE_SEND: ${{ vars.PAYPAL_PPP2_ENABLE_SEND || 'false' }}
         run: |
           set -euo pipefail
-          if [ "$INPUT_RAIL" != "paypal" ]; then
+          # inputs.rail defaults to paypal, but a workflow_call or API payload
+          # could leave the mapping empty; an empty rail must still mean paypal.
+          if [ "${INPUT_RAIL:-paypal}" != "paypal" ]; then
             echo "::error::Only the PayPal rail is supported by this workflow; no payout was attempted."
             exit 1
           fi

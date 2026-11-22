@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { demoteUnverifiedStatus, verifyRevenueEvent, RevenueNotProviderVerifiedError } from "./real/revenue-verification.mjs";
+import { EvidenceIntegrityChain } from "./real/evidence-integrity.mjs";
+import { MoneyMovedGate } from "./real/money-moved-gate.mjs";
 import { reversalWithoutCaptureFinding } from "./real/ledger/reversals.mjs";
 import { computeConstitutionHash } from "./policy/constitution.mjs";
 import { getConstitutionState, computeConstitutionHashFromFile } from "./bootstrap/constitution-validator.mjs";
@@ -348,4 +350,108 @@ export async function createBase44RevenueEventIdempotent(base44, cfg, event, { d
     if (racedId) return { id: racedId, deduped: true };
     throw err;
   }
+}
+
+/** A revenue row by its ledger id, or null. */
+async function findRevenueRowById(entity, revenueEventId) {
+  const rows = await entity.filter({ id: revenueEventId }, "-created_date", 1, 0);
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+/**
+ * The settlement gate for one Base44 revenue row.
+ *
+ * Writing `paid_out` is the claim that money left the account, so it may only
+ * land after `MoneyMovedGate` approves the row. The deployed PayPal webhook
+ * handler used to write that status straight through while the script-side
+ * `ledger-sync.mjs` gated the same transition; both paths run this now.
+ *
+ * The proof is the row's **own** provider evidence, never the payout id that
+ * happens to be completing: otherwise any real transfer could settle a row
+ * whose money was invented. A row with no provider transaction id is refused,
+ * as is a provider id no verified webhook named.
+ *
+ * Never throws. The caller must write nothing when `ok` is false and report
+ * `reason` instead of letting the settlement disappear.
+ */
+export async function authorizeRevenueSettlement(base44, cfg, options = {}) {
+  try {
+    return await decideRevenueSettlement(base44, cfg, options);
+  } catch (err) {
+    // A throw here would 500 a payout webhook PayPal has already marked as
+    // succeeded, so the refusal is reported like every other one.
+    return { ok: false, reason: "gate_error", error: String(err?.message ?? err) };
+  }
+}
+
+/** The decision itself. The exported wrapper is what guarantees no throwing. */
+async function decideRevenueSettlement(base44, cfg, { revenueEventId } = {}) {
+  const id = String(revenueEventId ?? "").trim();
+  if (!id) return { ok: false, reason: "revenue_event_id_missing" };
+  if (!base44) return { ok: false, reason: "base44_not_configured" };
+
+  const entity = base44.asServiceRole.entities[cfg.entityName];
+  const row = await findRevenueRowById(entity, id).catch(() => null);
+  if (!row) return { ok: false, reason: "revenue_event_not_found" };
+
+  const metadataField = cfg.fieldMap.metadata;
+  const metadata = (metadataField ? row[metadataField] : null) ?? {};
+  const verification = verifyRevenueEvent({
+    metadata,
+    verification_proof: metadata?.verification_proof ?? row.verification_proof
+  });
+  if (!verification.verified) {
+    return {
+      ok: false,
+      reason: verification.reason,
+      psp_id: verification.psp_id ?? null,
+      detail: "the revenue row carries no provider transaction id, so it cannot be settled"
+    };
+  }
+
+  const amount = Number(row[cfg.fieldMap.amount]);
+  const proof = {
+    type: "psp_transaction_id",
+    psp_id: verification.psp_id,
+    amount: Number.isFinite(amount) ? amount : 0,
+    currency: String(row[cfg.fieldMap.currency] ?? cfg.defaultCurrency ?? "").toUpperCase(),
+    timestamp: row[cfg.fieldMap.occurredAt] ?? new Date().toISOString()
+  };
+
+  const gateEvent = {
+    id,
+    amount: proof.amount,
+    currency: proof.currency,
+    occurredAt: proof.timestamp,
+    created_at: row.created_date ?? proof.timestamp,
+    metadata,
+    verification_proof: proof,
+    // The claim under test is the status this write is about to set; the row's
+    // evidence is what has to back it.
+    status: "paid_out",
+    settled: false
+  };
+
+  try {
+    // A row settled before the chain existed has no block yet; bind the proof
+    // we just verified so this settlement and later ones are chain-checked.
+    const block = await EvidenceIntegrityChain.fetchBlockForEvent(id).catch(() => null);
+    if (!block) await EvidenceIntegrityChain.addBlock(id, proof);
+    await MoneyMovedGate.assertMoneyMoved(gateEvent);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "gate_refused",
+      psp_id: verification.psp_id,
+      error: String(err?.message ?? err)
+    };
+  }
+
+  return {
+    ok: true,
+    reason: null,
+    provider: verification.provider,
+    psp_id: verification.psp_id,
+    evidence: verification.source
+  };
 }

@@ -17,6 +17,7 @@ import { OwnerSettlementEnforcer } from "./policy/owner-settlement.mjs";
 import { mapPayPalWebhookToRevenueEvent } from "./paypal-event-mapper.mjs";
 import { dispatchVerifiedPayPalReversal } from "./real/ledger/reversal-dispatch.mjs";
 import {
+  authorizeRevenueSettlement,
   createBase44RevenueEventIdempotent,
   createBase44RevenueReversal,
   getRevenueConfigFromEnv
@@ -1329,11 +1330,36 @@ async function applyPayoutItemUpdate(base44, update) {
   }
 
   let revenueUpdated = false;
+  let revenueSettlement = null;
   if (update.status === "success" && revenueEventId && revenueCfg.fieldMap.status && update.paypalTxnId) {
-    const revPatch = { [revenueCfg.fieldMap.status]: "paid_out" };
-    if (revenueCfg.fieldMap.payoutBatchId && batchId) revPatch[revenueCfg.fieldMap.payoutBatchId] = batchId;
-    await revenueEntity.update(revenueEventId, revPatch).catch(() => null);
-    revenueUpdated = true;
+    // Settlement is a one-way claim. The gate runs here for the same reason
+    // `ledger-sync.mjs` runs it on the script path: a paid_out row is money the
+    // ledger says left the account, so it may not be written on an unproven row.
+    revenueSettlement = await authorizeRevenueSettlement(base44, revenueCfg, { revenueEventId });
+
+    if (revenueSettlement.ok) {
+      const revPatch = { [revenueCfg.fieldMap.status]: "paid_out" };
+      if (revenueCfg.fieldMap.payoutBatchId && batchId) revPatch[revenueCfg.fieldMap.payoutBatchId] = batchId;
+      try {
+        await revenueEntity.update(revenueEventId, revPatch);
+        revenueUpdated = true;
+      } catch (err) {
+        revenueSettlement = {
+          ...revenueSettlement,
+          ok: false,
+          reason: "revenue_update_failed",
+          error: truncate(err?.message ?? String(err), 200)
+        };
+      }
+    }
+
+    if (!revenueUpdated) {
+      process.stderr.write(
+        `FINDING REVENUE_SETTLEMENT_BLOCKED [critical] PayPal payout item ${String(update.paypalTxnId)} succeeded ` +
+          `but revenue ${revenueEventId} was not marked paid_out: ${revenueSettlement.reason}` +
+          `${revenueSettlement.error ? ` (${revenueSettlement.error})` : ""}\n`
+      );
+    }
   }
 
   let txCreatedId = null;
@@ -1419,6 +1445,7 @@ async function applyPayoutItemUpdate(base44, update) {
     payoutItemId: updatedItem?.id ?? item.id,
     payoutItemStatus: update.status,
     revenueUpdated,
+    revenueSettlement,
     txCreatedId,
     txDeduped,
     batchCompleted,

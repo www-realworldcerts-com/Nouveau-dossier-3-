@@ -868,6 +868,60 @@ test('an open or unreported checkout gate adds no finding', () => {
     assert.equal(unconfigured.evidence.checkout_gate, null);
 });
 
+test('a deployment that reports it cannot take a paid order is a critical finding', () => {
+    const checkoutGate = {
+        url: 'https://checkout.example/health',
+        status: 200,
+        reported: true,
+        blocks: false,
+        block_reason: null,
+        replay_protection: 'store',
+        money: { reported: true, can_take_paid_order: false, missing: ['PRICE_QUOTE_SECRET', 'RESEND_API_KEY'] },
+        error: null
+    };
+    const { findings } = detectSilentFailures({ now: NOW, ...cleanOptions({ checkoutGate }) });
+
+    const finding = findings.find(item => item.code === 'MONEY_READINESS_UNCONFIGURED');
+    assert.ok(finding);
+    assert.equal(finding.severity, 'critical');
+    assert.match(finding.detail, /can_take_paid_order=false/);
+    assert.match(finding.detail, /PRICE_QUOTE_SECRET, RESEND_API_KEY/);
+});
+
+test('a ready deployment, or one that does not report readiness, adds no finding', () => {
+    const ready = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({
+            checkoutGate: {
+                url: 'https://checkout.example/health',
+                status: 200,
+                reported: true,
+                blocks: false,
+                money: { reported: true, can_take_paid_order: true, missing: [] }
+            }
+        })
+    });
+    assert.equal(ready.findings.some(item => item.code === 'MONEY_READINESS_UNCONFIGURED'), false);
+
+    const unreported = detectSilentFailures({
+        now: NOW,
+        ...cleanOptions({
+            checkoutGate: {
+                url: 'https://checkout.example/health',
+                status: 200,
+                reported: true,
+                blocks: false,
+                money: { reported: false, can_take_paid_order: false, missing: [] }
+            }
+        })
+    });
+    assert.equal(
+        unreported.findings.some(item => item.code === 'MONEY_READINESS_UNCONFIGURED'),
+        false,
+        'a deployment that never reported readiness is not accused of being unready'
+    );
+});
+
 test('the CLI records a blocked checkout gate from CHECKOUT_HEALTH_URL', async (t) => {
     const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' });

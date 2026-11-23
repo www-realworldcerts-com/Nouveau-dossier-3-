@@ -350,6 +350,19 @@ export const FINDING_CATALOG = {
         owner_action: 'Fix the configuration named in block_reason, redeploy, then rerun the tick audit.',
         sla_hours: 4
     },
+    MONEY_READINESS_UNCONFIGURED: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'Deployed checkout cannot complete a paid order',
+        impact: 'The storefront answers and accepts a checkout, but the deployment itself reports it cannot quote, create, capture or deliver a paid order. A buyer can be charged and receive nothing, which is a chargeback and a refund rather than a sale.',
+        containment: 'Do not report the store as taking paid orders; treat every checkout as at risk until the deployment reports can_take_paid_order=true.',
+        obligation: 'Configure the missing quote, PayPal, fulfillment and Resend settings on the deployment itself, then prove the same deployment reports readiness.',
+        remedy: 'Set the variables named in `missing` (PRICE_QUOTE_SECRET, PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET, PAYPAL_ENABLE_ORDER_CREATE, FULFILLMENT_ACCESS_SECRET, RESEND_API_KEY), redeploy, then confirm /health returns money_readiness.ok=true.',
+        mitigation: 'The verdict is read from the deployment\'s own /health, so an audit runner without credentials cannot report the store as ready.',
+        verification: 'The deployed /health reports money_readiness.can_take_paid_order=true with an empty `missing` list, and the next audit reports no MONEY_READINESS_UNCONFIGURED finding.',
+        owner_action: 'Add the named credentials to the deployment, redeploy, then rerun the tick audit.',
+        sla_hours: 5
+    },
     SHOPIFY_PRICE_DRIFT: {
         domain: 'revenue',
         severity: 'high',
@@ -1102,6 +1115,19 @@ export function detectSilentFailures({
             status: checkoutGate.status,
             block_reason: checkoutGate.block_reason,
             replay_protection: checkoutGate.replay_protection
+        });
+    }
+
+    // The gate only says a checkout can be started. The deployment's own money
+    // readiness says whether a started checkout can ever be paid and delivered;
+    // an unreported verdict is not a failure, so an older deployment is not
+    // accused of something it never claimed.
+    if (checkoutGate?.money?.reported && checkoutGate.money.can_take_paid_order === false) {
+        const missing = Array.isArray(checkoutGate.money.missing) ? checkoutGate.money.missing : [];
+        add('MONEY_READINESS_UNCONFIGURED', `${checkoutGate.url} reports can_take_paid_order=false${missing.length ? ` (missing ${missing.join(', ')})` : ''}: a paid order cannot be quoted, created, captured or delivered.`, {
+            status: checkoutGate.status,
+            can_take_paid_order: false,
+            missing
         });
     }
 

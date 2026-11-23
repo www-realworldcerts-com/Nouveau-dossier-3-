@@ -1,6 +1,49 @@
 # Changelog
 
 ## 2026-11-23
+- `/health` now reports `money_readiness`: whether this deployment can quote,
+  create, capture and deliver a paid order, field by field
+  (`quote_key`, `order_create`, `capture`, `fulfillment`, `resend`) plus the
+  `missing` variable names and a single `can_take_paid_order` verdict. The
+  deployed probe reads it from the same response as the checkout gate, and the
+  silent-failure audit raises a `MONEY_READINESS_UNCONFIGURED` critical finding
+  when a deployment reports it cannot complete a paid order, so a store that
+  accepts a checkout it can never finish is an incident instead of a clean
+  audit. A deployment that does not report the block is treated as unreported,
+  not as unready, so an older build is not accused of something it never
+  claimed. The tick's `--deployed-checkout-gate` check fails the same way. It
+  is a presence check: only a live order proves PayPal accepts the credentials,
+  and no probe places one.
+
+## 2026-11-23
+- The paid-order path is now proven end to end on every pull request without
+  secrets or live money. `test/checkout-end-to-end.test.mjs` drives the real
+  serverless handler through quote, PayPal order create, capture, access email
+  and the `/access` link against two loopback stubs (`scripts/lib/http-stub.mjs`)
+  with fake credentials, and fails if anything fetches a host that is not the
+  stub, so a regression that reaches the real PayPal or sends real mail fails
+  the build instead of charging a card. Delivery is exercised by redirecting
+  Resend with `RESEND_API_BASE_URL` (defaults to the public endpoint), the same
+  way `PAYPAL_API_BASE_URL` already redirects PayPal.
+
+## 2026-11-23
+- Settlement daemon: the emergency stop now latches. It used to set a flag that
+  nothing read, so the interval kept cycling and `--once`/manual runs still paid;
+  a stopped process now refuses every later cycle, manual trigger and payout,
+  and only a restart clears it. Reversal rows (`amount <= 0`) are refused before
+  a batch is built instead of being paid as revenue. A CSV rail is an
+  instruction to a human, not money: events exported to the bank-wire/Payoneer
+  files are now `export_ready` with `settled: false` (previously `settled: true`
+  for rows that may never be uploaded), they no longer count toward the
+  settled total, and a provider settlement without a provider batch id leaves
+  the events unsettled. The batch id is now a hash of the sorted event ids
+  rather than `Date.now()`, so PayPal's 30-day `sender_batch_id` reuse rule
+  refuses a retry instead of the daemon paying the same revenue twice. Marking
+  an event also used a client method that does not exist
+  (`asServiceRole.update`), so every mark failed silently; it now uses
+  `entity.update`, the same call the rest of the codebase uses.
+
+## 2026-11-23
 - The paid-order path is now gated in CI. `doctor:money` knew that this
   deployment cannot quote, create an order, capture or deliver a paid order
   (no `PRICE_QUOTE_SECRET`, no PayPal order-create or capture credentials, no

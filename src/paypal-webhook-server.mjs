@@ -907,6 +907,53 @@ function validateConfig() {
   }
 }
 
+/**
+ * Can this deployment take a paid order?
+ *
+ * `/health` is the only place that knows the deployment's own environment, so
+ * the answer is published here instead of being inferred from a CI runner that
+ * has no credentials. It is a presence check: it says the credentials are
+ * configured, not that PayPal accepts them — only a live order proves that, and
+ * no probe may place one.
+ */
+function getMoneyReadinessReport() {
+  const have = (name) => {
+    const value = process.env[name];
+    return value != null && String(value).trim() !== "" && !isPlaceholderValue(value);
+  };
+  const fulfillmentEnabled = String(process.env.FULFILLMENT_ENABLED ?? "true").toLowerCase() !== "false";
+  const paypalCredentials = have("PAYPAL_CLIENT_ID") && have("PAYPAL_CLIENT_SECRET");
+  const orderCreateEnabled = getEnvBool("PAYPAL_ENABLE_ORDER_CREATE", false);
+  const quoteKey = have("PRICE_QUOTE_SECRET");
+  const fulfillment = fulfillmentEnabled && have("FULFILLMENT_ACCESS_SECRET");
+  const resend = have("RESEND_API_KEY");
+  // Order creation and capture share one switch and one credential pair: the
+  // capture route refuses the same way when either is missing, so an approved
+  // payment could not be taken even if the order were created.
+  const orderCreate = orderCreateEnabled && paypalCredentials;
+  const capture = orderCreate;
+
+  const missing = [];
+  if (!quoteKey) missing.push("PRICE_QUOTE_SECRET");
+  if (!paypalCredentials) missing.push("PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET");
+  if (!orderCreateEnabled) missing.push("PAYPAL_ENABLE_ORDER_CREATE");
+  if (!fulfillmentEnabled) missing.push("FULFILLMENT_ENABLED");
+  if (fulfillmentEnabled && !have("FULFILLMENT_ACCESS_SECRET")) missing.push("FULFILLMENT_ACCESS_SECRET");
+  if (!resend) missing.push("RESEND_API_KEY");
+
+  const canTakePaidOrder = quoteKey && orderCreate && capture && fulfillment && resend;
+  return {
+    ok: canTakePaidOrder,
+    can_take_paid_order: canTakePaidOrder,
+    quote_key: quoteKey,
+    order_create: orderCreate,
+    capture,
+    fulfillment,
+    resend,
+    missing
+  };
+}
+
 function getConfigCheck() {
   const missing = [];
   const warnings = [];
@@ -1627,6 +1674,9 @@ if (args.check === true || args["config-check"] === true) {
         live: getEnvBool("SWARM_LIVE", false),
         dedupe: dedupeStore.stats(),
         config: getConfigCheck(),
+        // The deployment is the only place that knows whether a paid order can
+        // actually be taken, so the audit reads the answer from here.
+        money_readiness: getMoneyReadinessReport(),
         // A serverless instance cannot share a file log; this says so instead of
         // letting the funnel quietly reset on every cold start.
         checkout_intents: intentStoreStatus(),

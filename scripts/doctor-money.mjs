@@ -47,6 +47,11 @@ if (args.includes('--deployed-checkout-gate')) {
         console.error(`checkout gate BLOCKED at ${url}: ${gate.block_reason || 'blocks_checkout=true'} — every checkout order creation answers 503`);
         process.exit(1);
     }
+    if (gate.money?.reported && !gate.money.can_take_paid_order) {
+        const missing = gate.money.missing.length ? gate.money.missing.join(', ') : 'configuration';
+        console.error(`deployment cannot take a paid order at ${url}: missing ${missing} — a checkout can start and never be captured or delivered`);
+        process.exit(1);
+    }
     console.log(`checkout gate open at ${url} (replay protection: ${gate.replay_protection || 'unknown'})`);
     process.exit(0);
 }

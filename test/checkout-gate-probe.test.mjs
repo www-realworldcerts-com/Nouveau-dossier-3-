@@ -49,6 +49,40 @@ test('an open gate reports its replay protection', async (t) => {
     assert.equal(gate.replay_protection, 'provider');
 });
 
+test('money readiness is read from the same response', async (t) => {
+    const url = await withGate({
+        config: { checkout_attempts: { blocks_checkout: false } },
+        money_readiness: {
+            ok: false,
+            can_take_paid_order: false,
+            missing: ['PAYPAL_ENABLE_ORDER_CREATE', 'RESEND_API_KEY']
+        }
+    }, t);
+
+    const gate = await probeCheckoutGate(url);
+    assert.equal(gate.money.reported, true);
+    assert.equal(gate.money.can_take_paid_order, false);
+    assert.deepEqual(gate.money.missing, ['PAYPAL_ENABLE_ORDER_CREATE', 'RESEND_API_KEY']);
+});
+
+test('a ready deployment is not reported as unable to take a paid order', async (t) => {
+    const url = await withGate({
+        config: { checkout_attempts: { blocks_checkout: false } },
+        money_readiness: { ok: true, can_take_paid_order: true, missing: [] }
+    }, t);
+
+    const gate = await probeCheckoutGate(url);
+    assert.equal(gate.money.reported, true);
+    assert.equal(gate.money.can_take_paid_order, true);
+});
+
+test('an older deployment without money readiness is unreported, not unready', async (t) => {
+    const url = await withGate({ config: { checkout_attempts: { blocks_checkout: false } } }, t);
+    const gate = await probeCheckoutGate(url);
+    assert.equal(gate.money.reported, false);
+    assert.equal(gate.money.can_take_paid_order, false);
+});
+
 test('a response without a gate verdict is unreported, never open', async (t) => {
     const staticPage = await withGate({ status: 'ok' }, t);
     const gate = await probeCheckoutGate(staticPage);

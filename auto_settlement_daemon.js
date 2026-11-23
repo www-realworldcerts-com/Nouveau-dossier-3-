@@ -15,6 +15,7 @@ import { createPayPalPayoutBatch } from './src/paypal-api.mjs';
 import { MoneyMovedGate } from './src/real/money-moved-gate.mjs';
 import { EvidenceIntegrityChain } from './src/real/evidence-integrity.mjs';
 import { pathToFileURL } from 'url';
+import crypto from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 import './src/load-env.mjs';
@@ -54,6 +55,32 @@ const CONFIG = {
   DEPLOYMENT_START_DATE: new Date(process.env.DEPLOYMENT_START_DATE || '2026-01-04'),
 };
 
+/**
+ * A reversal is stored as a negative revenue event. Settling one would pay the
+ * owner for money that was taken back, so only strictly positive amounts are
+ * ever payouts.
+ */
+function isSettleableAmount(event) {
+  const amount = Number(event?.amount);
+  return Number.isFinite(amount) && amount > 0;
+}
+
+/**
+ * PayPal rejects a reused `sender_batch_id` for 30 days, so the id must be a
+ * function of the batch contents, not of when the batch was built. A retry of
+ * the same events then reproduces the id and is refused by the provider
+ * instead of paying twice.
+ */
+export function computeBatchId(rail, events) {
+  const content = (events ?? [])
+    .map(event => String(event?.id ?? ''))
+    .filter(Boolean)
+    .sort()
+    .join('\n');
+  const digest = crypto.createHash('sha256').update(content).digest('hex').slice(0, 24);
+  return `BATCH_${rail}_${digest}`;
+}
+
 // Helper function to get current auto-approve threshold based on deployment age
 function getCurrentAutoApproveThreshold() {
   const now = new Date();
@@ -75,6 +102,9 @@ function getCurrentAutoApproveThreshold() {
 class SettlementState {
   constructor() {
     this.running = false;
+    // Latched: once stopped, this process sends no further payout. Only a
+    // restart clears it, so a stray config write cannot resume payments.
+    this.emergencyStopped = false;
     this.lastCheck = null;
     this.lastSettlement = null;
     this.totalSettled = 0;
@@ -107,6 +137,7 @@ class SettlementState {
   getStatus() {
     return {
       running: this.running,
+      emergencyStopped: this.emergencyStopped,
       lastCheck: this.lastCheck,
       lastSettlement: this.lastSettlement,
       totalSettled: this.totalSettled,
@@ -118,6 +149,7 @@ class SettlementState {
 }
 
 const state = new SettlementState();
+let activeIntervalId = null;
 
 // ============================================================================
 // MAIN SETTLEMENT LOOP
@@ -136,6 +168,10 @@ export async function startAutoSettlementDaemon() {
     process.exit(1);
   }
 
+  if (state.emergencyStopped) {
+    throw new Error('EMERGENCY_STOP: settlement is halted; restart the process to clear it');
+  }
+
   state.running = true;
   console.log('✅ Daemon started - settlements will be processed every', CONFIG.CHECK_INTERVAL_MS / 1000, 'seconds');
 
@@ -144,6 +180,11 @@ export async function startAutoSettlementDaemon() {
 
   // Schedule regular checks
   const intervalId = setInterval(async () => {
+    if (state.emergencyStopped) {
+      clearInterval(intervalId);
+      activeIntervalId = null;
+      return;
+    }
     try {
       await performSettlementCycle();
     } catch (error) {
@@ -151,6 +192,7 @@ export async function startAutoSettlementDaemon() {
       state.addError(error);
     }
   }, CONFIG.CHECK_INTERVAL_MS);
+  activeIntervalId = intervalId;
 
   // Graceful shutdown
   process.on('SIGINT', () => {
@@ -168,6 +210,11 @@ export async function startAutoSettlementDaemon() {
  * Main settlement cycle - runs periodically
  */
 export async function performSettlementCycle() {
+  if (state.emergencyStopped) {
+    console.log('⛔ Emergency stop is latched: no settlement will be attempted.');
+    return;
+  }
+
   state.markCheck();
   console.log(`\n🔄 [${new Date().toISOString()}] Starting settlement cycle...`);
 
@@ -237,6 +284,7 @@ async function fetchReadyForSettlement() {
       e.status === 'VERIFIED' &&
       !e.settled &&
       !e.paid_out &&
+      isSettleableAmount(e) &&
       e.verification_proof &&
       Object.keys(e.verification_proof).length > 0
     );
@@ -291,6 +339,9 @@ async function processRailBatch(rail, events) {
   const validEvents = [];
   for (const event of events) {
     try {
+      if (!isSettleableAmount(event)) {
+        throw new Error(`non-positive amount (${event.amount}); a reversal is not a payout`);
+      }
       await MoneyMovedGate.assertMoneyMoved(event);
       validEvents.push(event);
     } catch (e) {
@@ -337,8 +388,12 @@ async function processRailBatch(rail, events) {
   // Step 6: Mark events as settled
   await markEventsSettled(validEvents, batch.batch_id, executionResult);
 
-  state.markSettlement(totalAmount);
-  console.log(`✅ Settled ${validEvents.length} events via ${rail}`);
+  if (executionResult?.method === 'manual_csv') {
+    console.log(`🗂️ Exported ${validEvents.length} events via ${rail}; awaiting the manual transfer`);
+  } else {
+    state.markSettlement(totalAmount);
+    console.log(`✅ Settled ${validEvents.length} events via ${rail}`);
+  }
 }
 
 // ============================================================================
@@ -353,7 +408,7 @@ async function createPayoutBatch(rail, events) {
   const currency = events[0]?.currency || 'USD';
 
   const batch = {
-    batch_id: `BATCH_${rail}_${Date.now()}`,
+    batch_id: computeBatchId(rail, events),
     rail,
     total_amount: totalAmount,
     currency,
@@ -399,6 +454,11 @@ async function approveBatch(batchId) {
  * Executes settlement on the payment rail
  */
 async function executeSettlement(rail, batch) {
+  // Single choke point for all rails: a stop that lands after approval still
+  // refuses to move money.
+  if (state.emergencyStopped) {
+    throw new Error('EMERGENCY_STOP: settlement halted before execution');
+  }
   console.log(`🚀 Executing ${rail} settlement...`);
 
   switch (rail) {
@@ -514,7 +574,16 @@ function generatePayoneerCSV(batch) {
  * Marks events as settled in the ledger
  */
 async function markEventsSettled(events, batchId, executionResult) {
-  console.log(`📝 Marking ${events.length} events as settled`);
+  // A CSV is an instruction to a human, not a payment: the row may never be
+  // uploaded, and marking it settled would hide money that never left.
+  const manualCsv = executionResult?.method === 'manual_csv';
+  if (!manualCsv && !executionResult?.provider_batch_id) {
+    throw new Error(`SETTLEMENT_UNCONFIRMED: no provider batch id for ${batchId}; events left unsettled`);
+  }
+
+  console.log(manualCsv
+    ? `📝 Marking ${events.length} events as exported (not settled)`
+    : `📝 Marking ${events.length} events as settled`);
 
   const base44 = await buildBase44Client();
   const revenueConfig = getRevenueConfigFromEnv();
@@ -522,15 +591,17 @@ async function markEventsSettled(events, batchId, executionResult) {
 
   for (const event of events) {
     try {
-      await base44.asServiceRole.update(revenueEntity, event.id, {
+      await revenueEntity.update(event.id, {
         ...event,
-        status: executionResult.method === 'manual_csv' ? 'export_ready' : 'paid_out',
-        settled: true, // We mark as settled because we've either paid or exported for payment
-        settled_at: new Date().toISOString(),
+        status: manualCsv ? 'export_ready' : 'paid_out',
+        settled: manualCsv ? false : true,
+        ...(manualCsv
+          ? { exported_at: new Date().toISOString() }
+          : { settled_at: new Date().toISOString() }),
         payout_batch_id: batchId,
         settlement_details: executionResult
       });
-      console.log(`  Marked ${event.id} as settled.`);
+      console.log(`  ${manualCsv ? 'Exported' : 'Settled'} ${event.id}.`);
     } catch (e) {
       console.error(`  ❌ Failed to update ${event.id}: ${e.message}`);
     }
@@ -561,7 +632,12 @@ export function getDaemonHealth() {
  */
 export function emergencyStop() {
   console.log('🚨 EMERGENCY STOP ACTIVATED');
+  state.emergencyStopped = true;
   state.running = false;
+  if (activeIntervalId) {
+    clearInterval(activeIntervalId);
+    activeIntervalId = null;
+  }
   CONFIG.ENABLE_IMMEDIATE_SETTLEMENT = false;
   CONFIG.ENABLE_EMERGENCY_MODE = false;
 }
@@ -570,8 +646,13 @@ export function emergencyStop() {
  * Manual trigger - forces immediate settlement check
  */
 export async function triggerManualSettlement() {
+  if (state.emergencyStopped) {
+    console.log('⛔ Manual settlement refused: emergency stop is latched');
+    return false;
+  }
   console.log('⚡ Manual settlement triggered');
   await performSettlementCycle();
+  return true;
 }
 
 // ============================================================================

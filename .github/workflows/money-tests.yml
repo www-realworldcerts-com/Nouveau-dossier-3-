@@ -48,6 +48,58 @@ jobs:
         # It is read-only and must not need PSP credentials to run.
         run: npm run audit:revenue-proofs
 
+  money-readiness:
+    name: Money readiness (doctor:money)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Money readiness gate
+        # `doctor:money` is the only thing that knows whether a deploy can
+        # quote, create, capture and deliver a paid order, and nothing called
+        # it before shipping. The gate runs it offline against this job's env
+        # and separates two kinds of failure: a money path that is broken in
+        # the configuration it is given always fails the build, while steps
+        # that only lack deployment credentials fail here too — a deploy that
+        # cannot take a paid order must not ship green — and are downgraded to
+        # warnings for pull requests from forks, which never receive secrets.
+        # Add the secrets below to a repository's Actions secrets and the same
+        # job verifies the real configuration instead of reporting it missing.
+        env:
+          # GitHub leaves this empty on push and on same-repo pull requests.
+          ALLOW_UNVERIFIED: ${{ github.event.pull_request.head.repo.fork }}
+          PRICE_QUOTE_SECRET: ${{ secrets.PRICE_QUOTE_SECRET }}
+          PRICE_QUOTE_KEY_ID: ${{ secrets.PRICE_QUOTE_KEY_ID }}
+          PAYPAL_ENABLE_ORDER_CREATE: ${{ secrets.PAYPAL_ENABLE_ORDER_CREATE }}
+          PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
+          PAYPAL_CLIENT_SECRET: ${{ secrets.PAYPAL_CLIENT_SECRET }}
+          PAYPAL_MODE: ${{ secrets.PAYPAL_MODE }}
+          PAYPAL_WEBHOOK_ID: ${{ secrets.PAYPAL_WEBHOOK_ID }}
+          SWARM_LIVE: ${{ secrets.SWARM_LIVE }}
+          NO_PLATFORM_WALLET: ${{ secrets.NO_PLATFORM_WALLET }}
+          OWNER_PAYPAL_EMAIL: ${{ secrets.OWNER_PAYPAL_EMAIL }}
+          FULFILLMENT_ACCESS_SECRET: ${{ secrets.FULFILLMENT_ACCESS_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+        run: |
+          args=(--github-actions)
+          if [ "$ALLOW_UNVERIFIED" = "true" ]; then
+            args+=(--allow-unverified)
+          fi
+          node scripts/money-readiness.mjs "${args[@]}"
+
   full-suite:
     name: Full test suite
     runs-on: ubuntu-latest

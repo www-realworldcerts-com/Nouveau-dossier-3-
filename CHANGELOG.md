@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-11-23
+- The paid-order path is now gated in CI. `doctor:money` knew that this
+  deployment cannot quote, create an order, capture or deliver a paid order
+  (no `PRICE_QUOTE_SECRET`, no PayPal order-create or capture credentials, no
+  `FULFILLMENT_ACCESS_SECRET`/`RESEND_API_KEY`), but nothing called it before
+  shipping, so the four failures were only ever visible to whoever ran it by
+  hand. The new `money-readiness` job runs `npm run money:readiness`, which
+  calls the doctor offline and separates a money path that is broken in the
+  configuration it was given (catalog unreadable, checkout gate blocking, an
+  attempt store that cannot be written, a dead access route — always a
+  failure) from steps that only lack deployment credentials. Missing
+  credentials fail the build, because a deploy in that state takes money it
+  cannot deliver; on pull requests from forks, which never receive Actions
+  secrets, they are reported as `NOT VERIFIED` warnings so an outside
+  contributor is not blocked by a configuration only the owner can change. The
+  gate is tested with the same stripped-environment harness as the preflight.
+
 ## 2026-11-20
 - Fulfilment no longer depends on the app server being deployed. The paid-order
   email used to carry only `/access/<token>`, a route the live domain answers

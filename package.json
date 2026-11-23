@@ -42,6 +42,7 @@
     "ledger:quarantine": "node scripts/quarantine-unverified-revenue.mjs",
     "ledger:reverse": "node scripts/reverse-paypal-refund.mjs",
     "doctor:money": "node scripts/doctor-money.mjs",
+    "money:readiness": "node scripts/money-readiness.mjs",
     "test:sales": "node --test test/sales.test.mjs test/shopify-setup.test.mjs test/course-catalog.test.mjs test/catalog-publisher.test.mjs test/shopify-reprice.test.mjs test/shopify-price-drift.test.mjs test/checkout-browser-audit.test.mjs test/price-quote.test.mjs test/shopify-launch-readiness.test.mjs test/shopify-activation.test.mjs test/shopify-activation-run.test.mjs",
     "test:procurement": "node --test test/procurement.test.mjs test/procurement-import.test.mjs",
     "test:contentieux": "node --test test/contentieux.test.mjs",

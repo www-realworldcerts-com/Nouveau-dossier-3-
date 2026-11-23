@@ -3,88 +3,42 @@
  * CI gate for the money path.
  *
  * `doctor:money` is the authority on whether a deployment can take a paid
- * order, but it cannot run unchanged on a CI runner: the runner holds the
- * deployment's secrets only when they are configured, so a bare run reports
- * every credential step as failing — and a repository that never configured
- * them still passed, because nothing called the doctor.
+ * order, but a bare run cannot gate CI: a runner holds the deployment's
+ * secrets only when they are configured, so every credential step reports a
+ * failure that no code change can clear.
  *
- * This wrapper calls the doctor and splits its failures in two:
+ * So this wrapper runs the doctor offline and splits its failures by what the
+ * runner actually has:
  *
- *   structural  the money path is broken *here*, with the config this process
- *               actually has (catalog unreadable, checkout gate blocking, an
- *               attempt store that cannot be written, a dead access route).
- *               Always fails the build; no secret would change the verdict.
+ *   structural  the money path is broken in the configuration this process
+ *               was given (unreadable catalog, a blocking checkout gate, an
+ *               unwritable attempt store, a dead access route). Always fails.
  *
- *   credential  every env name the step blames is absent from this process.
- *               That is a runner without the deployment's configuration, not
- *               evidence of a broken checkout, so it fails by default — a
- *               deploy that cannot take a paid order must not ship green — and
- *               `--allow-unverified` downgrades it to a warning for pull
- *               requests from forks, which GitHub never gives secrets to.
+ *   unconfigured  a credential step whose every blamed variable is unset.
+ *               That is a runner without the deployment's env, not a broken
+ *               checkout, so it fails by default — a deploy that cannot take a
+ *               paid order must not ship green — and `--allow-unverified`
+ *               downgrades it to a warning for fork pull requests, which never
+ *               receive Actions secrets.
  *
- * The split is deliberately conservative: a step whose env names are set but
- * whose check still fails is structural, never "unverified".
+ * A blamed variable that *is* set makes the step structural: present-but-wrong
+ * configuration is never excused as unverified. Annotations are emitted
+ * whenever GITHUB_ACTIONS is set, so CI needs no extra flag.
  *
- * Always exits 0 or 1, and prints what to configure either way.
- *
- *   node scripts/money-readiness.mjs [--allow-unverified] [--github-actions] [--json]
+ *   node scripts/money-readiness.mjs [--allow-unverified] [--json]
  */
 
 import { spawnSync } from 'node:child_process';
 
-// The env names that mean "this runner does not have the deployment's
-// configuration". A value that is present is never waved through, and a name
-// that is not listed here (a catalog path, a gate URL, a store directory) is
-// always structural, because an absent one of those breaks the money path
-// rather than proving the runner is unconfigured.
-const CREDENTIAL_VARS = new Set([
-    'PRICE_QUOTE_SECRET',
-    'PRICE_QUOTE_KEY_ID',
-    'PRICE_QUOTE_PREVIOUS_SECRET',
-    'PAYPAL_ENABLE_ORDER_CREATE',
-    'PAYPAL_CLIENT_ID',
-    'PAYPAL_CLIENT_SECRET',
-    'PAYPAL_MODE',
-    'PAYPAL_WEBHOOK_ID',
-    'SWARM_LIVE',
-    'NO_PLATFORM_WALLET',
-    'BASE44_OFFLINE',
-    'OWNER_PAYPAL_EMAIL',
-    'OWNER_PAYONEER_ID',
-    'OWNER_BANK_ACCOUNT',
-    'FULFILLMENT_ENABLED',
-    'FULFILLMENT_ACCESS_SECRET',
-    'RESEND_API_KEY'
-]);
+// The steps that need the deployment's credentials, by the doctor's own ids.
+// `capture` is included because the doctor derives it from `orders`: if orders
+// is unconfigured, capture fails too, and it must be excused with it.
+const CREDENTIAL_STEPS = new Set(['quote', 'orders', 'capture', 'fulfillment']);
 
 const args = new Set(process.argv.slice(2));
 const asJson = args.has('--json');
 const allowUnverified = args.has('--allow-unverified');
-const annotate = args.has('--github-actions');
-
-function has(name) {
-    return Boolean(String(process.env[name] ?? '').trim());
-}
-
-/** `PAYPAL_ENABLE_ORDER_CREATE=true` -> `PAYPAL_ENABLE_ORDER_CREATE`. */
-function envName(entry) {
-    return String(entry ?? '').split('=')[0].trim();
-}
-
-function escapeAnnotation(text) {
-    return String(text ?? '')
-        .replace(/%/g, '%25')
-        .replace(/\r/g, '')
-        .replace(/\n/g, ' ')
-        .replace(/:/g, '%3A');
-}
-
-function note(level, message) {
-    if (!annotate) return;
-    const line = `::${level}::money readiness: ${escapeAnnotation(message)}`;
-    if (level === 'error') console.error(line);
-    else console.log(line);
-}
+const annotate = process.env.GITHUB_ACTIONS === 'true';
 
 const doctor = spawnSync(
     process.execPath,
@@ -93,89 +47,99 @@ const doctor = spawnSync(
 );
 
 let steps = null;
-let doctorReport = null;
 try {
-    doctorReport = JSON.parse(doctor.stdout);
-    steps = Array.isArray(doctorReport?.steps) ? doctorReport.steps : null;
-} catch {
-    steps = null;
+    steps = JSON.parse(doctor.stdout).steps;
+} catch { /* reported below as the doctor step failing */ }
+
+// The doctor blames entries like `PAYPAL_CLIENT_ID`, `SWARM_LIVE=true` or
+// `OWNER_PAYPAL_EMAIL (or OWNER_PAYONEER_ID / OWNER_BANK_ACCOUNT)`; the leading
+// identifier is the variable that decides whether the runner has it.
+function envName(entry) {
+    return String(entry ?? '').match(/[A-Za-z][A-Za-z0-9_]*/)?.[0] ?? '';
 }
 
-const structural = [];
-const credentialGated = [];
+function isSet(entry) {
+    return Boolean(String(process.env[envName(entry)] ?? '').trim());
+}
 
-if (!steps) {
-    structural.push({
+function escapeAnnotation(text) {
+    return String(text ?? '').replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, ' ');
+}
+
+const entries = [];
+if (!Array.isArray(steps)) {
+    entries.push({
         id: 'doctor',
         title: 'Money path preflight',
-        env: [],
         detail: `doctor:money did not produce a readable report (exit ${doctor.status}): `
-            + `${String(doctor.stderr || doctor.stdout || '').trim().slice(-400) || 'no output'}`
+            + `${String(doctor.stderr || doctor.stdout || '').trim().slice(-400) || 'no output'}`,
+        env: [],
+        unconfigured: false,
+        level: 'error'
     });
-} else {
-    for (const step of steps.filter(entry => entry?.status === 'fail')) {
-        const names = (step.env ?? []).map(envName).filter(Boolean);
-        const absentCredentials = names.length > 0
-            && names.every(name => CREDENTIAL_VARS.has(name) && !has(name));
-        const record = {
-            id: step.id,
-            title: step.title,
-            env: step.env ?? [],
-            detail: step.detail
-        };
-        if (absentCredentials) credentialGated.push(record);
-        else structural.push(record);
-    }
 }
 
-const needs = [...new Set(credentialGated.flatMap(entry => entry.env))];
-const verified = structural.length === 0 && credentialGated.length === 0;
-const pass = structural.length === 0 && (credentialGated.length === 0 || allowUnverified);
+for (const step of Array.isArray(steps) ? steps : []) {
+    if (step?.status !== 'fail') continue;
+    const env = step.env ?? [];
+    const unconfigured = CREDENTIAL_STEPS.has(step.id)
+        && env.length > 0
+        && env.every(entry => !isSet(entry));
+    entries.push({
+        id: step.id,
+        title: step.title,
+        detail: step.detail,
+        env,
+        unconfigured,
+        level: unconfigured && allowUnverified ? 'warning' : 'error',
+        message: unconfigured
+            ? (allowUnverified
+                ? `${step.title} not verified: this runner has no ${env.map(envName).join(', ')}`
+                : `${step.title} cannot take a paid order: set ${env.map(envName).join(', ')}`)
+            : `${step.title} is broken in this configuration: ${step.detail}`
+    });
+}
+
+const structural = entries.filter(entry => !entry.unconfigured);
+const unconfigured = entries.filter(entry => entry.unconfigured);
+const blocked = entries.filter(entry => entry.level === 'error');
+const needs = [...new Set(unconfigured.flatMap(entry => entry.env.map(envName)))];
 
 if (asJson) {
     console.log(JSON.stringify({
-        ok: verified,
-        verified,
+        ok: entries.length === 0,
+        passed: blocked.length === 0,
         allow_unverified: allowUnverified,
-        passed: pass,
         doctor_exit: doctor.status,
         structural_failures: structural,
-        credential_gated: credentialGated,
-        needs,
-        summary: doctorReport?.summary ?? null
+        credential_gated: unconfigured,
+        needs
     }, null, 2));
 } else {
     console.log('Money readiness gate');
     console.log('='.repeat(64));
-    if (verified) {
-        console.log('doctor:money reports the whole paid-order path configured.');
-    }
-    for (const entry of structural) {
-        console.log(`[FAIL] ${entry.title}: ${entry.detail}`);
+    if (entries.length === 0) console.log('doctor:money reports the whole paid-order path configured.');
+    for (const entry of entries) {
+        console.log(`[${entry.level === 'warning' ? 'SKIP' : 'FAIL'}] ${entry.title}: ${entry.detail}`);
         if (entry.env.length) console.log(`       env: ${entry.env.join(', ')}`);
-        note('error', `${entry.title} is broken in this configuration: ${entry.detail}`);
-    }
-    for (const entry of credentialGated) {
-        const mark = allowUnverified ? 'SKIP' : 'FAIL';
-        console.log(`[${mark}] ${entry.title}: ${entry.detail}`);
-        if (entry.env.length) console.log(`       env: ${entry.env.join(', ')}`);
-        if (allowUnverified) {
-            note('warning', `${entry.title} not verified: this runner has no ${entry.env.map(envName).join(', ')}`);
-        } else {
-            note('error', `${entry.title} cannot take a paid order: set ${entry.env.map(envName).join(', ')}`);
-        }
     }
     console.log('-'.repeat(64));
-    if (verified) {
+    if (entries.length === 0) {
         console.log('PASS: a paid order can be quoted, created, captured and delivered.');
     } else if (structural.length) {
         console.log(`${structural.length} structural failure(s): this deployment cannot complete a paid order.`);
     } else if (allowUnverified) {
-        console.log(`NOT VERIFIED: ${credentialGated.length} step(s) need deployment credentials absent from this runner.`);
+        console.log(`NOT VERIFIED: ${unconfigured.length} step(s) need deployment credentials absent from this runner.`);
     } else {
-        console.log(`${credentialGated.length} failure(s): this deployment cannot complete a paid order.`);
-        console.log(`Set ${needs.map(envName).join(', ')} where it is deployed, then re-run this gate.`);
+        console.log(`${unconfigured.length} failure(s): this deployment cannot complete a paid order.`);
+        console.log(`Set ${needs.join(', ')} where it is deployed, then re-run this gate.`);
     }
 }
 
-process.exit(pass ? 0 : 1);
+if (annotate) {
+    for (const entry of blocked.concat(entries.filter(entry => entry.level === 'warning'))) {
+        console.error(`::${entry.level}::money readiness: ${escapeAnnotation(entry.message)}`);
+    }
+}
+
+process.exit(blocked.length === 0 ? 0 : 1);

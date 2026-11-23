@@ -94,11 +94,11 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           APP_ORIGIN: ${{ vars.APP_ORIGIN }}
         run: |
-          args=(--github-actions)
           if [ "$ALLOW_UNVERIFIED" = "true" ]; then
-            args+=(--allow-unverified)
+            node scripts/money-readiness.mjs --allow-unverified
+          else
+            node scripts/money-readiness.mjs
           fi
-          node scripts/money-readiness.mjs "${args[@]}"
 
   full-suite:
     name: Full test suite

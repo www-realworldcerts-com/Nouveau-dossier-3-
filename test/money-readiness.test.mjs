@@ -21,7 +21,9 @@ const STRIPPED = [
     'CHECKOUT_INTENTS_FILE', 'CHECKOUT_INTENTS_URL', 'CHECKOUT_INTENTS_TOKEN',
     'SALES_DATA_DIR', 'VERCEL', 'AWS_LAMBDA_FUNCTION_NAME', 'NETLIFY',
     'CHECKOUT_HEALTH_URL', 'PAYMENT_WEBHOOK_URL', 'CHECKOUT_REPLAY_PROTECTION',
-    'COURSE_CATALOG_FILE'
+    'COURSE_CATALOG_FILE',
+    // Set by the runner inside Actions; stripped so annotations are opt-in per test.
+    'GITHUB_ACTIONS'
 ];
 
 function runGate({ overrides = {}, args = ['--json'] } = {}) {
@@ -74,7 +76,7 @@ test('an unconfigured deployment fails the build and names the variables to set'
 
     const parsed = report(run);
     assert.equal(parsed.ok, false);
-    assert.equal(parsed.verified, false);
+    assert.equal(parsed.passed, false);
     assert.deepEqual(parsed.structural_failures, [], 'missing credentials are not structural failures');
     assert.deepEqual(
         parsed.credential_gated.map(step => step.id).sort(),
@@ -125,7 +127,7 @@ test('a completely configured deployment passes the gate', async () => {
 
     const parsed = report(run);
     assert.equal(parsed.ok, true);
-    assert.equal(parsed.verified, true);
+    assert.equal(parsed.passed, true);
     assert.deepEqual(parsed.structural_failures, []);
     assert.deepEqual(parsed.credential_gated, []);
     assert.deepEqual(parsed.needs, []);
@@ -144,17 +146,50 @@ test('a credential that is set but rejected is a structural failure, not unverif
     assert.deepEqual(parsed.structural_failures.map(step => step.id), ['orders', 'capture']);
 });
 
-test('github actions annotations are emitted for the failure', async () => {
-    const run = await runGate({ args: ['--github-actions'] });
+test('annotations are emitted on their own when the runner is github actions', async () => {
+    const run = await runGate({ args: [], overrides: { GITHUB_ACTIONS: 'true' } });
     assert.equal(run.status, 1, run.stdout + run.stderr);
     assert.match(run.stderr, /::error::money readiness: PayPal order creation/);
-    assert.match(run.stderr, /%3A/, 'annotation text is escaped for the workflow command');
+    assert.equal(run.stderr.trim().split('\n').length, 4, 'one annotation per failure, no wrapping');
     assert.match(run.stdout, /Set PRICE_QUOTE_SECRET/);
 });
 
-test('github actions annotations downgrade to warnings only when unverified is allowed', async () => {
-    const run = await runGate({ args: ['--github-actions', '--allow-unverified'] });
+test('annotations downgrade to warnings only when unverified is allowed', async () => {
+    const run = await runGate({
+        args: ['--allow-unverified'],
+        overrides: { GITHUB_ACTIONS: 'true' }
+    });
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /::warning::money readiness: PayPal order creation not verified/);
+    assert.match(run.stderr, /::warning::money readiness: PayPal order creation not verified/);
     assert.doesNotMatch(run.stderr, /::error::/);
+});
+
+test('no annotations leak into --json output', async () => {
+    const run = await runGate({ overrides: { GITHUB_ACTIONS: 'true' } });
+    assert.equal(run.stderr.trim().split('\n').length, 4);
+    assert.doesNotThrow(() => report(run), 'stdout stays parseable JSON');
+});
+
+test('a credential step blaming a parenthesised env hint is unconfigured, not structural', async () => {
+    // The doctor blames `OWNER_PAYPAL_EMAIL (or OWNER_PAYONEER_ID /
+    // OWNER_BANK_ACCOUNT)` when no owner is declared. Matching the whole
+    // string against a variable would make a fork run fail as structural.
+    const run = await runGate({
+        args: ['--json', '--allow-unverified'],
+        overrides: { ...COMPLETE, OWNER_PAYPAL_EMAIL: '' }
+    });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+
+    const parsed = report(run);
+    assert.deepEqual(parsed.structural_failures, []);
+    assert.ok(parsed.credential_gated.some(step => step.id === 'orders'));
+});
+
+test('an offline-mode refusal is structural because the variable is set', async () => {
+    const run = await runGate({
+        args: ['--json', '--allow-unverified'],
+        overrides: { ...COMPLETE, BASE44_OFFLINE: 'true' }
+    });
+    assert.equal(run.status, 1, run.stdout + run.stderr);
+    assert.deepEqual(report(run).structural_failures.map(step => step.id), ['orders', 'capture']);
 });

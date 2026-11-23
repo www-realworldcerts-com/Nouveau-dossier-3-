@@ -15,7 +15,9 @@ import { parsePayPalCustomId } from '../sales/price-quote.mjs';
  */
 
 const DEFAULT_ACCESS_TTL_SECONDS = 365 * 24 * 60 * 60;
-const RESEND_ENDPOINT = 'https://api.resend.com/emails';
+// Overridable so a test can drive delivery against a loopback stub instead of
+// sending mail; deployments keep the public endpoint by default.
+const RESEND_ENDPOINT = `${String(process.env.RESEND_API_BASE_URL || 'https://api.resend.com').replace(/\/+$/, '')}/emails`;
 
 export function escapeHtml(value) {
   return String(value ?? '')

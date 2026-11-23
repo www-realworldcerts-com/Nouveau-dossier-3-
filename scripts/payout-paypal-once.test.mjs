@@ -233,6 +233,137 @@ describe("payout-paypal-once.mjs refusal paths", () => {
     }
   });
 
+  it("derives the same sender_batch_id on every run of the same payment", async () => {
+    const ids = [];
+    for (let run = 0; run < 2; run += 1) {
+      const stub = await stubReturningBatchStatus("SUCCESS");
+      try {
+        const result = await runPayout(
+          args(),
+          baseEnv({ ...CREDENTIALS, ...PPP2_ON, PAYPAL_API_BASE_URL: stub.url })
+        );
+        assert.equal(result.json?.ok, true, result.stderr);
+        const submission = stub.hits.find((hit) => hit.url === "/v1/payments/payouts");
+        ids.push(JSON.parse(submission.body).sender_batch_header.sender_batch_id);
+      } finally {
+        await stub.close();
+      }
+    }
+    assert.equal(ids[0], ids[1], "a re-dispatch must not invent a new sender_batch_id");
+    assert.match(ids[0], /^owner-payout-[a-f0-9]{24}$/);
+  });
+
+  it("uses an explicit idempotency key verbatim", async () => {
+    const stub = await stubReturningBatchStatus("PENDING");
+    try {
+      const run = await runPayout(
+        [...args(), "--idempotency-key", "monthly-2026-11"],
+        baseEnv({ ...CREDENTIALS, ...PPP2_ON, PAYPAL_API_BASE_URL: stub.url })
+      );
+      assert.equal(run.json?.ok, true, run.stderr);
+      assert.equal(run.json?.idempotencyKey, "monthly-2026-11");
+      assert.equal(run.json?.senderBatchId, "owner-payout-monthly-2026-11");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("rejects an idempotency key that PayPal would not accept as an id", async () => {
+    const stub = await startStub(() => null);
+    try {
+      const run = await runPayout(
+        [...args(), "--idempotency-key", "has spaces/and-slash"],
+        baseEnv({ ...CREDENTIALS, ...PPP2_ON, PAYPAL_API_BASE_URL: stub.url })
+      );
+      assert.equal(run.json?.result?.payout?.code, "INVALID_ARGUMENTS");
+      assert.match(run.json?.result?.payout?.error, /--idempotency-key/);
+      assert.equal(stub.hits.length, 0);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("treats PayPal's duplicate sender_batch_id refusal as nothing sent, not as a new payout", async () => {
+    const stub = await startStub((hit) => {
+      if (hit.url === "/v1/oauth2/token") {
+        return { body: { access_token: "stub-token", expires_in: 3600 } };
+      }
+      if (hit.url === "/v1/payments/payouts") {
+        return {
+          status: 400,
+          body: {
+            name: "USER_BUSINESS_ERROR",
+            message: "Batch with given sender_batch_id already exists",
+            links: [{ href: "https://api.paypal.com/v1/payments/payouts/BATCH-ORIGINAL-1", rel: "self" }],
+          },
+        };
+      }
+      return null;
+    });
+    try {
+      const run = await runPayout(
+        args(),
+        baseEnv({ ...CREDENTIALS, ...PPP2_ON, PAYPAL_API_BASE_URL: stub.url })
+      );
+      assert.equal(run.code, 0, run.stderr);
+      assert.equal(run.json?.ok, false);
+      assert.equal(run.json?.result?.payout?.code, "DUPLICATE_SENDER_BATCH_ID");
+      assert.equal(run.json?.result?.payout?.no_funds_moved, true);
+      assert.equal(run.json?.result?.payout?.original_batch_id, "BATCH-ORIGINAL-1");
+      assert.match(run.json?.result?.payout?.error, /Do not retry with a new key/);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("refuses an amount with more than two decimals instead of rounding it", async () => {
+    const stub = await startStub(() => null);
+    try {
+      const run = await runPayout(
+        args({ amount: "12.345" }),
+        baseEnv({ ...CREDENTIALS, ...PPP2_ON, PAYPAL_API_BASE_URL: stub.url })
+      );
+      assert.equal(run.json?.result?.payout?.code, "INVALID_ARGUMENTS");
+      assert.match(run.json?.result?.payout?.error, /at most two decimals/);
+      assert.equal(stub.hits.length, 0);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("refuses exponent and hex amounts that Number() would happily parse", async () => {
+    for (const amount of ["1e3", "0x10"]) {
+      const stub = await startStub(() => null);
+      try {
+        const run = await runPayout(
+          args({ amount }),
+          baseEnv({ ...CREDENTIALS, ...PPP2_ON, PAYPAL_API_BASE_URL: stub.url })
+        );
+        assert.equal(run.json?.result?.payout?.code, "INVALID_ARGUMENTS", amount);
+        assert.equal(stub.hits.length, 0, amount);
+      } finally {
+        await stub.close();
+      }
+    }
+  });
+
+  it("normalises a one-decimal amount and reports the recipient", async () => {
+    const stub = await stubReturningBatchStatus("SUCCESS");
+    try {
+      const run = await runPayout(
+        args({ amount: "12,5" }),
+        baseEnv({ ...CREDENTIALS, ...PPP2_ON, PAYPAL_API_BASE_URL: stub.url })
+      );
+      assert.equal(run.json?.ok, true, run.stderr);
+      assert.equal(run.json?.result?.payout?.amount, "12.50");
+      assert.equal(run.json?.result?.payout?.recipient, "younestsouli2019@gmail.com");
+      const submission = stub.hits.find((hit) => hit.url === "/v1/payments/payouts");
+      assert.equal(JSON.parse(submission.body).items[0].amount.value, "12.50");
+    } finally {
+      await stub.close();
+    }
+  });
+
   it("refuses a batch PayPal denied and reports no funds as moved", async () => {
     const stub = await startStub((hit) => {
       if (hit.url === "/v1/oauth2/token") {

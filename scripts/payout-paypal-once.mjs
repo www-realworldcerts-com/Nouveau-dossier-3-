@@ -14,12 +14,17 @@
  * the explanation is printed.
  */
 
+import { createHash } from "node:crypto";
 import { createPayPalPayoutBatch } from "../src/paypal-api.mjs";
 import { ALLOWED_BENEFICIARIES } from "../src/policy/RecipientRegistry.mjs";
 import { readArgs } from "./lib/cli-args.mjs";
 
 const MAX_AMOUNT = 100000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
+// Plain decimal with at most two fraction digits; a comma is accepted as the
+// decimal separator, but "1,234" is three decimals and is refused.
+const AMOUNT_RE = /^\d+(?:[.,]\d{1,2})?$/;
 
 // PayPal's payout batch statuses. Only these mean the batch was taken for
 // processing; anything else (FAILED, BLOCKED, a missing status) is not a
@@ -86,10 +91,40 @@ function isLoopbackEndpoint(url) {
   }
 }
 
+/**
+ * PayPal refuses a `sender_batch_id` reused within 30 days, so the same payment
+ * must always produce the same id. A dispatch that omits an explicit key gets
+ * one derived from what is being paid, which makes a plain re-run collide
+ * instead of paying twice.
+ */
+function paymentIdempotencyKey(args, { amount, currency, email, note }) {
+  const explicit = String(args["idempotency-key"] ?? "").trim();
+  if (explicit) return explicit;
+  return createHash("sha256")
+    .update([amount.toFixed(2), currency, email.toLowerCase(), note].join("|"))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+function isDuplicateSenderBatchId(message) {
+  return /sender_batch_id/i.test(message) && /already\s+exists/i.test(message);
+}
+
+function originalBatchIdFromMessage(message) {
+  const match = message.match(/\/v1\/payments\/payouts\/([A-Za-z0-9-]+)/);
+  return match ? match[1] : null;
+}
+
 function parseAmount(raw) {
-  const amount = Number(String(raw).replace(",", "."));
+  // Refuse rather than round: 12.345 must not become a 12.35 payment nobody
+  // typed, and exponent/hex notation is not an amount a human meant to send.
+  const text = String(raw ?? "").trim();
+  if (!AMOUNT_RE.test(text)) return null;
+  const amount = Number(text.replace(",", "."));
   if (!Number.isFinite(amount) || amount <= 0) return null;
   if (amount > MAX_AMOUNT) return null;
+  // Safe now that the input has at most two decimals; the round only strips
+  // binary floating-point noise (12.35 * 100 = 1234.9999999999998).
   return Math.round(amount * 100) / 100;
 }
 
@@ -100,7 +135,7 @@ async function main() {
     print({
       ok: false,
       usage:
-        "node scripts/payout-paypal-once.mjs --confirm --amount <n> --currency <ISO> --email <owner> [--note <text>] [--sender-batch-id <id>]",
+        "node scripts/payout-paypal-once.mjs --confirm --amount <n> --currency <ISO> --email <owner> [--note <text>] [--idempotency-key <key>]",
       result: { payout: { status: "NOT_ATTEMPTED", no_funds_moved: true, error: "help requested" } }
     });
   }
@@ -109,7 +144,7 @@ async function main() {
   if (amount == null) {
     refuse({
       code: "INVALID_ARGUMENTS",
-      error: `--amount must be a number greater than 0 and at most ${MAX_AMOUNT} (got ${JSON.stringify(args.amount ?? null)}).`
+      error: `--amount must be a number greater than 0, at most ${MAX_AMOUNT}, with at most two decimals (got ${JSON.stringify(args.amount ?? null)}).`
     });
   }
 
@@ -142,6 +177,14 @@ async function main() {
   const note = String(args.note ?? "").trim();
   if (note.length > 400) {
     refuse({ code: "INVALID_ARGUMENTS", error: "--note must be 400 characters or fewer." });
+  }
+
+  const explicitKey = String(args["idempotency-key"] ?? "").trim();
+  if (explicitKey && !IDEMPOTENCY_KEY_RE.test(explicitKey)) {
+    refuse({
+      code: "INVALID_ARGUMENTS",
+      error: "--idempotency-key must be 1-64 characters of A-Z, a-z, 0-9, dot, underscore or hyphen."
+    });
   }
 
   if (args.confirm !== true) {
@@ -180,11 +223,10 @@ async function main() {
     });
   }
 
-  const senderBatchId =
-    String(args["sender-batch-id"] ?? "").trim() ||
-    `owner-payout-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14)}-${Math.random()
-      .toString(36)
-      .slice(2, 10)}`;
+  // Deterministic on purpose: a fresh id per run is what let a re-dispatch pay
+  // a second time, because PayPal only deduplicates on sender_batch_id.
+  const idempotencyKey = paymentIdempotencyKey(args, { amount, currency, email, note });
+  const senderBatchId = `owner-payout-${idempotencyKey}`;
 
   const items = [
     {
@@ -205,12 +247,33 @@ async function main() {
       emailMessage: note || undefined
     });
   } catch (error) {
+    const message = String(error?.message ?? String(error));
+    if (isDuplicateSenderBatchId(message)) {
+      // PayPal keeps the first batch for 30 days and rejects the repeat. This
+      // run sent nothing; paying again would need a deliberately new key.
+      const originalBatchId = originalBatchIdFromMessage(message);
+      print({
+        ok: false,
+        senderBatchId,
+        result: {
+          payout: {
+            code: "DUPLICATE_SENDER_BATCH_ID",
+            status: "DUPLICATE",
+            sender_batch_id: senderBatchId,
+            ...(originalBatchId ? { original_batch_id: originalBatchId } : {}),
+            no_funds_moved: true,
+            error: `PayPal already has a payout batch for sender_batch_id ${senderBatchId}, so this dispatch sent nothing. Do not retry with a new key; check the original batch in PayPal first.`
+          }
+        }
+      });
+    }
+
     print({
       ok: false,
       result: {
         payout: {
           status: "UNKNOWN",
-          error: `PayPal payout request failed: ${error?.message ?? String(error)}`
+          error: `PayPal payout request failed: ${message}`
         }
       }
     });
@@ -263,6 +326,7 @@ async function main() {
     ok: true,
     batchId,
     senderBatchId,
+    idempotencyKey,
     result: {
       payout: {
         // Accepted for processing. "IN_TRANSIT" is a submission, not settlement.
@@ -271,7 +335,8 @@ async function main() {
         batch_id: batchId,
         sender_batch_id: senderBatchId,
         amount: amount.toFixed(2),
-        currency
+        currency,
+        recipient: email
       }
     }
   });

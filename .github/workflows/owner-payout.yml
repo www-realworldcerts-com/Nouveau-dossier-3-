@@ -32,6 +32,14 @@ on:
         type: string
         required: false
         default: Owner payout
+      idempotency_key:
+        description: >-
+          Payment reference. Leave empty to derive one from amount, currency,
+          email and note; a re-run with the same key is refused by PayPal
+          instead of paying twice.
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -64,6 +72,7 @@ jobs:
           INPUT_CURRENCY: ${{ inputs.currency }}
           INPUT_EMAIL: ${{ inputs.email }}
           INPUT_NOTE: ${{ inputs.note }}
+          INPUT_IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
           PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
           PAYPAL_CLIENT_SECRET: ${{ secrets.PAYPAL_CLIENT_SECRET }}
           PAYPAL_MODE: ${{ vars.PAYPAL_MODE || 'live' }}
@@ -87,7 +96,8 @@ jobs:
             --amount "$INPUT_AMOUNT" \
             --currency "$INPUT_CURRENCY" \
             --email "$INPUT_EMAIL" \
-            --note "$INPUT_NOTE" > out.json
+            --note "$INPUT_NOTE" \
+            --idempotency-key "$INPUT_IDEMPOTENCY_KEY" > out.json
           cat out.json
           node ./scripts/check-owner-payout-result.mjs < out.json
 

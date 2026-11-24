@@ -1,6 +1,28 @@
 # Changelog
 
 ## 2026-11-24
+- The amount PayPal verified is kept and compared on the money path.
+  `recordVerifiedWebhook` stored only the psp/event/transmission ids, so a
+  settlement block was built from the revenue row's own numbers and a row could
+  claim any amount for a real capture id. A receipt now records the
+  `resource.amount` and currency the provider stated; `findVerifiedWebhook`
+  returns that receipt and `agreesWithVerifiedAmount` compares a proof against
+  it, and the ingest-time bind, `authorizeRevenueSettlement` and the one-off
+  backfill all refuse a row whose numbers disagree with it
+  (`provider_amount_mismatch`). Receipts written before this carry no amount and
+  are treated as unable to contradict a row, so legacy captures still bind.
+- A capture whose amount the verified webhook contradicts is now an incident.
+  The ingest-time bind and the one-off backfill refused such a row
+  (`provider_amount_mismatch`) with no `FINDING` line and no settlement-block
+  entry, so the row sat unsettleable and no audit saw it. Both now write
+  `FINDING SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH [critical]` and append an
+  `evidence_amount_mismatch` line to the settlement block log, and the
+  silent-failure audit raises `SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH` (critical)
+  for every row still open, with the difference between the recorded and the
+  verified amount. It is reported apart from `SETTLEMENT_EVIDENCE_UNBOUND`
+  because no block is missing: the row's own number is wrong, so the remedy is
+  to reconcile the row, not to repair the chain volume. A later settlement of
+  the row closes the finding.
 - Evidence chain appends are serialised. `EvidenceIntegrityChain.addBlock` is
   read-modify-write: two captures recorded at the same moment both read the same
   last block, each appended its own and the second write removed the first, so

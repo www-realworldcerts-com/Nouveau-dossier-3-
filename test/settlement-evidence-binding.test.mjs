@@ -61,6 +61,25 @@ function useBlockLog(t) {
     return { file };
 }
 
+/** The registry of webhooks PayPal verified, with the amount it confirmed. */
+function useRegistry(t, { amount = 19, currency = 'USD' } = {}) {
+    const file = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'settlement-registry-')),
+        'verified-webhooks.ndjson'
+    );
+    fs.writeFileSync(
+        file,
+        JSON.stringify({ provider: 'paypal', psp_id: CAPTURE, amount, currency }) + '\n',
+        'utf8'
+    );
+    const previous = process.env.PSP_WEBHOOK_REGISTRY_FILE;
+    process.env.PSP_WEBHOOK_REGISTRY_FILE = file;
+    t.after(() => {
+        if (previous === undefined) delete process.env.PSP_WEBHOOK_REGISTRY_FILE;
+        else process.env.PSP_WEBHOOK_REGISTRY_FILE = previous;
+    });
+}
+
 /** What the webhook mapper hands the ledger for a completed capture. */
 function captureEvent(overrides = {}) {
     return {
@@ -122,6 +141,79 @@ test('recording a capture binds the evidence its settlement will be checked agai
     assert.equal(blocks[0].proof.currency, 'USD');
     assert.equal(blocks[0].hash, EvidenceIntegrityChain.calculateBlockHash(blocks[0]));
     assert.equal(fs.existsSync(blockLog.file), false, 'a bound capture raises no incident');
+});
+
+test('a capture whose row claims another amount than the provider verified is not bound', async t => {
+    const chain = useChain(t);
+    const blockLog = useBlockLog(t);
+    // PayPal said 25 arrived; the ledger event says 19.
+    useRegistry(t, { amount: 25 });
+
+    // The refusal is also a FINDING line, so an operator tailing stderr sees it.
+    const stderr = [];
+    const savedWrite = process.stderr.write;
+    process.stderr.write = chunk => {
+        stderr.push(String(chunk));
+        return true;
+    };
+    let result;
+    try {
+        result = await createBase44RevenueEventIdempotent(
+            fakeBase44({ createdId: 'rev-1' }),
+            CFG,
+            captureEvent({ amount: 19 }),
+            { dryRun: false }
+        );
+    } finally {
+        process.stderr.write = savedWrite;
+    }
+
+    assert.equal(result.evidence.bound, false);
+    assert.equal(result.evidence.reason, 'provider_amount_mismatch');
+    assert.match(result.evidence.detail, /recorded 25 USD, the row records 19 USD/);
+    assert.deepEqual(chain.blocks(), [], 'the block must not be built from the row\'s own numbers');
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0], /^FINDING SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH \[critical\]/);
+    assert.match(stderr[0], /capture 5O190127TN364715T/);
+    assert.match(stderr[0], /recorded 25 USD, the row records 19 USD/);
+
+    // stderr is dropped on a serverless host, so the same refusal must be in the
+    // log the audit reads back: otherwise the row sits unsettleable unnamed.
+    const log = readSettlementBlocks(process.cwd(), { env: process.env });
+    assert.equal(log.path, blockLog.file);
+    assert.equal(log.records.length, 1, 'the mismatched row is an incident, not only a return value');
+    const [line] = log.records;
+    assert.equal(line.outcome, 'evidence_amount_mismatch');
+    assert.equal(line.key, 'rev-1');
+    assert.equal(line.revenue_event_id, 'rev-1');
+    assert.equal(line.psp_transaction_id, CAPTURE);
+    assert.equal(line.reason, 'provider_amount_mismatch');
+    assert.match(line.error, /recorded 25 USD, the row records 19 USD/);
+    assert.equal(line.source, 'revenue_ingest');
+    assert.equal(openSettlementBlocks(log.records).length, 1, 'the audit sees it as still open');
+
+    const settlement = await authorizeRevenueSettlement(
+        fakeBase44({ row: revenueRow({ id: 'rev-1', amount: 19 }) }),
+        CFG,
+        { revenueEventId: 'rev-1' }
+    );
+    assert.equal(settlement.ok, false);
+    assert.equal(settlement.reason, 'provider_amount_mismatch');
+});
+
+test('a capture whose row matches the verified amount is bound', async t => {
+    const chain = useChain(t);
+    useRegistry(t, { amount: 19 });
+
+    const result = await createBase44RevenueEventIdempotent(
+        fakeBase44({ createdId: 'rev-1' }),
+        CFG,
+        captureEvent(),
+        { dryRun: false }
+    );
+
+    assert.equal(result.evidence.bound, true);
+    assert.equal(chain.blocks()[0].proof.amount, 19);
 });
 
 test('a replayed capture reuses the block instead of chaining a second one', async t => {

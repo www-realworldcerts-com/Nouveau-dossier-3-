@@ -10,6 +10,7 @@ import {
 } from '../src/base44-revenue.mjs';
 import { EvidenceIntegrityChain } from '../src/real/evidence-integrity.mjs';
 import { RedressEngine } from '../src/resilience/redress.mjs';
+import { openSettlementBlocks, readSettlementBlocks } from '../src/resilience/settlement-blocks.mjs';
 import { backfillSettlementEvidence } from '../scripts/backfill-settlement-evidence.mjs';
 
 // Capture ids in the shape PayPal issues (17 uppercase alphanumerics).
@@ -30,10 +31,27 @@ function useChain(t) {
     };
 }
 
+/** The block log is where a row the run refuses has to become visible. */
+function useBlockLog(t) {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'backfill-block-log-')), 'settlement-blocks.ndjson');
+    const previous = process.env.SETTLEMENT_BLOCK_LOG;
+    process.env.SETTLEMENT_BLOCK_LOG = file;
+    t.after(() => {
+        if (previous === undefined) delete process.env.SETTLEMENT_BLOCK_LOG;
+        else process.env.SETTLEMENT_BLOCK_LOG = previous;
+    });
+    return { file };
+}
+
 /** The registry of webhooks PayPal actually verified. */
-function useRegistry(t, ids) {
+function useRegistry(t, ids, { amount = null, currency = 'USD' } = {}) {
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'backfill-registry-')), 'verified-webhooks.ndjson');
-    fs.writeFileSync(file, ids.map(id => JSON.stringify({ provider: 'paypal', psp_id: id })).join('\n') + '\n', 'utf8');
+    const entry = id => JSON.stringify({
+        provider: 'paypal',
+        psp_id: id,
+        ...(Number.isFinite(amount) ? { amount, currency } : {})
+    });
+    fs.writeFileSync(file, ids.map(entry).join('\n') + '\n', 'utf8');
     const previous = process.env.PSP_WEBHOOK_REGISTRY_FILE;
     process.env.PSP_WEBHOOK_REGISTRY_FILE = file;
     t.after(() => {
@@ -154,6 +172,47 @@ test('a scan that hits its row cap says so instead of looking complete', async t
     assert.equal(report.truncated, true, 'the rows past the cap were never looked at');
     assert.equal(report.summary.would_bind, 1);
     assert.equal(byId(report)['rev-new'].outcome, 'would_bind');
+});
+
+test('a row whose amount the verified webhook contradicts is refused and raised', async t => {
+    const chain = useChain(t);
+    const blockLog = useBlockLog(t);
+    // The receipt records what PayPal confirmed arriving at the capture.
+    useRegistry(t, [CAPTURE], { amount: 25, currency: 'USD' });
+
+    const stderr = [];
+    const savedWrite = process.stderr.write;
+    process.stderr.write = chunk => {
+        stderr.push(String(chunk));
+        return true;
+    };
+    let report;
+    try {
+        report = await backfillSettlementEvidence({ base44: fakeBase44([revenueRow()]), apply: true });
+    } finally {
+        process.stderr.write = savedWrite;
+    }
+
+    assert.equal(report.summary.refused, 1);
+    assert.equal(byId(report)['rev-good'].reason, 'provider_amount_mismatch');
+    assert.deepEqual(chain.blocks(), [], 'a block is not built from the row\'s own amount');
+
+    // A refused row is not a failed run, so the report alone stranded it: the
+    // run also writes the line the audit reads back.
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0], /^FINDING SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH \[critical\]/);
+    assert.match(stderr[0], /recorded 25 USD, the row records 19 USD/);
+
+    const log = readSettlementBlocks(process.cwd(), { env: process.env });
+    assert.equal(log.path, blockLog.file);
+    assert.equal(log.records.length, 1);
+    const [line] = log.records;
+    assert.equal(line.outcome, 'evidence_amount_mismatch');
+    assert.equal(line.key, 'rev-good');
+    assert.equal(line.psp_transaction_id, CAPTURE);
+    assert.equal(line.reason, 'provider_amount_mismatch');
+    assert.equal(line.source, 'settlement_evidence_backfill');
+    assert.equal(openSettlementBlocks(log.records).length, 1);
 });
 
 test('a block that disagrees with the row is refused, not overwritten', async t => {

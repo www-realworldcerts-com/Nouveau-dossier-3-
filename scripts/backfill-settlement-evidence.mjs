@@ -12,7 +12,9 @@
 // overwrite. A row whose existing block disagrees with its evidence is reported
 // and left exactly as it is. A row whose psp id no verified webhook named is
 // refused: the registry, not the row, decides whether the provider confirmed
-// the money.
+// the money. A refused row that stays unsettleable (an amount the verified
+// webhook contradicts) is also written to the settlement block log, so the
+// audit raises it instead of leaving it stranded.
 //
 //   node scripts/backfill-settlement-evidence.mjs                 # report only
 //   node scripts/backfill-settlement-evidence.mjs --apply         # write blocks
@@ -36,7 +38,9 @@ import {
     settlementEvidenceProof
 } from '../src/base44-revenue.mjs';
 import { EvidenceIntegrityChain } from '../src/real/evidence-integrity.mjs';
-import { assertPSPWebhookExists } from '../src/real/psp/psp-webhooks.mjs';
+import { recordSettlementEvidenceAmountMismatch } from '../src/resilience/settlement-blocks.mjs';
+import { findVerifiedWebhook } from '../src/real/psp/webhook-registry.mjs';
+import { agreesWithVerifiedAmount } from '../src/real/psp/psp-webhooks.mjs';
 
 /**
  * Rows as the ledger returns them, newest first, bounded by `maxRows`.
@@ -114,14 +118,45 @@ export async function backfillSettlementEvidence({
             continue;
         }
 
-        // The registry is the authority on whether a provider confirmed this id,
-        // so a provider-shaped string that no verified webhook named is refused
-        // here rather than bound and left to fail the gate later.
-        if (!(await assertPSPWebhookExists(evidence.proof.psp_id))) {
+        // The registry is the authority on whether a provider confirmed this
+        // id and on the amount it confirmed, so one receipt answers both: an
+        // id no verified webhook named is refused here rather than bound and
+        // left to fail the gate later, and a receipt recording another amount
+        // is refused because the block would carry the row's own number into a
+        // payment nobody made.
+        const receipt = await findVerifiedWebhook(evidence.proof.psp_id);
+        if (!receipt) {
             results.push({
                 id,
                 outcome: 'refused',
                 reason: 'psp_id_not_named_by_verified_webhook',
+                psp_id: evidence.proof.psp_id
+            });
+            continue;
+        }
+
+        if (!agreesWithVerifiedAmount(evidence.proof, receipt)) {
+            const detail =
+                `the verified webhook for ${evidence.proof.psp_id} recorded ${receipt.amount} ${receipt.currency}, ` +
+                `the row records ${evidence.proof.amount} ${evidence.proof.currency}`;
+            // A refused row is not a failed run, so the report alone would leave
+            // this row unsettleable with no incident. Record it where the audit
+            // reads, exactly as capture ingest does.
+            process.stderr.write(
+                `FINDING SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH [critical] capture ${evidence.proof.psp_id} was ` +
+                `recorded as revenue event ${id}, but ${detail}. That row cannot be settled until its amount is reconciled.\n`
+            );
+            recordSettlementEvidenceAmountMismatch(process.cwd(), {
+                revenue_event_id: id,
+                psp_transaction_id: evidence.proof.psp_id,
+                reason: 'provider_amount_mismatch',
+                error: detail,
+                source: 'settlement_evidence_backfill'
+            });
+            results.push({
+                id,
+                outcome: 'refused',
+                reason: 'provider_amount_mismatch',
                 psp_id: evidence.proof.psp_id
             });
             continue;

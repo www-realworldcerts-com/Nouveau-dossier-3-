@@ -33,14 +33,32 @@ export function isServerlessRuntime(env = process.env) {
     return SERVERLESS_ENV.some(name => Boolean(String(env?.[name] ?? '').trim()));
 }
 
+/**
+ * The amount and currency PayPal verified in the webhook, or null when the
+ * event carried none.
+ *
+ * This is the only number on the money path that the provider itself stated: a
+ * revenue row's amount is what we recorded, not what arrived. It is persisted
+ * with the receipt so a later bind or settlement can compare against it.
+ */
+function verifiedAmountFromPayPalEvent(evt) {
+    const amount = evt?.resource?.amount ?? {};
+    const value = Number(amount?.value);
+    const currency = normalizeWebhookId(amount?.currency_code ?? amount?.currency).toUpperCase();
+    if (!Number.isFinite(value) || value <= 0 || !currency) return null;
+    return { amount: value, currency };
+}
+
 /** Which PayPal identifiers can name a received webhook. */
 export function identifiersFromPayPalEvent(evt, transmissionId = '') {
     const resource = evt?.resource ?? {};
+    const verified = verifiedAmountFromPayPalEvent(evt);
     return {
         provider: 'paypal',
         psp_id: normalizeWebhookId(resource?.id || resource?.transaction_id || resource?.capture_id),
         event_id: normalizeWebhookId(evt?.id),
-        transmission_id: normalizeWebhookId(transmissionId)
+        transmission_id: normalizeWebhookId(transmissionId),
+        ...(verified ? { amount: verified.amount, currency: verified.currency } : {})
     };
 }
 
@@ -184,6 +202,16 @@ export async function recordVerifiedWebhook(record, { registry } = {}) {
         provider: normalizeWebhookId(record?.provider) || 'paypal',
         verified_at: record?.verified_at ?? new Date().toISOString()
     });
+}
+
+/** The receipt a provider id names, or null. Errors propagate: a registry that
+ * cannot be read has not confirmed anything. */
+export async function findVerifiedWebhook(id, { registry } = {}) {
+    const target = normalizeWebhookId(id);
+    if (!target) return null;
+    const store = registry ?? resolveWebhookRegistry();
+    const rows = await store.entries();
+    return rows.find(row => entryMatchesId(row, target)) ?? null;
 }
 
 export async function isRegisteredWebhookId(id, { registry } = {}) {

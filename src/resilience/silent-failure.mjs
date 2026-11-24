@@ -16,7 +16,12 @@ import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
 import { storefrontVerdictHint } from './storefront-probe.mjs';
 import { readLedgerRecords } from '../real/ledger/reversals.mjs';
-import { SETTLEMENT_EVIDENCE_UNBOUND, openSettlementBlocks, readSettlementBlocks } from './settlement-blocks.mjs';
+import {
+    SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH,
+    SETTLEMENT_EVIDENCE_UNBOUND,
+    openSettlementBlocks,
+    readSettlementBlocks
+} from './settlement-blocks.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") protocol.
@@ -205,6 +210,19 @@ export const FINDING_CATALOG = {
         mitigation: 'Capture ingest appends an evidence_unbound line to the settlement block log, and every audit reads that log back; a later settlement of the same row closes it.',
         verification: 'The listed revenue rows have a bound evidence block, are paid_out, and the next audit reports no SETTLEMENT_EVIDENCE_UNBOUND finding.',
         owner_action: 'Check that the evidence-chain volume is writable, then replay the listed captures.',
+        sla_hours: 24
+    },
+    SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'A revenue row claims an amount the verified webhook never recorded',
+        impact: 'The capture was recorded at an amount PayPal did not confirm, so the evidence its payout is checked against is refused and the row can never settle through the gated path. Binding it would authorise a payment the provider never took, and the revenue total it feeds is wrong.',
+        containment: 'Do not settle the row from its own numbers and do not overwrite the amount to make the bind pass; treat the revenue total and any payout decision for this capture as wrong until it is reconciled.',
+        obligation: 'Reconcile the revenue row against the verified capture and record the correction with its provider evidence.',
+        remedy: 'Read the recorded difference, confirm the capture against PayPal, then correct the ledger to the provider amount (a reversal row plus a corrected capture row, keeping the webhook id as evidence) and replay the capture so bindSettlementEvidence binds the block.',
+        mitigation: 'Capture ingest refuses to bind an amount the verified webhook contradicts and appends an evidence_amount_mismatch line to data/resilience/settlement-blocks.ndjson; every audit reads that log back, and a later settlement of the same row closes it.',
+        verification: 'The listed revenue rows match their verified capture amounts, have a bound evidence block, and the next audit reports no SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH finding.',
+        owner_action: 'Confirm each listed capture against PayPal and correct the revenue row to the provider amount.',
         sla_hours: 24
     },
     SILENT_EXCEPTION_SWALLOW: {
@@ -1018,7 +1036,37 @@ export function detectSilentFailures({
         );
     }
 
-    const blockedSettlements = openSettlements.filter(row => row.outcome !== SETTLEMENT_EVIDENCE_UNBOUND);
+    // The mirror incident: the row's evidence was refused because the provider
+    // recorded another amount. No payout went out either, but the ledger number
+    // is wrong, so the remedy is different from a missing block.
+    const mismatchedEvidence = openSettlements
+        .filter(row => row.outcome === SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH)
+        .map(row => ({
+            revenue_event_id: row.revenue_event_id,
+            psp_transaction_id: row.psp_transaction_id,
+            reason: row.reason,
+            error: row.error,
+            source: row.source,
+            recorded_at: row.blocked_at,
+            age_hours: row.age_hours
+        }));
+    if (mismatchedEvidence.length) {
+        add(
+            'SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH',
+            `${mismatchedEvidence.length} revenue row(s) claim an amount the verified webhook never recorded: ` +
+                `${mismatchedEvidence.map(row => row.revenue_event_id).filter(Boolean).join(', ')}. ` +
+                `Their evidence cannot be bound, so they cannot settle and the ledger total is wrong.`,
+            {
+                count: mismatchedEvidence.length,
+                log: settlementBlockLog.path || null,
+                rows: mismatchedEvidence
+            }
+        );
+    }
+
+    const blockedSettlements = openSettlements.filter(
+        row => row.outcome !== SETTLEMENT_EVIDENCE_UNBOUND && row.outcome !== SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH
+    );
     if (blockedSettlements.length) {
         add(
             'REVENUE_SETTLEMENT_BLOCKED',
@@ -1229,6 +1277,7 @@ export function detectSilentFailures({
                 // and an unsettleable capture are both work in this log.
                 open: openSettlements.length,
                 unbound_evidence: unboundEvidence.length,
+                amount_mismatch: mismatchedEvidence.length,
                 path: settlementBlockLog.path || null
             },
             silent_catches: catches,

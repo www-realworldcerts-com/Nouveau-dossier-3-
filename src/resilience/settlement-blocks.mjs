@@ -28,6 +28,13 @@ export const SETTLEMENT_SETTLED = 'settled';
  * unaccounted for, the row is simply unsettleable until the block exists.
  */
 export const SETTLEMENT_EVIDENCE_UNBOUND = 'evidence_unbound';
+/**
+ * A capture whose row claims an amount the verified webhook never recorded.
+ * The block is refused for the same reason as `evidence_unbound` — the row is
+ * unsettleable — but the remedy differs (the row is wrong, not the chain
+ * volume), so the audit reports it as its own incident.
+ */
+export const SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH = 'evidence_amount_mismatch';
 
 export function settlementBlockLogPath(root = process.cwd(), env = process.env) {
     return env[SETTLEMENT_BLOCK_LOG_ENV]
@@ -78,6 +85,19 @@ export function recordSettlementBlock(root = process.cwd(), record = {}, env = p
  */
 export function recordSettlementEvidenceUnbound(root = process.cwd(), record = {}, env = process.env) {
     return append(root, { ...record, outcome: SETTLEMENT_EVIDENCE_UNBOUND }, env);
+}
+
+/**
+ * A capture recorded at an amount the provider contradicts, where the audit
+ * can see it.
+ *
+ * Ingest refused to bind this row's evidence from the start, so the refusal was
+ * a return value only: the row sat unsettleable and no incident named it. It is
+ * appended here instead, keyed by the revenue row, so the audit raises it and a
+ * later settlement of the same row (once the amount is reconciled) closes it.
+ */
+export function recordSettlementEvidenceAmountMismatch(root = process.cwd(), record = {}, env = process.env) {
+    return append(root, { ...record, outcome: SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH }, env);
 }
 
 /**

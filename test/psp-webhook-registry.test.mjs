@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
     entryMatchesId,
     fileWebhookRegistry,
+    findVerifiedWebhook,
     identifiersFromPayPalEvent,
     isRegisteredWebhookId,
     parseRegistryEntries,
@@ -14,7 +15,7 @@ import {
     registryStatus,
     remoteWebhookRegistry
 } from '../src/real/psp/webhook-registry.mjs';
-import { assertPSPWebhookExists } from '../src/real/psp/psp-webhooks.mjs';
+import { agreesWithVerifiedAmount, assertPSPWebhookExists } from '../src/real/psp/psp-webhooks.mjs';
 import { ProofValidator } from '../src/real/proof-validator.mjs';
 
 const CAPTURE_ID = '5O190127TN364715T';
@@ -58,6 +59,42 @@ test('a recorded webhook confirms its capture, event and transmission ids only',
     assert.equal(entry.provider, 'paypal');
     assert.equal(entry.psp_id, CAPTURE_ID);
     assert.match(entry.verified_at, /^\d{4}-\d{2}-\d{2}T/);
+    // The amount PayPal stated is kept: it is the only number on the money path
+    // the provider itself gave us.
+    assert.equal(identifiers.amount, 42);
+    assert.equal(identifiers.currency, 'USD');
+    assert.equal(entry.amount, 42);
+    assert.equal(entry.currency, 'USD');
+});
+
+test('the receipt for a capture carries the amount the provider confirmed', async () => {
+    const registry = fileWebhookRegistry({ file: tempRegistryFile(), env: {} });
+    await recordVerifiedWebhook(identifiersFromPayPalEvent(captureEvent(), 'TRANSMISSION-5'), { registry });
+
+    const receipt = await findVerifiedWebhook(CAPTURE_ID, { registry });
+    assert.equal(receipt.amount, 42);
+    assert.equal(receipt.currency, 'USD');
+    assert.equal(await findVerifiedWebhook('5O190127TN364715X', { registry }), null, 'an unnamed id has no receipt');
+    assert.equal(await findVerifiedWebhook('', { registry }), null);
+});
+
+test('a receipt recorded before amounts were kept states no number', async () => {
+    const registry = fileWebhookRegistry({ file: tempRegistryFile(), env: {} });
+    await recordVerifiedWebhook({ provider: 'paypal', psp_id: CAPTURE_ID }, { registry });
+
+    assert.equal(await assertPSPWebhookExists(CAPTURE_ID, { registry }), true);
+    const receipt = await findVerifiedWebhook(CAPTURE_ID, { registry });
+    assert.equal(agreesWithVerifiedAmount({ amount: 19, currency: 'USD' }, receipt), true, 'legacy receipts cannot contradict a row');
+});
+
+test('a proof agrees with a receipt only on amount and currency', () => {
+    const receipt = { amount: 42, currency: 'USD' };
+
+    assert.equal(agreesWithVerifiedAmount({ amount: 42, currency: 'usd' }, receipt), true);
+    assert.equal(agreesWithVerifiedAmount({ amount: 41.99, currency: 'USD' }, receipt), false);
+    assert.equal(agreesWithVerifiedAmount({ amount: 42, currency: 'EUR' }, receipt), false);
+    assert.equal(agreesWithVerifiedAmount({ amount: 0, currency: 'USD' }, null), true, 'no receipt contradicts nothing');
+    assert.equal(agreesWithVerifiedAmount({ amount: 0, currency: 'USD' }, { provider: 'paypal' }), true, 'a receipt with no amount contradicts nothing');
 });
 
 test('a receipt without a provider transaction id is refused and writes nothing', async () => {

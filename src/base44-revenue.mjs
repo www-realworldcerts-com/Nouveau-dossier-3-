@@ -3,7 +3,12 @@ import { demoteUnverifiedStatus, verifyRevenueEvent, RevenueNotProviderVerifiedE
 import { EvidenceIntegrityChain } from "./real/evidence-integrity.mjs";
 import { MoneyMovedGate } from "./real/money-moved-gate.mjs";
 import { reversalWithoutCaptureFinding } from "./real/ledger/reversals.mjs";
-import { recordSettlementEvidenceUnbound } from "./resilience/settlement-blocks.mjs";
+import { findVerifiedWebhook } from "./real/psp/webhook-registry.mjs";
+import { agreesWithVerifiedAmount } from "./real/psp/psp-webhooks.mjs";
+import {
+  recordSettlementEvidenceAmountMismatch,
+  recordSettlementEvidenceUnbound
+} from "./resilience/settlement-blocks.mjs";
 import { computeConstitutionHash } from "./policy/constitution.mjs";
 import { getConstitutionState, computeConstitutionHashFromFile } from "./bootstrap/constitution-validator.mjs";
 
@@ -236,6 +241,38 @@ async function bindSettlementEvidence({ revenueEventId, event = {} } = {}) {
     return { bound: false, reason: evidence.reason, psp_id: evidence.psp_id };
   }
   const { proof } = evidence;
+
+  // The row's numbers are not the provider's. A row claiming an amount the
+  // verified webhook does not record gets no block, because that block would
+  // authorise the inflated amount at payout. An unreadable registry is unknown
+  // here rather than a refusal: the capture still has to be recorded, and the
+  // settlement check fails closed on the same read.
+  const receipt = await findVerifiedWebhook(proof.psp_id).catch(() => null);
+  if (!agreesWithVerifiedAmount(proof, receipt)) {
+    const detail =
+      `the verified webhook for ${proof.psp_id} recorded ${receipt.amount} ${receipt.currency}, ` +
+      `the row records ${proof.amount} ${proof.currency}`;
+    process.stderr.write(
+      `FINDING SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH [critical] capture ${proof.psp_id} was recorded as ` +
+      `revenue event ${id}, but ${detail}. That row cannot be settled until its amount is reconciled.\n`
+    );
+    // Returning the refusal put the row in nobody's queue: it never settles and
+    // no incident names it. The audit reads this log back, so the same line is
+    // written here as for a capture whose evidence could not be bound.
+    recordSettlementEvidenceAmountMismatch(process.cwd(), {
+      revenue_event_id: id,
+      psp_transaction_id: proof.psp_id,
+      reason: "provider_amount_mismatch",
+      error: detail,
+      source: "revenue_ingest"
+    });
+    return {
+      bound: false,
+      reason: "provider_amount_mismatch",
+      psp_id: proof.psp_id,
+      detail
+    };
+  }
 
   try {
     // A replay must not chain a second block for the same row.
@@ -542,7 +579,9 @@ async function findRevenueRowById(entity, revenueEventId) {
  * The proof is the row's **own** provider evidence, never the payout id that
  * happens to be completing: otherwise any real transfer could settle a row
  * whose money was invented. A row with no provider transaction id is refused,
- * as is a provider id no verified webhook named.
+ * as is a provider id no verified webhook named. The amount and currency must
+ * be the ones that webhook recorded, so a row claiming more than the provider
+ * confirmed is refused before its bound block is even read.
  *
  * Never throws. The caller must write nothing when `ok` is false and report
  * `reason` instead of letting the settlement disappear.
@@ -590,6 +629,22 @@ async function decideRevenueSettlement(base44, cfg, { revenueEventId } = {}) {
     currency: String(row[cfg.fieldMap.currency] ?? cfg.defaultCurrency ?? "").toUpperCase(),
     timestamp: row[cfg.fieldMap.occurredAt] ?? new Date().toISOString()
   };
+
+  // The amount must be the one the provider verified: the row's number is what
+  // we recorded, the receipt is what PayPal said arrived. A row claiming more
+  // is refused before its block is read, because a block that agrees with a
+  // wrong row — one bound before this check existed — would authorise paying
+  // money nobody paid. A read failure propagates and becomes `gate_error`, so
+  // unknown numbers never pay.
+  const receipt = await findVerifiedWebhook(verification.psp_id);
+  if (!agreesWithVerifiedAmount(proof, receipt)) {
+    return {
+      ok: false,
+      reason: "provider_amount_mismatch",
+      psp_id: verification.psp_id,
+      detail: `the verified webhook for ${verification.psp_id} recorded ${receipt.amount} ${receipt.currency}, the row claims ${proof.amount} ${proof.currency}`
+    };
+  }
 
   const gateEvent = {
     id,

@@ -9,6 +9,7 @@ import {
     openSettlementBlocks,
     readSettlementBlocks,
     recordSettlementBlock,
+    recordSettlementEvidenceAmountMismatch,
     recordSettlementEvidenceUnbound,
     recordSettlementSettled,
     settlementBlockLogPath
@@ -185,6 +186,48 @@ test('a capture with no bound evidence is its own incident, not a payout block',
 
     // No payout went out, so the payout-block finding must not claim one did.
     assert.equal(findings.some(item => item.code === 'REVENUE_SETTLEMENT_BLOCKED'), false);
+});
+
+test('a row whose amount the provider contradicts is its own incident', () => {
+    const root = tempRoot();
+    const at = new Date(NOW.getTime() - 3 * 3600000).toISOString();
+
+    recordSettlementEvidenceAmountMismatch(root, {
+        revenue_event_id: 'rev-mismatch',
+        psp_transaction_id: '5O190127TN364715T',
+        reason: 'provider_amount_mismatch',
+        error: 'the verified webhook recorded 25 USD, the row records 19 USD',
+        source: 'revenue_ingest',
+        at
+    }, {});
+
+    const { findings, evidence } = detectSilentFailures(cleanOptions(root));
+
+    const finding = findings.find(item => item.code === 'SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH');
+    assert.ok(finding, 'a row the bind refused must be an incident');
+    assert.equal(finding.severity, 'critical');
+    assert.match(finding.detail, /rev-mismatch/);
+    const [row] = finding.evidence.rows;
+    assert.equal(row.revenue_event_id, 'rev-mismatch');
+    assert.equal(row.psp_transaction_id, '5O190127TN364715T');
+    assert.equal(row.reason, 'provider_amount_mismatch');
+    assert.match(row.error, /recorded 25 USD, the row records 19 USD/);
+    assert.equal(row.source, 'revenue_ingest');
+    assert.equal(row.age_hours, 3);
+    assert.equal(evidence.settlement_blocks.amount_mismatch, 1);
+
+    // No payout went out and the evidence is not merely missing: neither other
+    // settlement incident may claim this row.
+    assert.equal(findings.some(item => item.code === 'REVENUE_SETTLEMENT_BLOCKED'), false);
+    assert.equal(findings.some(item => item.code === 'SETTLEMENT_EVIDENCE_UNBOUND'), false);
+
+    recordSettlementSettled(root, { revenue_event_id: 'rev-mismatch' }, {});
+    const closed = detectSilentFailures(cleanOptions(root));
+    assert.equal(
+        closed.findings.some(item => item.code === 'SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH'),
+        false,
+        'settling the reconciled row closes its incident'
+    );
 });
 
 test('a row that settles later closes its evidence incident', () => {

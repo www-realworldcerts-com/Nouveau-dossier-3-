@@ -94,14 +94,15 @@ function stubChain(t, bound = null) {
 }
 
 /** A registry that has received verified webhooks for these ids. */
-function useRegistry(t, ids) {
+function useRegistry(t, ids, { amount = null, currency = 'USD' } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'revenue-settlement-'));
     const file = path.join(dir, 'verified-webhooks.ndjson');
-    fs.writeFileSync(
-        file,
-        ids.map(id => JSON.stringify({ provider: 'paypal', psp_id: id })).join('\n') + '\n',
-        'utf8'
-    );
+    const entry = id => JSON.stringify({
+        provider: 'paypal',
+        psp_id: id,
+        ...(Number.isFinite(amount) ? { amount, currency } : {})
+    });
+    fs.writeFileSync(file, ids.map(entry).join('\n') + '\n', 'utf8');
     const previous = process.env.PSP_WEBHOOK_REGISTRY_FILE;
     process.env.PSP_WEBHOOK_REGISTRY_FILE = file;
     t.after(() => {
@@ -195,6 +196,33 @@ test('bound evidence that disagrees with the row is refused as a mismatch', asyn
     assert.equal(result.reason, 'settlement_evidence_mismatch');
     assert.match(result.detail, /bound evidence .* 25 USD does not match .* 19 USD/);
     assert.deepEqual(updates, []);
+});
+
+test('a row claiming more than the verified webhook recorded is refused', async t => {
+    // The block and the row agree with each other at 19; the provider says 42
+    // arrived at this capture id. Agreement with the block is not agreement with
+    // the money, so the row is refused before its block is trusted.
+    stubChain(t, BOUND_EVIDENCE);
+    useRegistry(t, [CAPTURE], { amount: 42, currency: 'USD' });
+    const { base44, updates } = fakeBase44(revenueRow({ metadata: { paypal_capture_id: CAPTURE } }));
+
+    const result = await authorizeRevenueSettlement(base44, CFG, { revenueEventId: 'rev-1' });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'provider_amount_mismatch');
+    assert.match(result.detail, /recorded 42 USD, the row claims 19 USD/);
+    assert.deepEqual(updates, []);
+});
+
+test('a provider-backed row whose verified amount matches is approved', async t => {
+    stubChain(t, BOUND_EVIDENCE);
+    useRegistry(t, [CAPTURE], { amount: 19, currency: 'USD' });
+    const { base44 } = fakeBase44(revenueRow({ metadata: { paypal_capture_id: CAPTURE } }));
+
+    const result = await authorizeRevenueSettlement(base44, CFG, { revenueEventId: 'rev-1' });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.psp_id, CAPTURE);
 });
 
 test('a provider-shaped id no verified webhook named is refused by the gate', async t => {

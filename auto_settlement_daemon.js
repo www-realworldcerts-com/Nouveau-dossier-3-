@@ -500,7 +500,16 @@ function groupEventsByRail(events) {
 
   for (const event of events) {
     const account = selectOptimalOwnerAccount(event.amount, event.currency);
-    const rail = account.type;
+    const rail = account?.type;
+
+    // Never guess: an event with no payable owner account is left for a human
+    // instead of being routed to a rail that cannot pay it.
+    if (!rail) {
+      const message = `NO_PAYABLE_OWNER_ACCOUNT: ${event.id} (${event.amount} ${event.currency}) has no owner account this daemon can pay; left unsettled`;
+      console.error(`❌ ${message}`);
+      state.addError(new Error(message));
+      continue;
+    }
 
     if (!batches[rail]) {
       batches[rail] = [];
@@ -737,21 +746,27 @@ async function executePayPalSettlement(batch) {
 }
 
 /**
+ * Writes a manual payout instruction where the operator expects it, creating
+ * the directory. A fresh checkout has no `exports/`, and the Payoneer rail used
+ * to throw there — after its payout claim was written, which withheld the rows
+ * until an operator intervened.
+ */
+function writeExportInstruction(filename, content) {
+  const exportDir = path.resolve(process.cwd(), 'exports');
+  fs.mkdirSync(exportDir, { recursive: true });
+  const filePath = path.join(exportDir, filename);
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
+
+/**
  * Bank Wire execution (generates CSV for manual upload)
  */
 async function executeBankWireSettlement(batch) {
   console.log('🏦 Generating Bank Wire CSV...');
 
-  // Generate bank wire CSV
-  const csv = generateBankWireCSV(batch);
   const filename = `bank_wire_${batch.batch_id}.csv`;
-  const exportDir = path.resolve(process.cwd(), 'exports');
-  if (!fs.existsSync(exportDir)) {
-    fs.mkdirSync(exportDir, { recursive: true });
-  }
-  const filePath = path.join(exportDir, filename);
-
-  fs.writeFileSync(filePath, csv);
+  const filePath = writeExportInstruction(filename, generateBankWireCSV(batch));
 
   console.log(`✅ Bank Wire CSV generated: ${filePath}`);
 
@@ -764,12 +779,8 @@ async function executeBankWireSettlement(batch) {
 async function executePayoneerSettlement(batch) {
   console.log('💼 Generating Payoneer CSV...');
 
-  // Generate Payoneer CSV
-  const csv = generatePayoneerCSV(batch);
   const filename = `payoneer_${batch.batch_id}.csv`;
-  const filePath = path.join('exports', filename);
-
-  fs.writeFileSync(filePath, csv);
+  const filePath = writeExportInstruction(filename, generatePayoneerCSV(batch));
 
   console.log(`✅ Payoneer CSV generated: ${filePath}`);
 
@@ -780,10 +791,13 @@ async function executePayoneerSettlement(batch) {
 // CSV GENERATION
 // ============================================================================
 
+// The payee column is the destination the selection built for the item, never a
+// registry constant: the rail and the payee are then chosen together, and a
+// re-identified account cannot be paid at an id the selection did not return.
 function generateBankWireCSV(batch) {
   const headers = 'Beneficiary RIB,Amount,Currency,Reference,Date';
   const rows = batch.items.map(item =>
-    `${OWNER_ACCOUNTS.bank.rib},${item.amount},${item.currency},${item.sender_item_id},${new Date().toISOString()}`
+    `${item.recipient},${item.amount},${item.currency},${item.sender_item_id},${new Date().toISOString()}`
   );
   return [headers, ...rows].join('\n');
 }
@@ -791,7 +805,7 @@ function generateBankWireCSV(batch) {
 function generatePayoneerCSV(batch) {
   const headers = 'Account ID,Amount,Currency,Description,Reference';
   const rows = batch.items.map(item =>
-    `${OWNER_ACCOUNTS.payoneer.accountId},${item.amount},${item.currency},${item.note},${item.sender_item_id}`
+    `${item.recipient},${item.amount},${item.currency},${item.note},${item.sender_item_id}`
   );
   return [headers, ...rows].join('\n');
 }

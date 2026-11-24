@@ -1,6 +1,19 @@
 # Changelog
 
 ## 2026-11-24
+- Two payout-rail bugs that could send an instruction nowhere are fixed. The
+  Payoneer rail wrote `exports/…` without creating the directory, so on a fresh
+  checkout it threw `ENOENT` after its payout claim was written, withholding the
+  rows until an operator intervened; both rails now write through one helper
+  that creates the directory. And `selectOptimalOwnerAccount` chose an account
+  while each CSV wrote a hardcoded registry constant as the payee, so the rail
+  and the destination could disagree, and an account without the identifier its
+  rail needs could be selected and then never paid. Selection now proves the
+  destination (`ownerAccountDestination`: enabled, a type a rail pays, and the
+  identifier that rail needs), the generated payout item carries it, the CSVs
+  pay the item's destination, and the primary Payoneer account id they write is
+  in `ALLOWED_BENEFICIARIES`. An event with no payable owner account is left
+  unsettled and reported instead of being routed.
 - The settlement daemon's emergency stop survives a restart. The latch was
   in-memory only while startup runs a settlement cycle immediately, so a restart
   — including the one an operator performs because money is misbehaving —

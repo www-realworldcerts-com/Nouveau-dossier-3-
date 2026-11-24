@@ -124,7 +124,8 @@ export const ALLOWED_BENEFICIARIES = [
     "15924956", // Short ID
     "4671926",  // Short ID
     "231486",    // Short ID
-    "101137054"
+    "101137054",
+    "85538995" // Primary Payoneer account id: the payee the PAYONEER rail pays
 ];
 
 export const LEGACY_REDIRECT_MAP = {

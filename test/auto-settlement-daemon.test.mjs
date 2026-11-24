@@ -10,6 +10,7 @@ import { latchEmergencyStop } from '../src/financial/settlement-emergency-stop.m
 
 import { startStub } from '../scripts/lib/http-stub.mjs';
 import { resolvePayoutClaim } from '../src/financial/payout-claims.mjs';
+import { OWNER_ACCOUNTS } from '../src/owner-directive.mjs';
 import { EvidenceIntegrityChain } from '../src/real/evidence-integrity.mjs';
 import { MoneyMovedGate } from '../src/real/money-moved-gate.mjs';
 
@@ -211,6 +212,42 @@ test('a CSV rail exports for payment without marking the revenue settled', async
     assert.deepEqual(daemon.getDaemonHealth().payout_claims.open, []);
 });
 
+test('the Payoneer rail creates the exports directory when it is missing', async () => {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    writeEvents([revenueEvent('evt-mkdir-1', 19)]);
+
+    await daemon.performSettlementCycle();
+
+    const [record] = readEvents();
+    assert.equal(record.status, 'export_ready');
+    assert.equal(fs.existsSync(exportsDir), true, 'a fresh checkout has no exports/');
+    assert.deepEqual(exportFiles(), [`payoneer_${record.payout_batch_id}.csv`]);
+    assert.match(csvText(), /evt-mkdir-1/);
+});
+
+test('a batch pays the destination the selection returned, not a registry constant', async () => {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+
+    // Re-identify the primary Payoneer account (to the other allowlisted id).
+    // The CSV must follow the account the selection chose, not a constant.
+    const original = OWNER_ACCOUNTS.payoneer.accountId;
+    OWNER_ACCOUNTS.payoneer.accountId = '101137054';
+    try {
+        writeEvents([revenueEvent('evt-payee-1', 19)]);
+        await daemon.performSettlementCycle();
+    } finally {
+        OWNER_ACCOUNTS.payoneer.accountId = original;
+    }
+
+    assert.equal(readEvents()[0].status, 'export_ready');
+    const text = csvText();
+    assert.match(text, /101137054/);
+    assert.doesNotMatch(text, new RegExp(original));
+});
+
 test('a negative reversal row is never settled or exported', async () => {
     fs.rmSync(exportsDir, { recursive: true, force: true });
     fs.mkdirSync(exportsDir, { recursive: true });
@@ -389,7 +426,7 @@ test('a rail that fails after the claim is not retried until it is resolved', as
 
     assert.equal(readEvents()[0].status, 'VERIFIED');
     assert.deepEqual(claims().map(record => record.status), ['in_flight']);
-    assert.match(claims()[0].error, /not a directory|ENOTDIR/i);
+    assert.match(claims()[0].error, /not a directory|ENOTDIR|EEXIST/i);
     assert.ok(daemon.getDaemonHealth().errorCount > 0);
 
     // The filesystem recovers, but the attempt is still ambiguous: no retry.

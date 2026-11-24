@@ -93,6 +93,7 @@ test('a report run names what it would bind and writes nothing', async t => {
     assert.deepEqual(chain.blocks(), [], 'a report run writes no evidence');
     assert.equal(report.applied, false);
     assert.equal(report.scanned, 5);
+    assert.equal(report.truncated, false);
     assert.equal(report.summary.would_bind, 1);
     assert.equal(report.summary.bound, 0);
     assert.equal(report.summary.refused, 2);
@@ -140,6 +141,19 @@ test('a second run finds its own work and changes nothing', async t => {
     assert.equal(again.summary.bound, 0);
     assert.equal(again.summary.already_bound, 1);
     assert.equal(chain.blocks().length, 1, 're-running must not chain a second block');
+});
+
+test('a scan that hits its row cap says so instead of looking complete', async t => {
+    useChain(t);
+    useRegistry(t, [CAPTURE]);
+    const base44 = fakeBase44([revenueRow({ id: 'rev-new' }), revenueRow({ id: 'rev-old' })]);
+
+    const report = await backfillSettlementEvidence({ base44, maxRows: 1 });
+
+    assert.equal(report.scanned, 1);
+    assert.equal(report.truncated, true, 'the rows past the cap were never looked at');
+    assert.equal(report.summary.would_bind, 1);
+    assert.equal(byId(report)['rev-new'].outcome, 'would_bind');
 });
 
 test('a block that disagrees with the row is refused, not overwritten', async t => {

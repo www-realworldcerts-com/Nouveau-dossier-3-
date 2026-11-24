@@ -10,6 +10,11 @@
   waits up to 10 s for it, and steals it only after 30 s, which is how a writer
   that died mid-append stops wedging the chain. The chain is written to a
   staging file and renamed, so a reader never sees a half written chain.
+- `scripts/backfill-settlement-evidence.mjs` now reports a truncated scan. The
+  walk is newest first and bounded at 5000 rows, so a full ledger used to produce
+  a report that looked complete while the oldest rows — the ones most likely to
+  predate ingest-time binding — were never examined. The report and the printed
+  summary say `truncated` and point at `--limit`.
 
 ## 2026-11-23
 - `scripts/backfill-settlement-evidence.mjs` (`npm run evidence:backfill`) binds

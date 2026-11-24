@@ -22,6 +22,10 @@
 // BASE44_OFFLINE_STORE_PATH), BASE44_REVENUE_ENTITY, PSP_WEBHOOK_REGISTRY_FILE,
 // and EVIDENCE_CHAIN_PATH — the last must point at the chain the settlement path
 // reads, or the blocks land where nothing looks for them.
+//
+// The scan is newest first and bounded (`--limit`, default 5000). A run that
+// hits the cap reports `truncated`, because the rows it did not look at are the
+// oldest ones and they stay unbound.
 
 import { pathToFileURL } from 'node:url';
 
@@ -34,7 +38,14 @@ import {
 import { EvidenceIntegrityChain } from '../src/real/evidence-integrity.mjs';
 import { assertPSPWebhookExists } from '../src/real/psp/psp-webhooks.mjs';
 
-async function listRows(entity, { pageSize, maxRows }) {
+/**
+ * Rows as the ledger returns them, newest first, bounded by `maxRows`.
+ *
+ * The whole row is fetched rather than a field projection: a row written by an
+ * older writer may carry its proof at the top level (`verification_proof`)
+ * instead of in metadata, and that fallback is what lets such a row be bound.
+ */
+async function listRows(entity, { pageSize = 250, maxRows = 5000 } = {}) {
     const rows = [];
     let offset = 0;
     while (rows.length < maxRows) {
@@ -44,35 +55,38 @@ async function listRows(entity, { pageSize, maxRows }) {
         offset += page.length;
         if (page.length < pageSize) break;
     }
-    return rows.slice(0, maxRows);
+    return { rows: rows.slice(0, maxRows), truncated: rows.length >= maxRows };
 }
 
 /**
  * Bind the missing evidence block for every eligible revenue row.
  *
- * Never settles anything and never overwrites a block. Returns every row it
- * looked at with its outcome, so a run can be read before it is trusted.
+ * Never settles anything and never overwrites a block. Returns an outcome for
+ * every row it read that has a ledger id, so a run can be read before it is
+ * trusted.
  */
 export async function backfillSettlementEvidence({
     base44,
     cfg = getRevenueConfigFromEnv(),
     apply = false,
-    pageSize = 250,
-    maxRows = 5000,
-    registryCheck = assertPSPWebhookExists,
-    chain = EvidenceIntegrityChain
+    maxRows = 5000
 } = {}) {
     if (!base44) throw new Error('Base44 client not configured (missing BASE44_APP_ID / BASE44_SERVICE_TOKEN)');
 
     const entity = base44.asServiceRole.entities[cfg.entityName];
     const metadataField = cfg.fieldMap.metadata;
-    const rows = await listRows(entity, { pageSize, maxRows });
+    const { rows, truncated } = await listRows(entity, { maxRows });
     const results = [];
 
     for (const row of rows) {
         const id = String(row?.id ?? '').trim();
-        if (!id) continue;
+        if (!id) {
+            results.push({ id: null, outcome: 'skipped', reason: 'id_missing' });
+            continue;
+        }
 
+        // Money already out needs no block: the gate reads one only when a row
+        // is about to be marked `paid_out`.
         const status = String(row?.[cfg.fieldMap.status] ?? '').trim().toLowerCase();
         if (status === 'paid_out' || status === 'settled') {
             results.push({ id, outcome: 'skipped', reason: 'already_settled' });
@@ -103,7 +117,7 @@ export async function backfillSettlementEvidence({
         // The registry is the authority on whether a provider confirmed this id,
         // so a provider-shaped string that no verified webhook named is refused
         // here rather than bound and left to fail the gate later.
-        if (!(await registryCheck(evidence.proof.psp_id))) {
+        if (!(await assertPSPWebhookExists(evidence.proof.psp_id))) {
             results.push({
                 id,
                 outcome: 'refused',
@@ -113,7 +127,7 @@ export async function backfillSettlementEvidence({
             continue;
         }
 
-        const existing = await chain.fetchBlockForEvent(id).catch(() => null);
+        const existing = await EvidenceIntegrityChain.fetchBlockForEvent(id).catch(() => null);
         if (existing) {
             const agrees = settlementEvidenceAgrees(existing.proof, evidence.proof);
             results.push({
@@ -131,8 +145,8 @@ export async function backfillSettlementEvidence({
         }
 
         try {
-            const block = await chain.addBlock(id, evidence.proof);
-            results.push({ id, outcome: 'bound', psp_id: evidence.proof.psp_id, hash: block?.hash ?? null });
+            await EvidenceIntegrityChain.addBlock(id, evidence.proof);
+            results.push({ id, outcome: 'bound', psp_id: evidence.proof.psp_id });
         } catch (error) {
             results.push({
                 id,
@@ -146,6 +160,7 @@ export async function backfillSettlementEvidence({
     const count = outcome => results.filter(result => result.outcome === outcome).length;
     return {
         applied: apply,
+        truncated,
         scanned: rows.length,
         results,
         summary: {
@@ -164,6 +179,9 @@ function printReport(report) {
         ? 'Settlement-evidence backfill (APPLY): blocks written where missing'
         : 'Settlement-evidence backfill (report only; pass --apply to write)');
     console.log(`Scanned ${report.scanned} revenue row(s)`);
+    if (report.truncated) {
+        console.log(`! The scan stopped at its ${report.scanned}-row cap; older rows were not looked at. Re-run with a larger --limit to reach them.`);
+    }
     const { summary } = report;
     if (report.applied) console.log(`  bound         ${summary.bound}`);
     else console.log(`  would bind    ${summary.would_bind}`);

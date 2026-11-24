@@ -9,6 +9,7 @@ import {
     openSettlementBlocks,
     readSettlementBlocks,
     recordSettlementBlock,
+    recordSettlementEvidenceUnbound,
     recordSettlementSettled,
     settlementBlockLogPath
 } from '../src/resilience/settlement-blocks.mjs';
@@ -153,6 +154,52 @@ test('an unresolved block is a critical finding with the row and the reason', ()
     assert.equal(block.reason, 'self_issued_proof');
     assert.equal(block.age_hours, 6);
     assert.equal(evidence.settlement_blocks.open, 1);
+});
+
+test('a capture with no bound evidence is its own incident, not a payout block', () => {
+    const root = tempRoot();
+    const at = new Date(NOW.getTime() - 2 * 3600000).toISOString();
+
+    recordSettlementEvidenceUnbound(root, {
+        revenue_event_id: 'rev-unbound',
+        psp_transaction_id: '5O190127TN364715T',
+        reason: 'evidence_chain_write_failed',
+        error: 'chain volume is read-only',
+        source: 'capture_ingest',
+        at
+    }, {});
+
+    const { findings, evidence } = detectSilentFailures(cleanOptions(root));
+
+    const finding = findings.find(item => item.code === 'SETTLEMENT_EVIDENCE_UNBOUND');
+    assert.ok(finding, 'an unsettleable capture must be an incident');
+    assert.equal(finding.severity, 'critical');
+    assert.match(finding.detail, /rev-unbound/);
+    const [row] = finding.evidence.rows;
+    assert.equal(row.revenue_event_id, 'rev-unbound');
+    assert.equal(row.psp_transaction_id, '5O190127TN364715T');
+    assert.equal(row.reason, 'evidence_chain_write_failed');
+    assert.equal(row.source, 'capture_ingest');
+    assert.equal(row.age_hours, 2);
+    assert.equal(evidence.settlement_blocks.open, 1);
+
+    // No payout went out, so the payout-block finding must not claim one did.
+    assert.equal(findings.some(item => item.code === 'REVENUE_SETTLEMENT_BLOCKED'), false);
+});
+
+test('a row that settles later closes its evidence incident', () => {
+    const root = tempRoot();
+    recordSettlementEvidenceUnbound(root, {
+        revenue_event_id: 'rev-unbound',
+        reason: 'evidence_chain_write_failed'
+    }, {});
+    recordSettlementSettled(root, { revenue_event_id: 'rev-unbound' }, {});
+
+    const { findings, evidence } = detectSilentFailures(cleanOptions(root));
+
+    assert.equal(findings.some(item => item.code === 'SETTLEMENT_EVIDENCE_UNBOUND'), false);
+    assert.equal(findings.some(item => item.code === 'REVENUE_SETTLEMENT_BLOCKED'), false);
+    assert.equal(evidence.settlement_blocks.open, 0);
 });
 
 test('a block closed by a later settlement is not a finding', () => {

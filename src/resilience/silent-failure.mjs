@@ -16,7 +16,7 @@ import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
 import { storefrontVerdictHint } from './storefront-probe.mjs';
 import { readLedgerRecords } from '../real/ledger/reversals.mjs';
-import { openSettlementBlocks, readSettlementBlocks } from './settlement-blocks.mjs';
+import { SETTLEMENT_EVIDENCE_UNBOUND, openSettlementBlocks, readSettlementBlocks } from './settlement-blocks.mjs';
 
 /**
  * Silent-failure ("faillite silencieuse") protocol.
@@ -193,6 +193,19 @@ export const FINDING_CATALOG = {
         verification: 'The listed revenue rows are paid_out with a provider-confirmed proof and the next audit reports no REVENUE_SETTLEMENT_BLOCKED finding.',
         owner_action: 'Reconcile each listed revenue row against the PayPal payout and settle or correct it.',
         sla_hours: 4
+    },
+    SETTLEMENT_EVIDENCE_UNBOUND: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'A revenue row was recorded without the evidence its payout requires',
+        impact: 'The buyer paid and the revenue row exists, but the block that authorises paying it out was never written, so the row can never settle through the gated path. The failure used to reach stderr only, which a serverless host discards: the order simply never paid out and no one was told.',
+        containment: 'Do not settle the row by hand and do not rebuild the block from the row itself; that is the reconstruction the evidence chain exists to prevent.',
+        obligation: 'Bind the evidence from the provider capture and settle the row through the gated path.',
+        remedy: 'Confirm the capture against PayPal, fix the evidence-chain volume (EVIDENCE_CHAIN_PATH must be writable and durable), then replay the capture so bindSettlementEvidence writes the block; the row settles normally afterwards.',
+        mitigation: 'Capture ingest appends an evidence_unbound line to the settlement block log, and every audit reads that log back; a later settlement of the same row closes it.',
+        verification: 'The listed revenue rows have a bound evidence block, are paid_out, and the next audit reports no SETTLEMENT_EVIDENCE_UNBOUND finding.',
+        owner_action: 'Check that the evidence-chain volume is writable, then replay the listed captures.',
+        sla_hours: 24
     },
     SILENT_EXCEPTION_SWALLOW: {
         domain: 'code',
@@ -963,19 +976,49 @@ export function detectSilentFailures({
     const settlementBlockLog = settlementBlocks === undefined
         ? readSettlementBlocks(root, { env })
         : settlementBlocks;
-    const blockedSettlements = openSettlementBlocks(settlementBlockLog.records || []).map(record => {
+    const openSettlements = openSettlementBlocks(settlementBlockLog.records || []).map(record => {
         const blockedAt = record.at || null;
         const blockedMs = Date.parse(blockedAt || '');
         return {
+            outcome: record.outcome || null,
             revenue_event_id: record.revenue_event_id || null,
             psp_transaction_id: record.psp_transaction_id || null,
             reason: record.reason || null,
             error: record.error || null,
             webhook_event_id: record.webhook_event_id || null,
+            source: record.source || null,
             blocked_at: blockedAt,
             age_hours: Number.isFinite(blockedMs) ? round((at.getTime() - blockedMs) / 3600000) : null
         };
     });
+    // A row with no bound evidence is a different incident: no payout went out,
+    // the row is simply unsettleable until the block is written.
+    const unboundEvidence = openSettlements
+        .filter(row => row.outcome === SETTLEMENT_EVIDENCE_UNBOUND)
+        .map(row => ({
+            revenue_event_id: row.revenue_event_id,
+            psp_transaction_id: row.psp_transaction_id,
+            reason: row.reason,
+            error: row.error,
+            source: row.source,
+            unbound_at: row.blocked_at,
+            age_hours: row.age_hours
+        }));
+    if (unboundEvidence.length) {
+        add(
+            'SETTLEMENT_EVIDENCE_UNBOUND',
+            `${unboundEvidence.length} revenue row(s) were recorded without the settlement evidence their payout is checked against: ` +
+                `${unboundEvidence.map(row => row.revenue_event_id).filter(Boolean).join(', ')}. ` +
+                `They cannot settle until the block is written.`,
+            {
+                count: unboundEvidence.length,
+                log: settlementBlockLog.path || null,
+                rows: unboundEvidence
+            }
+        );
+    }
+
+    const blockedSettlements = openSettlements.filter(row => row.outcome !== SETTLEMENT_EVIDENCE_UNBOUND);
     if (blockedSettlements.length) {
         add(
             'REVENUE_SETTLEMENT_BLOCKED',
@@ -1182,7 +1225,10 @@ export function detectSilentFailures({
                 base44: ledgerReversals.base44 || null
             },
             settlement_blocks: {
-                open: blockedSettlements.length,
+                // Every line still open, whatever stopped it: a blocked payout
+                // and an unsettleable capture are both work in this log.
+                open: openSettlements.length,
+                unbound_evidence: unboundEvidence.length,
                 path: settlementBlockLog.path || null
             },
             silent_catches: catches,

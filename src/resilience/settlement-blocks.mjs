@@ -22,6 +22,12 @@ import path from 'node:path';
 export const SETTLEMENT_BLOCK_LOG_ENV = 'SETTLEMENT_BLOCK_LOG';
 export const SETTLEMENT_BLOCKED = 'blocked';
 export const SETTLEMENT_SETTLED = 'settled';
+/**
+ * A revenue row was recorded without the evidence its payout is checked
+ * against. No payout happened, so it is not a `blocked` line: nothing is
+ * unaccounted for, the row is simply unsettleable until the block exists.
+ */
+export const SETTLEMENT_EVIDENCE_UNBOUND = 'evidence_unbound';
 
 export function settlementBlockLogPath(root = process.cwd(), env = process.env) {
     return env[SETTLEMENT_BLOCK_LOG_ENV]
@@ -58,6 +64,20 @@ function append(root, record, env) {
 
 export function recordSettlementBlock(root = process.cwd(), record = {}, env = process.env) {
     return append(root, { ...record, outcome: SETTLEMENT_BLOCKED }, env);
+}
+
+/**
+ * An unsettleable capture, recorded where the audit will find it.
+ *
+ * Capture ingest writes the block its payout is authorised by. When that write
+ * fails the capture is still recorded (the buyer paid) but the failure used to
+ * reach stderr only, which a serverless host discards: the order would sit
+ * unpaid forever with no incident. It is appended here instead, keyed by the
+ * revenue row, so the audit raises it and a later settlement of the same row
+ * (once the evidence is bound) closes it.
+ */
+export function recordSettlementEvidenceUnbound(root = process.cwd(), record = {}, env = process.env) {
+    return append(root, { ...record, outcome: SETTLEMENT_EVIDENCE_UNBOUND }, env);
 }
 
 /**

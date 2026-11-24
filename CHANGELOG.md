@@ -1,6 +1,18 @@
 # Changelog
 
 ## 2026-11-23
+- A capture whose settlement-evidence block could not be written is now an
+  incident instead of stderr. `bindSettlementEvidence` appends an
+  `evidence_unbound` line to the settlement block log
+  (`data/resilience/settlement-blocks.ndjson`, override with
+  `SETTLEMENT_BLOCK_LOG`), and the silent-failure audit raises
+  `SETTLEMENT_EVIDENCE_UNBOUND` (critical) for every row still open, naming the
+  revenue row, the capture id, the write error and its age. It is reported
+  separately from `REVENUE_SETTLEMENT_BLOCKED` because no payout went out: the
+  row is unsettleable rather than misaccounted. A later settlement of the same
+  row appends a closing line, so a replayed capture clears the finding.
+
+## 2026-11-23
 - Settlement daemon: the batching window was inverted. `MAX_SETTLEMENT_DELAY_HOURS`
   is a lower bound on age, but the filter kept events *younger* than it
   (`ageHours < 24`), so revenue that had waited past the window was never

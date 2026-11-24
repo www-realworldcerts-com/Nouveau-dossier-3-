@@ -1,6 +1,15 @@
 # Changelog
 
 ## 2026-11-23
+- Settlement daemon: the batching window was inverted. `MAX_SETTLEMENT_DELAY_HOURS`
+  is a lower bound on age, but the filter kept events *younger* than it
+  (`ageHours < 24`), so revenue that had waited past the window was never
+  settled while fresh events were paid immediately. Aged events are now the
+  ones picked up and a fresher one waits for a later cycle; an event with no
+  parseable date is still never assumed due. Covered by a test against the
+  offline store that settles a 25-hour-old event and leaves a new one alone.
+
+## 2026-11-23
 - `/health` now reports `money_readiness`: whether this deployment can quote,
   create, capture and deliver a paid order, field by field
   (`quote_key`, `order_create`, `capture`, `fulfillment`, `resend`) plus the

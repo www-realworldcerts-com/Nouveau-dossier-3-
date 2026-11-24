@@ -34,6 +34,7 @@ Object.assign(process.env, {
     SWARM_LIVE: 'false',
     NO_PLATFORM_WALLET: 'true',
     ENABLE_IMMEDIATE_SETTLEMENT: 'false',
+    MAX_SETTLEMENT_DELAY_HOURS: '24',
     SETTLEMENT_CHECK_INTERVAL_MS: '60000'
 });
 
@@ -50,8 +51,16 @@ test.after(async () => {
     await stub.close();
 });
 
+const BATCHING_WINDOW_HOURS = 24;
+
+function hoursAgo(hours) {
+    return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+}
+
+// The daemon only settles revenue that has waited out the batching window, so
+// the default fixture is already due: 48 h old, well past the 24 h window.
 function revenueEvent(id, amount, overrides = {}) {
-    const now = new Date().toISOString();
+    const now = hoursAgo(48);
     return {
         id,
         amount,
@@ -160,6 +169,32 @@ test('a retried cycle reuses the batch id instead of creating a second payout', 
 
     assert.equal(readEvents()[0].payout_batch_id, firstId);
     assert.deepEqual(exportFiles(), firstFiles, 'no second export under a new batch id');
+});
+
+test('the batching window settles aged revenue and leaves fresh events alone', async () => {
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+
+    const aged = hoursAgo(BATCHING_WINDOW_HOURS + 1);
+    const fresh = new Date().toISOString();
+    writeEvents([
+        revenueEvent('evt-aged-1', 19, { created_at: aged, created_date: aged }),
+        revenueEvent('evt-fresh-1', 19, { created_at: fresh, created_date: fresh })
+    ]);
+
+    await daemon.performSettlementCycle();
+
+    const records = readEvents();
+    const agedRecord = records.find(record => record.id === 'evt-aged-1');
+    const freshRecord = records.find(record => record.id === 'evt-fresh-1');
+
+    assert.equal(agedRecord.status, 'export_ready', 'revenue past the window must be picked up');
+    assert.match(csvText(), /evt-aged-1/);
+
+    assert.equal(freshRecord.status, 'VERIFIED', 'revenue inside the window waits for a later cycle');
+    assert.equal(freshRecord.settled, false);
+    assert.equal(freshRecord.payout_batch_id, undefined, 'a fresh event must not enter a batch');
+    assert.doesNotMatch(csvText(), /evt-fresh-1/);
 });
 
 test('the emergency stop latches and refuses every later payout', async () => {

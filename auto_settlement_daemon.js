@@ -41,7 +41,7 @@ const CONFIG = {
   MAX_BATCH_SIZE: 100, // Max events per batch
 
   // Settlement urgency - gradual release (batch small amounts)
-  MAX_SETTLEMENT_DELAY_HOURS: Number(process.env.MAX_SETTLEMENT_DELAY_HOURS) || 24, // Wait up to 24h to batch
+  MAX_SETTLEMENT_DELAY_HOURS: Number(process.env.MAX_SETTLEMENT_DELAY_HOURS) || 24, // Hold an event this long before settling it
   MIN_SETTLEMENT_AMOUNT: Number(process.env.MIN_SETTLEMENT_AMOUNT) || 10, // Don't settle amounts under $10
 
   // Rail preferences (in order)
@@ -289,16 +289,22 @@ async function fetchReadyForSettlement() {
       Object.keys(e.verification_proof).length > 0
     );
 
-    // Filter by settlement delay threshold
-    const urgentEvents = events.filter(event => {
+    // Hold an event for the batching window, then settle it. The window is a
+    // lower bound on age: revenue that has already waited past it is due, and
+    // a fresher event waits for a later cycle. Reading this comparison the
+    // other way round held back every event that outlived the window, so old
+    // revenue was never settled while fresh events were paid immediately.
+    const dueEvents = events.filter(event => {
       // If immediate settlement is enabled, we take everything verified
       if (CONFIG.ENABLE_IMMEDIATE_SETTLEMENT) return true;
 
-      const ageHours = (Date.now() - new Date(event.created_at || event.timestamp).getTime()) / (1000 * 60 * 60);
-      return ageHours < CONFIG.MAX_SETTLEMENT_DELAY_HOURS;
+      const createdAt = new Date(event.created_at || event.timestamp).getTime();
+      if (!Number.isFinite(createdAt)) return false; // an undateable event is never assumed due
+      const ageHours = (Date.now() - createdAt) / (1000 * 60 * 60);
+      return ageHours >= CONFIG.MAX_SETTLEMENT_DELAY_HOURS;
     });
 
-    return urgentEvents;
+    return dueEvents;
   } catch (error) {
     console.error('❌ Failed to fetch ready events:', error);
     return [];

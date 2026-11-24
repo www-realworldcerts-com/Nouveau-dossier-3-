@@ -10,6 +10,14 @@
   waits up to 10 s for it, and steals it only after 30 s, which is how a writer
   that died mid-append stops wedging the chain. The chain is written to a
   staging file and renamed, so a reader never sees a half written chain.
+- The settlement daemon authorises each payout through
+  `authorizeRevenueSettlement` instead of `MoneyMovedGate` alone. The gate's
+  `assertEventBound` only proves that *a* block exists, so a block that
+  disagreed with the row — an amount or capture the row never carried — was
+  paid by the daemon while the applied webhook path refused it. The daemon now
+  refuses `settlement_evidence_missing` and `settlement_evidence_mismatch` for
+  the same reason the webhook path does, and records the refusal as a gate
+  error in its health state.
 - `scripts/backfill-settlement-evidence.mjs` now reports a truncated scan. The
   walk is newest first and bounded at 5000 rows, so a full ledger used to produce
   a report that looked complete while the oldest rows — the ones most likely to

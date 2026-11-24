@@ -40,14 +40,34 @@ Object.assign(process.env, {
 
 const daemon = await import('../auto_settlement_daemon.js');
 
+// The money-moved gate's own checks are stubbed where they are tested; the
+// evidence *agreement* check under test here lives in the revenue gate, which
+// reads the block bound at ingest. Each store row gets a block that matches it,
+// as ingest would have written, unless a test overrides one.
 const savedGate = MoneyMovedGate.assertMoneyMoved;
-const savedChain = EvidenceIntegrityChain.assertEventBound;
+const savedBlock = EvidenceIntegrityChain.fetchBlockForEvent;
 MoneyMovedGate.assertMoneyMoved = async () => true;
-EvidenceIntegrityChain.assertEventBound = async () => true;
+const blockOverrides = new Map();
+EvidenceIntegrityChain.fetchBlockForEvent = async eventId => {
+    if (blockOverrides.has(eventId)) return blockOverrides.get(eventId);
+    const record = readEvents().find(row => row.id === eventId);
+    if (!record) return null;
+    const proof = record.verification_proof;
+    return {
+        eventId,
+        proof: {
+            type: 'psp_transaction_id',
+            psp_id: proof.psp_id,
+            amount: Number(record.amount),
+            currency: record.currency,
+            timestamp: proof.timestamp
+        }
+    };
+};
 
 test.after(async () => {
     MoneyMovedGate.assertMoneyMoved = savedGate;
-    EvidenceIntegrityChain.assertEventBound = savedChain;
+    EvidenceIntegrityChain.fetchBlockForEvent = savedBlock;
     await stub.close();
 });
 
@@ -195,6 +215,38 @@ test('the batching window settles aged revenue and leaves fresh events alone', a
     assert.equal(freshRecord.settled, false);
     assert.equal(freshRecord.payout_batch_id, undefined, 'a fresh event must not enter a batch');
     assert.doesNotMatch(csvText(), /evt-fresh-1/);
+});
+
+test('a block that disagrees with the row is refused before the payout', async () => {
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+    writeEvents([revenueEvent('evt-mismatch-1', 19)]);
+    // Ingest bound a block for 25 against a row that says 19. The daemon used to
+    // pay this: its gate only checked that *a* block existed.
+    blockOverrides.set('evt-mismatch-1', {
+        eventId: 'evt-mismatch-1',
+        proof: {
+            type: 'psp_transaction_id',
+            psp_id: '5O190127TN364715T',
+            amount: 25,
+            currency: 'USD',
+            timestamp: hoursAgo(48)
+        }
+    });
+
+    const errorsBefore = daemon.getDaemonHealth().errorCount;
+    await daemon.performSettlementCycle();
+
+    const [record] = readEvents();
+    assert.equal(record.status, 'VERIFIED', 'a row whose evidence disagrees is not exported');
+    assert.equal(record.settled, false);
+    assert.equal(record.payout_batch_id, undefined, 'it must not enter a payout batch');
+    assert.deepEqual(exportFiles(), [], 'no payout instruction is written');
+    assert.equal(stub.hits.length, 0);
+    assert.ok(
+        daemon.getDaemonHealth().errorCount > errorsBefore,
+        'the refusal is reported instead of silently skipping the row'
+    );
 });
 
 test('the emergency stop latches and refuses every later payout', async () => {

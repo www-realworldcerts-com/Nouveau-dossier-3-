@@ -10,10 +10,8 @@ import {
   preExecutionOwnerCheck
 } from './src/owner-directive.mjs';
 import { buildBase44Client } from './src/base44-client.mjs';
-import { getRevenueConfigFromEnv } from './src/base44-revenue.mjs';
+import { authorizeRevenueSettlement, getRevenueConfigFromEnv } from './src/base44-revenue.mjs';
 import { createPayPalPayoutBatch } from './src/paypal-api.mjs';
-import { MoneyMovedGate } from './src/real/money-moved-gate.mjs';
-import { EvidenceIntegrityChain } from './src/real/evidence-integrity.mjs';
 import { pathToFileURL } from 'url';
 import crypto from 'node:crypto';
 import fs from 'fs';
@@ -342,13 +340,26 @@ async function processRailBatch(rail, events) {
   console.log(`⚡ Processing ${rail} batch: ${events.length} events`);
 
   // Step 1: Gate Check (Hard-Binding)
+  // The payout is authorised by the row's own bound evidence. MoneyMovedGate
+  // alone only proves that a block exists, so a block that disagreed with the
+  // row (a payout moving an amount or capture the row never carried) was paid
+  // here while the webhook path refused it. This is the same gate the webhook
+  // path runs, so the two cannot disagree about what may be settled.
+  const base44 = await buildBase44Client();
+  const revenueConfig = getRevenueConfigFromEnv();
   const validEvents = [];
   for (const event of events) {
     try {
       if (!isSettleableAmount(event)) {
         throw new Error(`non-positive amount (${event.amount}); a reversal is not a payout`);
       }
-      await MoneyMovedGate.assertMoneyMoved(event);
+      const authorization = await authorizeRevenueSettlement(base44, revenueConfig, {
+        revenueEventId: event.id
+      });
+      if (!authorization.ok) {
+        const detail = authorization.error || authorization.detail;
+        throw new Error(`MONEY_GATE_FAIL: ${authorization.reason}${detail ? ` (${detail})` : ''}`);
+      }
       validEvents.push(event);
     } catch (e) {
       console.error(`❌ Gate Check Failed for ${event.id}: ${e.message}`);

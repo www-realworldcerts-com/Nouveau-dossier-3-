@@ -1,6 +1,24 @@
 # Changelog
 
 ## 2026-11-24
+- The settlement daemon claims a payout before it sends it. A crash between
+  paying a batch and marking its rows left no record that money may have moved:
+  the rows were still VERIFIED, so the next cycle selected them again and sent a
+  second payout. `processRailBatch` now writes a claim
+  (`data/financial/payout-claims.json`, override with `PAYOUT_CLAIM_STORE`)
+  before the rail is called and closes it only once every row it paid is marked.
+  Every cycle reconciles the open claims first: a claim whose rows are already
+  accounted for is closed, a recorded payout finishes the marks it was
+  interrupted before (recording money that moved cannot move it twice), and a
+  claim with no recorded outcome is checked against the payout items PayPal's
+  webhook left for its rows — success marks the rows settled, while a failure
+  recorded against the claim's own batch frees them. Anything that cannot be
+  checked is reported (`FINDING PAYOUT_CLAIM_UNRESOLVED`, critical), exposed in
+  daemon health and in a `PAYOUT_CLAIM_UNRESOLVED` audit finding with the batch,
+  rows, amount and age, and its rows are withheld from every later batch. An
+  unreadable claim store refuses to pay at all. `--resolve-claim <batch_id>`
+  closes a claim an owner has confirmed never arrived — the only state besides
+  provider evidence in which its rows may be paid again.
 - The amount PayPal verified is kept and compared on the money path.
   `recordVerifiedWebhook` stored only the psp/event/transmission ids, so a
   settlement block was built from the revenue row's own numbers and a row could

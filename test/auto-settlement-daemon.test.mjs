@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { startStub } from '../scripts/lib/http-stub.mjs';
+import { resolvePayoutClaim } from '../src/financial/payout-claims.mjs';
 import { EvidenceIntegrityChain } from '../src/real/evidence-integrity.mjs';
 import { MoneyMovedGate } from '../src/real/money-moved-gate.mjs';
 
@@ -23,11 +24,13 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'settlement-daemon-'));
 const storePath = path.join(tmp, 'base44-store.json');
 const exportsDir = path.join(tmp, 'exports');
 fs.mkdirSync(exportsDir, { recursive: true });
+const claimStore = path.join(tmp, 'data', 'financial', 'payout-claims.json');
 process.chdir(tmp);
 
 Object.assign(process.env, {
     BASE44_OFFLINE: 'true',
     BASE44_OFFLINE_STORE_PATH: storePath,
+    PAYOUT_CLAIM_STORE: claimStore,
     PAYPAL_API_BASE_URL: stub.url,
     PAYPAL_CLIENT_ID: 'stub-client-id',
     PAYPAL_CLIENT_SECRET: 'stub-client-secret',
@@ -105,6 +108,15 @@ function writeEvents(events) {
     fs.writeFileSync(storePath, JSON.stringify({ entities: { RevenueEvent: { records: events } } }));
 }
 
+function writeStore({ revenueEvents = [], payoutItems = [] }) {
+    fs.writeFileSync(storePath, JSON.stringify({
+        entities: {
+            RevenueEvent: { records: revenueEvents },
+            PayoutItem: { records: payoutItems }
+        }
+    }));
+}
+
 function readEvents(entityName = 'RevenueEvent') {
     const store = JSON.parse(fs.readFileSync(storePath, 'utf8'));
     return store.entities[entityName].records;
@@ -116,6 +128,37 @@ function exportFiles() {
 
 function csvText() {
     return exportFiles().map(name => fs.readFileSync(path.join(exportsDir, name), 'utf8')).join('\n');
+}
+
+/** The claim store is the daemon's only memory that a payout may have left. */
+function resetClaims() {
+    fs.rmSync(claimStore, { force: true });
+}
+
+function claims() {
+    if (!fs.existsSync(claimStore)) return [];
+    return JSON.parse(fs.readFileSync(claimStore, 'utf8')).claims;
+}
+
+function writeClaims(records) {
+    fs.mkdirSync(path.dirname(claimStore), { recursive: true });
+    fs.writeFileSync(claimStore, JSON.stringify({ version: 1, claims: records }, null, 2));
+}
+
+function claimRecord(overrides = {}) {
+    return {
+        batch_id: 'BATCH_PAYONEER_0123456789abcdef01234567',
+        rail: 'PAYONEER',
+        revenue_event_ids: ['evt-claimed-1'],
+        amount: 19,
+        currency: 'USD',
+        status: 'in_flight',
+        claimed_at: hoursAgo(1),
+        closed_at: null,
+        execution: null,
+        error: null,
+        ...overrides
+    };
 }
 
 test('a CSV rail exports for payment without marking the revenue settled', async () => {
@@ -137,6 +180,11 @@ test('a CSV rail exports for payment without marking the revenue settled', async
 
     assert.equal(daemon.getDaemonHealth().totalSettled, 0, 'exported money is not settled money');
     assert.equal(stub.hits.length, 0, 'the CSV rails never call a provider');
+
+    const [claim] = claims();
+    assert.equal(claim.batch_id, record.payout_batch_id);
+    assert.equal(claim.status, 'closed', 'a marked batch closes its claim');
+    assert.deepEqual(daemon.getDaemonHealth().payout_claims.open, []);
 });
 
 test('a negative reversal row is never settled or exported', async () => {
@@ -247,6 +295,152 @@ test('a block that disagrees with the row is refused before the payout', async (
         daemon.getDaemonHealth().errorCount > errorsBefore,
         'the refusal is reported instead of silently skipping the row'
     );
+});
+
+test('a payout whose rows were never marked is completed, not sent again', async () => {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+
+    const batchId = 'BATCH_PAYONEER_0123456789abcdef01234567';
+    const execution = { method: 'manual_csv', export_filename: `payoneer_${batchId}.csv` };
+    // The crash landed after the rail reported success and before the rows were
+    // updated, so the recorded outcome is on the claim and the rows are not.
+    writeClaims([claimRecord({ status: 'executed', execution })]);
+    writeEvents([revenueEvent('evt-claimed-1', 19)]);
+
+    await daemon.performSettlementCycle();
+
+    const [record] = readEvents();
+    assert.equal(record.status, 'export_ready', 'the paid rows are marked from the claim');
+    assert.equal(record.settled, false);
+    assert.equal(record.payout_batch_id, batchId);
+    assert.equal(record.settlement_details.export_filename, execution.export_filename);
+
+    assert.deepEqual(exportFiles(), [], 'the instruction was written before the crash; it is not written twice');
+    assert.equal(stub.hits.length, 0);
+
+    const [claim] = claims();
+    assert.equal(claim.status, 'closed');
+    assert.equal(claim.execution.export_filename, `payoneer_${batchId}.csv`);
+    assert.deepEqual(daemon.getDaemonHealth().payout_claims.open, []);
+});
+
+test('a claimed payout with an unknown outcome keeps its rows unpaid', async () => {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+
+    const batchId = 'BATCH_PAYONEER_0123456789abcdef01234567';
+    writeClaims([claimRecord({ revenue_event_ids: ['evt-claimed-2'] })]);
+    writeEvents([revenueEvent('evt-claimed-2', 19)]);
+
+    const errorsBefore = daemon.getDaemonHealth().errorCount;
+    await daemon.performSettlementCycle();
+    await daemon.performSettlementCycle();
+
+    const [record] = readEvents();
+    assert.equal(record.status, 'VERIFIED', 'the row must not be paid again on a guess');
+    assert.equal(record.payout_batch_id, undefined);
+    assert.deepEqual(exportFiles(), [], 'no second payout instruction');
+    assert.equal(stub.hits.length, 0);
+
+    const health = daemon.getDaemonHealth();
+    assert.equal(health.payout_claims.open.length, 1, 'the claim is visible in health, not only in a log');
+    assert.equal(health.payout_claims.open[0].batch_id, batchId);
+    assert.deepEqual(health.payout_claims.open[0].revenue_event_ids, ['evt-claimed-2']);
+    assert.ok(health.errorCount > errorsBefore, 'the unresolved claim is reported');
+    assert.equal(claims()[0].status, 'in_flight', 'only a provider check may close it');
+});
+
+test('a rail that fails after the claim is not retried until it is resolved', async () => {
+    resetClaims();
+    // Writing the export fails: the rail throws after the claim was recorded,
+    // which is exactly the ambiguous state a restart must not guess about.
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.writeFileSync(exportsDir, 'not a directory');
+    writeEvents([revenueEvent('evt-claim-fail-1', 19)]);
+
+    await daemon.performSettlementCycle();
+
+    assert.equal(readEvents()[0].status, 'VERIFIED');
+    assert.deepEqual(claims().map(record => record.status), ['in_flight']);
+    assert.match(claims()[0].error, /not a directory|ENOTDIR/i);
+    assert.ok(daemon.getDaemonHealth().errorCount > 0);
+
+    // The filesystem recovers, but the attempt is still ambiguous: no retry.
+    fs.rmSync(exportsDir, { force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+    await daemon.performSettlementCycle();
+
+    assert.deepEqual(exportFiles(), [], 'the ambiguous attempt is not sent again');
+    assert.equal(readEvents()[0].status, 'VERIFIED');
+    assert.equal(claims().length, 1);
+
+    // Only an owner who confirmed the payout never arrived frees the rows.
+    assert.equal(resolvePayoutClaim(tmp, claims()[0].batch_id).resolved, true);
+    await daemon.performSettlementCycle();
+
+    assert.equal(readEvents()[0].status, 'export_ready');
+    assert.equal(exportFiles().length, 1);
+    assert.equal(claims()[0].status, 'closed');
+});
+
+test('a payout the provider recorded is marked settled instead of staying stuck', async () => {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+
+    const batchId = 'BATCH_PAYONEER_0123456789abcdef01234567';
+    writeClaims([claimRecord({ revenue_event_ids: ['evt-claimed-3'] })]);
+    // The daemon died before recording the outcome, but PayPal's webhook left a
+    // payout item for the row: the money did move.
+    writeStore({
+        revenueEvents: [revenueEvent('evt-claimed-3', 19)],
+        payoutItems: [{
+            id: 'pi-1',
+            batch_id: 'PAYPAL-BATCH-9',
+            revenue_event_id: 'evt-claimed-3',
+            status: 'success',
+            transaction_id: 'TXN-9'
+        }]
+    });
+
+    await daemon.performSettlementCycle();
+
+    const [record] = readEvents();
+    assert.equal(record.status, 'paid_out', 'the provider says the payout happened');
+    assert.equal(record.settled, true);
+    assert.equal(record.payout_batch_id, batchId);
+    assert.equal(record.settlement_details.method, 'payout_item_evidence');
+    assert.equal(record.settlement_details.provider_batch_id, 'PAYPAL-BATCH-9');
+    assert.deepEqual(exportFiles(), [], 'nothing is sent again');
+    assert.equal(stub.hits.length, 0);
+
+    const [claim] = claims();
+    assert.equal(claim.status, 'closed');
+    assert.equal(claim.execution.method, 'payout_item_evidence', 'the claim records what paid the rows');
+    assert.deepEqual(daemon.getDaemonHealth().payout_claims.open, []);
+});
+
+test('a batch the provider recorded as failed frees its rows to be paid', async () => {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+
+    const batchId = 'BATCH_PAYONEER_0123456789abcdef01234567';
+    writeClaims([claimRecord({ revenue_event_ids: ['evt-claimed-4'] })]);
+    writeStore({
+        revenueEvents: [revenueEvent('evt-claimed-4', 19)],
+        payoutItems: [{ id: 'pi-1', batch_id: batchId, revenue_event_id: 'evt-claimed-4', status: 'failed' }]
+    });
+
+    await daemon.performSettlementCycle();
+
+    const [record] = readEvents();
+    assert.equal(record.status, 'export_ready', 'a payout the provider refused may be sent again');
+    assert.equal(exportFiles().length, 1);
+    assert.equal(stub.hits.length, 0);
 });
 
 test('the emergency stop latches and refuses every later payout', async () => {

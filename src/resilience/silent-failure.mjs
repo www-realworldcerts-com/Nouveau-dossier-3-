@@ -16,6 +16,7 @@ import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
 import { storefrontVerdictHint } from './storefront-probe.mjs';
 import { readLedgerRecords } from '../real/ledger/reversals.mjs';
+import { openPayoutClaims, readPayoutClaims } from '../financial/payout-claims.mjs';
 import {
     SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH,
     SETTLEMENT_EVIDENCE_UNBOUND,
@@ -224,6 +225,19 @@ export const FINDING_CATALOG = {
         verification: 'The listed revenue rows match their verified capture amounts, have a bound evidence block, and the next audit reports no SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH finding.',
         owner_action: 'Confirm each listed capture against PayPal and correct the revenue row to the provider amount.',
         sla_hours: 24
+    },
+    PAYOUT_CLAIM_UNRESOLVED: {
+        domain: 'revenue',
+        severity: 'critical',
+        title: 'A settlement batch may have been paid but its outcome was never recorded',
+        impact: 'The settlement daemon writes a claim before a rail can move money. This one is still open: the process died, or the rail failed, before any outcome was recorded, so money may already have left while the revenue rows still read unpaid. The daemon withholds those rows, so the revenue stays unsettled and every later payout decision is made from a ledger that may be missing a payment.',
+        containment: 'Do not settle or re-pay the listed rows from the ledger, and do not delete the claim. Treat the batch as possibly paid until the provider says otherwise.',
+        obligation: 'Reconcile the claimed batch with the provider and record the outcome.',
+        remedy: 'Check the provider for the batch and for the listed payout items. If it was paid, record the payout items so the next daemon cycle marks the rows settled; if nothing was sent, confirm that and close the claim with `node auto_settlement_daemon.js --resolve-claim <batch_id>`.',
+        mitigation: 'The daemon claims a batch before calling its rail, reconciles every claim before paying anything and reads payout items as evidence; an unresolved claim is reported here, exposed in daemon health and its rows withheld from every later batch.',
+        verification: 'The listed claims are closed, their revenue rows are marked paid_out or export_ready, and the next audit reports no PAYOUT_CLAIM_UNRESOLVED finding.',
+        owner_action: 'Check the batch with the provider, then record its payout items or close the claim as not sent.',
+        sla_hours: 4
     },
     SILENT_EXCEPTION_SWALLOW: {
         domain: 'code',
@@ -721,7 +735,8 @@ export function detectSilentFailures({
     checkoutGate,
     reversals,
     reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS,
-    settlementBlocks
+    settlementBlocks,
+    payoutClaims
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -1064,6 +1079,48 @@ export function detectSilentFailures({
         );
     }
 
+    // A claim the daemon could not reconcile is money whose fate is unknown: the
+    // batch may already have been paid while its rows still read unpaid, and the
+    // daemon withholds those rows rather than pay twice. The claim store is the
+    // state, so closing the claim (provider payout items or an owner
+    // confirmation) removes the finding.
+    const payoutClaimStore = payoutClaims === undefined
+        ? readPayoutClaims(root, { env })
+        : payoutClaims;
+    const openClaims = openPayoutClaims(payoutClaimStore.claims || []).map(claim => {
+        const claimedMs = Date.parse(claim.claimed_at || '');
+        return {
+            batch_id: claim.batch_id ?? null,
+            rail: claim.rail ?? null,
+            status: claim.status ?? null,
+            revenue_event_ids: claim.revenue_event_ids ?? [],
+            amount: claim.amount ?? null,
+            currency: claim.currency ?? null,
+            claimed_at: claim.claimed_at ?? null,
+            age_hours: Number.isFinite(claimedMs) ? round((at.getTime() - claimedMs) / 3600000) : null,
+            error: claim.error ?? null
+        };
+    });
+    if (payoutClaimStore.error) {
+        add(
+            'PAYOUT_CLAIM_UNRESOLVED',
+            `The payout claim store could not be read (${payoutClaimStore.error}), so an in-flight payout cannot be ruled out.`,
+            { count: null, store_error: payoutClaimStore.error, log: payoutClaimStore.path || null, rows: [] }
+        );
+    } else if (openClaims.length) {
+        add(
+            'PAYOUT_CLAIM_UNRESOLVED',
+            `${openClaims.length} settlement batch(es) may already have been paid without their outcome being recorded: ` +
+                `${openClaims.map(claim => claim.batch_id).filter(Boolean).join(', ')}. ` +
+                `Their revenue rows are withheld until the provider is reconciled.`,
+            {
+                count: openClaims.length,
+                log: payoutClaimStore.path || null,
+                rows: openClaims
+            }
+        );
+    }
+
     const blockedSettlements = openSettlements.filter(
         row => row.outcome !== SETTLEMENT_EVIDENCE_UNBOUND && row.outcome !== SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH
     );
@@ -1280,6 +1337,11 @@ export function detectSilentFailures({
                 amount_mismatch: mismatchedEvidence.length,
                 path: settlementBlockLog.path || null
             },
+            payout_claims: {
+                open: openClaims.length,
+                path: payoutClaimStore.path || null,
+                store_error: payoutClaimStore.error || null
+            },
             silent_catches: catches,
             audit: { latest_at: audit, age_days: auditAgeDays === null ? null : round(auditAgeDays) },
             webhook_probes: probes,
@@ -1394,10 +1456,11 @@ export function runSilentFailureAudit({
     checkoutGate = null,
     reversals,
     reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS,
-    settlementBlocks
+    settlementBlocks,
+    payoutClaims
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate, reversals, reversalWindowDays, settlementBlocks });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate, reversals, reversalWindowDays, settlementBlocks, payoutClaims });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

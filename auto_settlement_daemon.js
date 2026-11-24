@@ -12,6 +12,22 @@ import {
 import { buildBase44Client } from './src/base44-client.mjs';
 import { authorizeRevenueSettlement, getRevenueConfigFromEnv } from './src/base44-revenue.mjs';
 import { createPayPalPayoutBatch } from './src/paypal-api.mjs';
+import {
+  PAYOUT_EVIDENCE_FAILED,
+  PAYOUT_EVIDENCE_SETTLED,
+  PAYOUT_EVIDENCE_UNKNOWN,
+  readPayoutClaimEvidence
+} from './src/financial/payout-claim-evidence.mjs';
+import {
+  claimPayoutBatch,
+  claimedRevenueEventIds,
+  openPayoutClaims,
+  readPayoutClaims,
+  recordPayoutOutcome,
+  resolvePayoutClaim,
+  PAYOUT_CLAIM_CLOSED,
+  PAYOUT_CLAIM_EXECUTED
+} from './src/financial/payout-claims.mjs';
 import { pathToFileURL } from 'url';
 import crypto from 'node:crypto';
 import fs from 'fs';
@@ -217,8 +233,16 @@ export async function performSettlementCycle() {
   console.log(`\n🔄 [${new Date().toISOString()}] Starting settlement cycle...`);
 
   try {
-    // Step 1: Fetch verified revenue events ready for settlement
-    const readyEvents = await fetchReadyForSettlement();
+    // Step 0: Reconcile whatever a previous process left in flight. This runs
+    // before any payout is chosen, because a batch claimed by a crashed cycle
+    // may already have been sent.
+    const claims = await reconcilePayoutClaims();
+    if (claims.blocked) return;
+
+    // Step 1: Fetch verified revenue events ready for settlement. Rows an open
+    // claim reserves are withheld: the money may already be on its way.
+    const readyEvents = (await fetchReadyForSettlement())
+      .filter(event => !claims.claimedEventIds.has(String(event.id)));
 
     if (readyEvents.length === 0) {
       console.log('✅ No events ready for settlement');
@@ -246,6 +270,136 @@ export async function performSettlementCycle() {
     console.error('❌ Settlement cycle error:', error);
     state.addError(error);
   }
+}
+
+/**
+ * A row the ledger shows was acted on: settled, paid, or exported for a human
+ * to transfer. Only such a row can close a claim without a second payout.
+ */
+function revenueRowAccountedFor(row) {
+  const status = String(row?.status ?? '').trim().toLowerCase();
+  return row?.settled === true || row?.paid_out === true || ['paid_out', 'settled', 'export_ready'].includes(status);
+}
+
+/**
+ * Reconciles the payout claims a previous process left open.
+ *
+ * The provider is the only witness to whether a request arrived, and the crash
+ * may have happened after it left, so a claim cannot always be settled from
+ * this side. What can be checked is used: a claim whose rows are now accounted
+ * for is closed, one whose rail already reported success finishes the marks it
+ * was interrupted before, and — for a claim with no recorded outcome — the
+ * payout items the provider's webhook left are read, because a payout that
+ * really happened must not leave its rows unpaid and its claim stuck forever.
+ * Anything that cannot be checked stays open and its rows are withheld from
+ * every later batch, because a retry could send the same money again.
+ */
+async function reconcilePayoutClaims() {
+  const store = readPayoutClaims(process.cwd());
+  if (store.error) {
+    const message =
+      `PAYOUT_CLAIM_STORE_UNREADABLE: ${store.error}; refusing to pay while it is unknown whether a payout is in flight`;
+    console.error(`❌ ${message}`);
+    process.stderr.write(`FINDING PAYOUT_CLAIM_STORE_UNREADABLE [critical] ${message}\n`);
+    state.addError(new Error(message));
+    return { blocked: true, claimedEventIds: new Set() };
+  }
+
+  const open = openPayoutClaims(store.claims);
+  if (open.length === 0) return { blocked: false, claimedEventIds: new Set() };
+
+  const base44 = await buildBase44Client();
+  const revenueConfig = getRevenueConfigFromEnv();
+  const revenueEntity = base44.asServiceRole.entities[revenueConfig.entityName];
+  const unresolved = [];
+
+  for (const claim of open) {
+    const eventIds = (claim.revenue_event_ids ?? []).map(id => String(id));
+    let rows;
+    try {
+      rows = [];
+      for (const id of eventIds) {
+        const found = await revenueEntity.filter({ id }, '-created_date', 1, 0);
+        rows.push(Array.isArray(found) && found[0] ? found[0] : null);
+      }
+    } catch (error) {
+      unresolved.push({ claim, reason: `the ledger could not be read: ${error?.message ?? error}` });
+      continue;
+    }
+
+    if (rows.length > 0 && rows.every(revenueRowAccountedFor)) {
+      recordPayoutOutcome(process.cwd(), claim.batch_id, { status: PAYOUT_CLAIM_CLOSED });
+      console.log(`✅ Payout claim ${claim.batch_id} reconciled: its rows are already accounted for.`);
+      continue;
+    }
+
+    const rowsPresent = rows.length > 0 && rows.every(row => row);
+    const recorded = claim.status === PAYOUT_CLAIM_EXECUTED && claim.execution ? claim.execution : null;
+
+    // What the rail recorded beats what must be inferred; with neither, the
+    // provider's payout items are the only witness left.
+    const evidence = rowsPresent && !recorded
+      ? await readPayoutClaimEvidence(base44, claim).catch(error => ({
+          outcome: PAYOUT_EVIDENCE_UNKNOWN,
+          reason: `the payout items could not be read: ${error?.message ?? error}`
+        }))
+      : null;
+
+    const execution = recorded ?? (evidence?.outcome === PAYOUT_EVIDENCE_SETTLED
+      ? {
+          method: 'payout_item_evidence',
+          provider_batch_id: evidence.provider_batch_id ?? claim.batch_id,
+          provider_transaction_id: evidence.transaction_id ?? null
+        }
+      : null);
+
+    // Finishing the marks records a payout that already happened, whichever
+    // source proved it: it cannot move money a second time.
+    if (execution && rowsPresent) {
+      const failed = await markEventsSettled(rows, claim.batch_id, execution);
+      if (failed.length === 0) {
+        recordPayoutOutcome(process.cwd(), claim.batch_id, { status: PAYOUT_CLAIM_CLOSED, execution });
+        console.log(`✅ Payout claim ${claim.batch_id} completed from the ${execution.method === 'payout_item_evidence' ? "provider's payout items" : 'recorded payout'}.`);
+        continue;
+      }
+      unresolved.push({ claim, reason: `its payout was recorded but the rows could not be marked: ${failed.join(', ')}` });
+      continue;
+    }
+
+    // Only a failure recorded against *this* batch frees the rows: an older
+    // failed payout item for the same row says nothing about this one.
+    if (evidence?.outcome === PAYOUT_EVIDENCE_FAILED) {
+      resolvePayoutClaim(process.cwd(), claim.batch_id, {
+        note: 'payout items record this batch as failed',
+        resolvedBy: 'payout_item_evidence'
+      });
+      console.log(`✅ Payout claim ${claim.batch_id} closed: the provider records it as failed, so its rows are payable again.`);
+      continue;
+    }
+
+    unresolved.push({
+      claim,
+      reason: evidence?.reason ?? (rowsPresent
+        ? 'its rail was called but no outcome was recorded'
+        : 'some of its rows are no longer in the ledger')
+    });
+  }
+
+  for (const { claim, reason } of unresolved) {
+    const rows = (claim.revenue_event_ids ?? []).join(', ');
+    const message =
+      `PAYOUT_CLAIM_UNRESOLVED: batch ${claim.batch_id} (${claim.rail}) claimed ${claim.claimed_at} may ` +
+      `already have moved ${claim.amount} ${claim.currency}; rows ${rows} are withheld: ${reason}. ` +
+      `Confirm with the provider, then close it with --resolve-claim ${claim.batch_id} if nothing arrived.`;
+    console.error(`⚠️ ${message}`);
+    process.stderr.write(`FINDING PAYOUT_CLAIM_UNRESOLVED [critical] ${message}\n`);
+    state.addError(new Error(message));
+  }
+
+  return {
+    blocked: false,
+    claimedEventIds: claimedRevenueEventIds(unresolved.map(item => item.claim))
+  };
 }
 
 // ============================================================================
@@ -399,11 +553,45 @@ async function processRailBatch(rail, events) {
     throw error;
   }
 
-  // Step 5: Execute settlement
-  const executionResult = await executeSettlement(rail, batch);
+  // Step 5: Persist the claim. From here on the provider may hold a payout and
+  // a restart must not send it again; this file is the only memory of that, so
+  // it is flushed before the rail is called.
+  const claim = claimPayoutBatch(process.cwd(), {
+    batch_id: batch.batch_id,
+    rail,
+    revenue_event_ids: batch.revenue_event_ids,
+    amount: totalAmount,
+    currency: batch.currency
+  });
+  if (!claim.claimed) {
+    const detail = claim.reason === 'already_claimed'
+      ? `batch ${claim.existing?.batch_id ?? batch.batch_id} already claims these rows`
+      : (claim.error ?? claim.reason);
+    throw new Error(`PAYOUT_CLAIM_REFUSED: ${claim.reason}${detail ? ` (${detail})` : ''}`);
+  }
 
-  // Step 6: Mark events as settled
-  await markEventsSettled(validEvents, batch.batch_id, executionResult);
+  // Step 6: Execute settlement
+  let executionResult;
+  try {
+    executionResult = await executeSettlement(rail, batch);
+  } catch (error) {
+    // The request may have reached the provider before it failed here. The
+    // claim stays open with the error, so the next cycle refuses a retry.
+    recordPayoutOutcome(process.cwd(), batch.batch_id, { error: String(error?.message ?? error) });
+    throw error;
+  }
+  recordPayoutOutcome(process.cwd(), batch.batch_id, {
+    status: PAYOUT_CLAIM_EXECUTED,
+    execution: executionResult
+  });
+
+  // Step 7: Mark events as settled. A claim closes only once every row it paid
+  // is marked; a row that could not be updated keeps the claim open, so the
+  // next cycle completes the marks instead of paying again.
+  const unmarked = await markEventsSettled(validEvents, batch.batch_id, executionResult);
+  recordPayoutOutcome(process.cwd(), batch.batch_id, unmarked.length
+    ? { status: PAYOUT_CLAIM_EXECUTED, error: `rows left unmarked: ${unmarked.join(', ')}` }
+    : { status: PAYOUT_CLAIM_CLOSED, error: null });
 
   if (executionResult?.method === 'manual_csv') {
     console.log(`🗂️ Exported ${validEvents.length} events via ${rail}; awaiting the manual transfer`);
@@ -605,6 +793,7 @@ async function markEventsSettled(events, batchId, executionResult) {
   const base44 = await buildBase44Client();
   const revenueConfig = getRevenueConfigFromEnv();
   const revenueEntity = base44.asServiceRole.entities[revenueConfig.entityName];
+  const unmarked = [];
 
   for (const event of events) {
     try {
@@ -621,8 +810,10 @@ async function markEventsSettled(events, batchId, executionResult) {
       console.log(`  ${manualCsv ? 'Exported' : 'Settled'} ${event.id}.`);
     } catch (e) {
       console.error(`  ❌ Failed to update ${event.id}: ${e.message}`);
+      unmarked.push(event.id);
     }
   }
+  return unmarked;
 }
 
 // ============================================================================
@@ -633,9 +824,26 @@ async function markEventsSettled(events, batchId, executionResult) {
  * Returns daemon health status
  */
 export function getDaemonHealth() {
+  // A claim still open is money that may be on its way: it belongs in health,
+  // not only in a log line an operator has to be watching.
+  const claims = readPayoutClaims(process.cwd());
   return {
     ...state.getStatus(),
     config: CONFIG,
+    payout_claims: {
+      path: claims.path,
+      error: claims.error,
+      open: openPayoutClaims(claims.claims).map(claim => ({
+        batch_id: claim.batch_id,
+        rail: claim.rail,
+        status: claim.status,
+        revenue_event_ids: claim.revenue_event_ids ?? [],
+        amount: claim.amount,
+        currency: claim.currency,
+        claimed_at: claim.claimed_at,
+        error: claim.error ?? null
+      }))
+    },
     owner_accounts: Object.keys(OWNER_ACCOUNTS).map(key => ({
       type: key,
       enabled: OWNER_ACCOUNTS[key].enabled,
@@ -677,6 +885,21 @@ export async function triggerManualSettlement() {
 // ============================================================================
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv.includes('--resolve-claim')) {
+    const index = process.argv.indexOf('--resolve-claim');
+    const batchId = process.argv[index + 1] ?? '';
+    const noteIndex = process.argv.indexOf('--note');
+    const result = resolvePayoutClaim(process.cwd(), batchId, {
+      note: noteIndex >= 0 ? process.argv[noteIndex + 1] ?? null : 'operator confirmed the payout never arrived'
+    });
+    if (result.resolved) {
+      console.log(`✅ Payout claim ${batchId} closed as never sent; its rows are payable again.`);
+      process.exit(0);
+    }
+    console.error(`❌ Could not close payout claim ${batchId || '(none given)'}: ${result.reason}${result.error ? ` (${result.error})` : ''}`);
+    process.exit(1);
+  }
+
   if (process.argv.includes('--once')) {
     console.log('🎯 Starting single settlement cycle...');
     performSettlementCycle().then(() => {

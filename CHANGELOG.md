@@ -1,6 +1,16 @@
 # Changelog
 
 ## 2026-11-24
+- The settlement daemon's emergency stop survives a restart. The latch was
+  in-memory only while startup runs a settlement cycle immediately, so a restart
+  — including the one an operator performs because money is misbehaving —
+  cleared the stop and the next cycle paid. `emergencyStop()` now writes
+  `data/financial/settlement-emergency-stop.json` (override with
+  `SETTLEMENT_EMERGENCY_STOP_FILE`), and startup, `--once` and manual triggers
+  refuse while it exists, reading the file rather than trusting process memory.
+  A latch that cannot be read counts as stopped, and a stop that cannot be
+  persisted is reported as a critical finding instead of quietly protecting only
+  this process. Clearing is explicit: `--clear-emergency-stop`.
 - The settlement daemon claims a payout before it sends it. A crash between
   paying a batch and marking its rows left no record that money may have moved:
   the rows were still VERIFIED, so the next cycle selected them again and sent a

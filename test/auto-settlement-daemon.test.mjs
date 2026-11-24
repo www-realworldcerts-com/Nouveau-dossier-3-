@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import { latchEmergencyStop } from '../src/financial/settlement-emergency-stop.mjs';
 
 import { startStub } from '../scripts/lib/http-stub.mjs';
 import { resolvePayoutClaim } from '../src/financial/payout-claims.mjs';
@@ -25,12 +29,15 @@ const storePath = path.join(tmp, 'base44-store.json');
 const exportsDir = path.join(tmp, 'exports');
 fs.mkdirSync(exportsDir, { recursive: true });
 const claimStore = path.join(tmp, 'data', 'financial', 'payout-claims.json');
+const stopFile = path.join(tmp, 'data', 'financial', 'settlement-emergency-stop.json');
+const daemonPath = fileURLToPath(new URL('../auto_settlement_daemon.js', import.meta.url));
 process.chdir(tmp);
 
 Object.assign(process.env, {
     BASE44_OFFLINE: 'true',
     BASE44_OFFLINE_STORE_PATH: storePath,
     PAYOUT_CLAIM_STORE: claimStore,
+    SETTLEMENT_EMERGENCY_STOP_FILE: stopFile,
     PAYPAL_API_BASE_URL: stub.url,
     PAYPAL_CLIENT_ID: 'stub-client-id',
     PAYPAL_CLIENT_SECRET: 'stub-client-secret',
@@ -106,6 +113,23 @@ function revenueEvent(id, amount, overrides = {}) {
 
 function writeEvents(events) {
     fs.writeFileSync(storePath, JSON.stringify({ entities: { RevenueEvent: { records: events } } }));
+}
+
+/** The stop latch outlives the process that wrote it, so tests clear it. */
+function resetStop() {
+    fs.rmSync(stopFile, { force: true });
+}
+
+/** Run the daemon CLI in a fresh process, as a restart would. */
+function runDaemon(args) {
+    return new Promise(resolve => {
+        const child = spawn(process.execPath, [daemonPath, ...args], { cwd: tmp, env: { ...process.env } });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', chunk => { stdout += chunk; });
+        child.stderr.on('data', chunk => { stderr += chunk; });
+        child.on('close', status => resolve({ status, stdout, stderr }));
+    });
 }
 
 function writeStore({ revenueEvents = [], payoutItems = [] }) {
@@ -443,12 +467,68 @@ test('a batch the provider recorded as failed frees its rows to be paid', async 
     assert.equal(stub.hits.length, 0);
 });
 
+test('a persisted stop survives a restart and refuses --once until it is cleared', async () => {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+    writeEvents([revenueEvent('evt-stop-restart-1', 19)]);
+
+    const latched = latchEmergencyStop(tmp, { reason: 'money behaviour under review', by: 'test' });
+    assert.equal(latched.stopped, true);
+
+    // A fresh process knows nothing about the stop until it reads the latch.
+    const startRefused = await runDaemon([]);
+    assert.equal(startRefused.status, 1, startRefused.stderr);
+    assert.match(startRefused.stderr, /EMERGENCY_STOP/);
+
+    const refused = await runDaemon(['--once']);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /EMERGENCY_STOP/);
+    assert.equal(readEvents()[0].status, 'VERIFIED', 'the startup cycle must not pay');
+    assert.deepEqual(exportFiles(), []);
+    assert.deepEqual(claims(), [], 'nothing is even claimed while stopped');
+
+    // Restarting again must not clear it either.
+    const stillRefused = await runDaemon(['--once']);
+    assert.equal(stillRefused.status, 1);
+
+    // Only an explicit clear lets settlement run again.
+    const cleared = await runDaemon(['--clear-emergency-stop']);
+    assert.equal(cleared.status, 0, cleared.stderr);
+
+    // Cleared, the cycle runs again instead of refusing. (The gate still holds
+    // this row for its own reasons in a child process — its bound evidence is
+    // stubbed inside this test — so the assertion is that settlement proceeds.)
+    const resumed = await runDaemon(['--once']);
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.doesNotMatch(resumed.stderr, /EMERGENCY_STOP/);
+    assert.match(resumed.stdout, /Starting single settlement cycle/);
+});
+
+test('a persisted stop refuses a manual trigger in a fresh process', async () => {
+    resetClaims();
+    resetStop();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+    writeEvents([revenueEvent('evt-stop-manual-1', 19)]);
+
+    latchEmergencyStop(tmp, { reason: 'still under review' });
+
+    assert.equal(await daemon.triggerManualSettlement(), false);
+    assert.equal(readEvents()[0].status, 'VERIFIED');
+    assert.deepEqual(exportFiles(), []);
+    assert.equal(daemon.getDaemonHealth().emergencyStopped, true, 'the latch is now this process\'s state too');
+});
+
 test('the emergency stop latches and refuses every later payout', async () => {
+    resetStop();
     fs.rmSync(exportsDir, { recursive: true, force: true });
     fs.mkdirSync(exportsDir, { recursive: true });
     writeEvents([revenueEvent('evt-stopped-1', 19)]);
 
-    daemon.emergencyStop();
+    daemon.emergencyStop({ reason: 'test stop' });
+
+    assert.equal(fs.existsSync(stopFile), true, 'the stop is persisted, not only in memory');
 
     const health = daemon.getDaemonHealth();
     assert.equal(health.emergencyStopped, true);

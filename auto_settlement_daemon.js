@@ -19,6 +19,11 @@ import {
   readPayoutClaimEvidence
 } from './src/financial/payout-claim-evidence.mjs';
 import {
+  clearEmergencyStop,
+  latchEmergencyStop,
+  readEmergencyStop
+} from './src/financial/settlement-emergency-stop.mjs';
+import {
   claimPayoutBatch,
   claimedRevenueEventIds,
   openPayoutClaims,
@@ -165,6 +170,24 @@ class SettlementState {
 const state = new SettlementState();
 let activeIntervalId = null;
 
+/**
+ * The stop latch lives on disk, not only in this process: a stop a restart
+ * forgets is no stop at all, and startup runs a cycle immediately. Reading it
+ * here also brings this process's in-memory latch up to date.
+ */
+function emergencyStopState() {
+  const latch = readEmergencyStop(process.cwd());
+  if (latch.stopped) state.emergencyStopped = true;
+  return latch;
+}
+
+function emergencyStopMessage(latch) {
+  const detail = latch.error
+    ? `the latch at ${latch.path} could not be read (${latch.error})`
+    : `latched at ${latch.at ?? 'an unknown time'}${latch.reason ? ` (${latch.reason})` : ''}`;
+  return `EMERGENCY_STOP: settlement is halted — ${detail}; clear it with --clear-emergency-stop`;
+}
+
 // ============================================================================
 // MAIN SETTLEMENT LOOP
 // ============================================================================
@@ -182,8 +205,9 @@ export async function startAutoSettlementDaemon() {
     process.exit(1);
   }
 
-  if (state.emergencyStopped) {
-    throw new Error('EMERGENCY_STOP: settlement is halted; restart the process to clear it');
+  const latch = emergencyStopState();
+  if (state.emergencyStopped || latch.stopped) {
+    throw new Error(emergencyStopMessage(latch));
   }
 
   state.running = true;
@@ -224,8 +248,9 @@ export async function startAutoSettlementDaemon() {
  * Main settlement cycle - runs periodically
  */
 export async function performSettlementCycle() {
-  if (state.emergencyStopped) {
-    console.log('⛔ Emergency stop is latched: no settlement will be attempted.');
+  const latch = emergencyStopState();
+  if (state.emergencyStopped || latch.stopped) {
+    console.log(`⛔ Emergency stop is latched: no settlement will be attempted. ${emergencyStopMessage(latch)}`);
     return;
   }
 
@@ -855,10 +880,18 @@ export function getDaemonHealth() {
 /**
  * Emergency stop - halts all settlements
  */
-export function emergencyStop() {
+export function emergencyStop({ reason = 'emergencyStop() called', by = 'daemon' } = {}) {
   console.log('🚨 EMERGENCY STOP ACTIVATED');
   state.emergencyStopped = true;
   state.running = false;
+  // Persist before anything else can be attempted: the in-memory latch only
+  // protects this process, and the restart is the case a stop exists for.
+  const latched = latchEmergencyStop(process.cwd(), { reason, by });
+  if (!latched.stopped) {
+    const message = `the emergency stop could not be persisted (${latched.error}); a restart would clear it`;
+    process.stderr.write(`FINDING SETTLEMENT_EMERGENCY_STOP_UNWRITTEN [critical] ${message}\n`);
+    state.addError(new Error(message));
+  }
   if (activeIntervalId) {
     clearInterval(activeIntervalId);
     activeIntervalId = null;
@@ -871,7 +904,8 @@ export function emergencyStop() {
  * Manual trigger - forces immediate settlement check
  */
 export async function triggerManualSettlement() {
-  if (state.emergencyStopped) {
+  const latch = emergencyStopState();
+  if (state.emergencyStopped || latch.stopped) {
     console.log('⛔ Manual settlement refused: emergency stop is latched');
     return false;
   }
@@ -885,6 +919,16 @@ export async function triggerManualSettlement() {
 // ============================================================================
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv.includes('--clear-emergency-stop')) {
+    const result = clearEmergencyStop(process.cwd());
+    if (result.cleared) {
+      console.log(`✅ Emergency stop cleared (${result.path}); settlement may run again.`);
+      process.exit(0);
+    }
+    console.error(`❌ Nothing to clear: ${result.reason}${result.error ? ` (${result.error})` : ''}`);
+    process.exit(result.reason === 'not_stopped' ? 0 : 1);
+  }
+
   if (process.argv.includes('--resolve-claim')) {
     const index = process.argv.indexOf('--resolve-claim');
     const batchId = process.argv[index + 1] ?? '';
@@ -901,6 +945,11 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   }
 
   if (process.argv.includes('--once')) {
+    const latch = emergencyStopState();
+    if (state.emergencyStopped || latch.stopped) {
+      console.error(`⛔ ${emergencyStopMessage(latch)}`);
+      process.exit(1);
+    }
     console.log('🎯 Starting single settlement cycle...');
     performSettlementCycle().then(() => {
       console.log('✅ Single cycle complete.');

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-24
+- Evidence chain appends are serialised. `EvidenceIntegrityChain.addBlock` is
+  read-modify-write: two captures recorded at the same moment both read the same
+  last block, each appended its own and the second write removed the first, so
+  the chain forked and a later settlement checked a branch that no longer held
+  its block. An append now holds a lock file beside the chain
+  (`<chain>.lock`, so it also excludes another process on the same volume),
+  waits up to 10 s for it, and steals it only after 30 s, which is how a writer
+  that died mid-append stops wedging the chain. The chain is written to a
+  staging file and renamed, so a reader never sees a half written chain.
+
 ## 2026-11-23
 - `scripts/backfill-settlement-evidence.mjs` (`npm run evidence:backfill`) binds
   settlement-evidence blocks for revenue rows recorded before capture ingest

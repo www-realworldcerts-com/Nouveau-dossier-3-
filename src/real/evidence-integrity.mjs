@@ -10,6 +10,17 @@ function chainPath() {
     return configured ? path.resolve(configured) : path.join(process.cwd(), 'data', 'evidence-chain.json');
 }
 
+// Appends are read-modify-write, so two captures recorded at once both read the
+// same last block and each append the other's predecessor away: the chain forks
+// and one branch is lost, which a later settlement then checks against. Every
+// append holds this lock, which is a file next to the chain so it also excludes
+// a second process on the same volume.
+const LOCK_STALE_MS = 30_000;
+const LOCK_WAIT_MS = 10_000;
+const LOCK_POLL_MS = 10;
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 export class EvidenceIntegrityChain {
     
     static async assertEventBound(eventId) {
@@ -54,22 +65,69 @@ export class EvidenceIntegrityChain {
 
     // Helper to add blocks (needed for the system to work)
     static async addBlock(eventId, proof) {
-        const chain = await this.#loadChain();
-        const lastBlock = chain[chain.length - 1];
-        const prevHash = lastBlock ? lastBlock.hash : 'GENESIS';
+        return this.#withChainLock(async () => {
+            const chain = await this.#loadChain();
+            const lastBlock = chain[chain.length - 1];
+            const prevHash = lastBlock ? lastBlock.hash : 'GENESIS';
 
-        const newBlock = {
-            eventId,
-            proof,
-            prevHash,
-            timestamp: new Date().toISOString()
-        };
-        
-        newBlock.hash = this.calculateBlockHash(newBlock);
-        
-        chain.push(newBlock);
-        await this.#saveChain(chain);
-        return newBlock;
+            const newBlock = {
+                eventId,
+                proof,
+                prevHash,
+                timestamp: new Date().toISOString()
+            };
+
+            newBlock.hash = this.calculateBlockHash(newBlock);
+
+            chain.push(newBlock);
+            await this.#saveChain(chain);
+            return newBlock;
+        });
+    }
+
+    static async #withChainLock(fn) {
+        const file = chainPath();
+        const lock = `${file}.lock`;
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+
+        const deadline = Date.now() + LOCK_WAIT_MS;
+        let handle = null;
+        while (handle === null) {
+            try {
+                handle = fs.openSync(lock, 'wx');
+            } catch (err) {
+                if (err.code !== 'EEXIST') throw err;
+                // A writer that died mid-append must not wedge the chain forever.
+                let stale = false;
+                try {
+                    stale = Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS;
+                } catch {
+                    // Released between the open and the stat: try again at once.
+                }
+                if (stale) {
+                    // Steal by rename, not unlink: if the holder released it in
+                    // the meantime this fails and we must not delete the fresh
+                    // lock a third writer has just taken.
+                    const stolen = `${lock}.stale-${process.pid}-${Date.now()}`;
+                    try {
+                        fs.renameSync(lock, stolen);
+                        fs.unlinkSync(stolen);
+                    } catch {}
+                    continue;
+                }
+                if (Date.now() > deadline) {
+                    throw new Error(`INVARIANT_FAIL: evidence_chain_lock_timeout (${file})`);
+                }
+                await sleep(LOCK_POLL_MS);
+            }
+        }
+
+        try {
+            return await fn();
+        } finally {
+            try { fs.closeSync(handle); } catch {}
+            try { fs.unlinkSync(lock); } catch {}
+        }
     }
 
     static async #loadChain() {
@@ -84,6 +142,10 @@ export class EvidenceIntegrityChain {
         const file = chainPath();
         // The first block of a fresh deploy has no data/ directory yet.
         fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, JSON.stringify(chain, null, 2));
+        // Write beside the chain and rename, so a reader never sees a half
+        // written file and no partial chain is left behind by a crash.
+        const staging = `${file}.tmp`;
+        fs.writeFileSync(staging, JSON.stringify(chain, null, 2));
+        fs.renameSync(staging, file);
     }
 }

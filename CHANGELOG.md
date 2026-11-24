@@ -13,6 +13,23 @@
   row appends a closing line, so a replayed capture clears the finding.
 
 ## 2026-11-23
+- The settlement-evidence block is now written when a capture is recorded, not
+  reconstructed when the money is about to move. Every capture ingest path funnels
+  through `createBase44RevenueEvent(Idempotent)`, which binds an
+  `EvidenceIntegrityChain` block naming the row's own provider transaction id,
+  amount and currency from the proof it verified at creation. `authorizeRevenueSettlement`
+  no longer creates the block it could not find: a row with no bound evidence is
+  refused as `settlement_evidence_missing`, and bound evidence that disagrees
+  with the row's current psp id, amount or currency is refused as
+  `settlement_evidence_mismatch`, so a row can no longer authorise its own payout
+  from whatever it says today. A capture whose block cannot be written is still
+  recorded (the money did move) but reported as
+  `SETTLEMENT_EVIDENCE_UNBOUND` and left unsettleable. The chain
+  path is also configurable with `EVIDENCE_CHAIN_PATH` and its directory is
+  created on first write, so a deployment can put it on a durable volume and a
+  test keeps it out of the repository.
+
+## 2026-11-23
 - Settlement daemon: the batching window was inverted. `MAX_SETTLEMENT_DELAY_HOURS`
   is a lower bound on age, but the filter kept events *younger* than it
   (`ageHours < 24`), so revenue that had waited past the window was never

@@ -4,6 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+// Reversal rows are provider-backed too, so recording one binds its settlement
+// evidence. Keep that chain file out of the repository.
+process.env.EVIDENCE_CHAIN_PATH = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-chain-')),
+    'evidence-chain.json'
+);
+
 import { mapPayPalWebhookToRevenueReversal } from '../src/paypal-event-mapper.mjs';
 import {
     REVENUE_REVERSAL_WITHOUT_CAPTURE,

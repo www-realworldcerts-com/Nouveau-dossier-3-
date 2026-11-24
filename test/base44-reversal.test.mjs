@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+
+// A reversal row is provider-backed, so recording one binds its settlement
+// evidence. Keep that chain file out of the repository.
+process.env.EVIDENCE_CHAIN_PATH = path.join(
+  fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-chain-')),
+  'evidence-chain.json'
+);
 
 import { createBase44RevenueReversal, getRevenueConfigFromEnv } from '../src/base44-revenue.mjs';
 import { REVENUE_REVERSAL_WITHOUT_CAPTURE } from '../src/real/ledger/reversals.mjs';

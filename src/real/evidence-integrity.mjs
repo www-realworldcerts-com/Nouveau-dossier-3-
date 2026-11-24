@@ -3,7 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
-const CHAIN_PATH = path.join(process.cwd(), 'data', 'evidence-chain.json');
+// Configurable so a deployment can put the chain on a durable volume and a
+// test can keep it out of the repository. Resolved per call, not at import.
+function chainPath() {
+    const configured = String(process.env.EVIDENCE_CHAIN_PATH ?? '').trim();
+    return configured ? path.resolve(configured) : path.join(process.cwd(), 'data', 'evidence-chain.json');
+}
 
 export class EvidenceIntegrityChain {
     
@@ -68,13 +73,17 @@ export class EvidenceIntegrityChain {
     }
 
     static async #loadChain() {
-        if (!fs.existsSync(CHAIN_PATH)) {
+        const file = chainPath();
+        if (!fs.existsSync(file)) {
             return [];
         }
-        return JSON.parse(fs.readFileSync(CHAIN_PATH, 'utf8'));
+        return JSON.parse(fs.readFileSync(file, 'utf8'));
     }
 
     static async #saveChain(chain) {
-        fs.writeFileSync(CHAIN_PATH, JSON.stringify(chain, null, 2));
+        const file = chainPath();
+        // The first block of a fresh deploy has no data/ directory yet.
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(chain, null, 2));
     }
 }

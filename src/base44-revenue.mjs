@@ -3,6 +3,7 @@ import { demoteUnverifiedStatus, verifyRevenueEvent, RevenueNotProviderVerifiedE
 import { EvidenceIntegrityChain } from "./real/evidence-integrity.mjs";
 import { MoneyMovedGate } from "./real/money-moved-gate.mjs";
 import { reversalWithoutCaptureFinding } from "./real/ledger/reversals.mjs";
+import { recordSettlementEvidenceUnbound } from "./resilience/settlement-blocks.mjs";
 import { computeConstitutionHash } from "./policy/constitution.mjs";
 import { getConstitutionState, computeConstitutionHashFromFile } from "./bootstrap/constitution-validator.mjs";
 
@@ -172,6 +173,96 @@ function buildRevenueData(cfg, event, { dryRun = false } = {}) {
   return data;
 }
 
+/** The proof shape a settlement is authorised by. */
+const SETTLEMENT_PROOF_TYPE = "psp_transaction_id";
+
+/**
+ * Bind the settlement-evidence block for one revenue row.
+ *
+ * The block is the evidence a later payout is checked against, so it is written
+ * when the capture is recorded rather than rebuilt at payout time. A settlement
+ * that constructs its own proof is authorising itself from whatever the row
+ * says at that moment, which is exactly what the chain exists to prevent.
+ *
+ * Only a provider transaction id can be bound, and the block records the row's
+ * own psp id, amount and currency. Never throws: a capture whose block cannot be
+ * written is still recorded (the money did move) but reported, and its
+ * settlement is refused until a block exists.
+ */
+/**
+ * The provider evidence a revenue row is settled against, or the reason it has
+ * none. One definition, shared by ingest, the settlement gate and the one-off
+ * backfill, so "the evidence for this row" cannot mean two different things.
+ */
+export function settlementEvidenceProof(event = {}) {
+  const metadata = event?.metadata && typeof event.metadata === "object" ? event.metadata : {};
+  const verification = verifyRevenueEvent({
+    metadata,
+    verification_proof: event?.verification_proof ?? metadata?.verification_proof
+  });
+  if (!verification.verified) {
+    return { verified: false, reason: verification.reason, psp_id: verification.psp_id ?? null };
+  }
+  return {
+    verified: true,
+    reason: null,
+    verification,
+    proof: {
+      type: SETTLEMENT_PROOF_TYPE,
+      psp_id: verification.psp_id,
+      amount: Number(event.amount),
+      currency: String(event.currency ?? "USD").toUpperCase(),
+      timestamp: event.occurredAt ?? new Date().toISOString()
+    }
+  };
+}
+
+/** Whether a block bound earlier is about the same money as `proof`. */
+export function settlementEvidenceAgrees(bound, proof) {
+  const evidence = bound && typeof bound === "object" ? bound : {};
+  return (
+    String(evidence.psp_id ?? "") === String(proof?.psp_id ?? "") &&
+    Number(evidence.amount) === Number(proof?.amount) &&
+    String(evidence.currency ?? "").toUpperCase() === String(proof?.currency ?? "").toUpperCase()
+  );
+}
+
+async function bindSettlementEvidence({ revenueEventId, event = {} } = {}) {
+  const id = String(revenueEventId ?? "").trim();
+  if (!id) return { bound: false, reason: "revenue_event_id_missing" };
+
+  const evidence = settlementEvidenceProof(event);
+  if (!evidence.verified) {
+    return { bound: false, reason: evidence.reason, psp_id: evidence.psp_id };
+  }
+  const { proof } = evidence;
+
+  try {
+    // A replay must not chain a second block for the same row.
+    const existing = await EvidenceIntegrityChain.fetchBlockForEvent(id).catch(() => null);
+    if (!existing) await EvidenceIntegrityChain.addBlock(id, proof);
+    return { bound: true, psp_id: proof.psp_id };
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    process.stderr.write(
+      `FINDING SETTLEMENT_EVIDENCE_UNBOUND [critical] capture ${proof.psp_id} was recorded as revenue ` +
+      `event ${id}, but its settlement evidence could not be bound: ${message}. ` +
+      `That row cannot be settled until the block exists.\n`
+    );
+    // stderr is discarded on a serverless host, so the same failure goes into
+    // the log the audit reads back. Without this the order is simply never paid
+    // out and nothing raises an incident.
+    recordSettlementEvidenceUnbound(process.cwd(), {
+      revenue_event_id: id,
+      psp_transaction_id: proof.psp_id,
+      reason: "evidence_chain_write_failed",
+      error: message,
+      source: "revenue_ingest"
+    });
+    return { bound: false, reason: "evidence_chain_write_failed", error: message, psp_id: proof.psp_id };
+  }
+}
+
 async function findExistingId(entity, filter) {
   const existing = await entity.filter(filter, "-created_date", 1, 0);
   if (Array.isArray(existing) && existing[0]?.id) return existing[0].id;
@@ -188,7 +279,10 @@ export async function createBase44RevenueEvent(base44, cfg, event, { dryRun } = 
   }
 
   const entity = base44.asServiceRole.entities[cfg.entityName];
-  return entity.create(data);
+  const created = await entity.create(data);
+  // The sale's evidence is bound here, on the write path that records it.
+  const evidence = await bindSettlementEvidence({ revenueEventId: created?.id, event });
+  return { ...created, evidence };
 }
 
 /** The capture ids a Base44 revenue row can identify itself by. */
@@ -406,15 +500,29 @@ export async function createBase44RevenueEventIdempotent(base44, cfg, event, { d
   if (cfg.fieldMap.source && event.source != null) filter[cfg.fieldMap.source] = event.source;
 
   const existingId = await findExistingId(entity, filter);
-  if (existingId) return { id: existingId, deduped: true };
+  if (existingId) {
+    // A replay of a capture already recorded: bind only if it never was, which
+    // backfills a row written before ingest-time binding existed.
+    const evidence = await bindSettlementEvidence({ revenueEventId: existingId, event });
+    return { id: existingId, deduped: true, evidence };
+  }
 
+  let created;
   try {
-    return await entity.create(data);
+    created = await entity.create(data);
   } catch (err) {
     const racedId = await findExistingId(entity, filter).catch(() => null);
-    if (racedId) return { id: racedId, deduped: true };
+    if (racedId) {
+      const evidence = await bindSettlementEvidence({ revenueEventId: racedId, event });
+      return { id: racedId, deduped: true, evidence };
+    }
     throw err;
   }
+
+  // The block a later payout is checked against is written now, with the
+  // capture, not reconstructed when the money is about to move.
+  const evidence = await bindSettlementEvidence({ revenueEventId: created?.id, event });
+  return { ...created, evidence };
 }
 
 /** A revenue row by its ledger id, or null. */
@@ -497,11 +605,31 @@ async function decideRevenueSettlement(base44, cfg, { revenueEventId } = {}) {
     settled: false
   };
 
+  // The evidence was bound when the capture was ingested. Rebuilding it here
+  // would let the row authorise its own payout from whatever it says now, so a
+  // missing or disagreeing block is a refusal, never a write.
+  const block = await EvidenceIntegrityChain.fetchBlockForEvent(id).catch(() => null);
+  if (!block) {
+    return {
+      ok: false,
+      reason: "settlement_evidence_missing",
+      psp_id: verification.psp_id,
+      detail: "no settlement-evidence block was bound when this capture was recorded; it is not rebuilt at payout time"
+    };
+  }
+  // The block must be about this same money. Timestamps are not compared: the
+  // block records when the sale was announced, the row when it occurred.
+  const bound = block.proof ?? {};
+  if (!settlementEvidenceAgrees(bound, proof)) {
+    return {
+      ok: false,
+      reason: "settlement_evidence_mismatch",
+      psp_id: verification.psp_id,
+      detail: `bound evidence ${bound.psp_id ?? "(none)"} ${bound.amount ?? "?"} ${bound.currency ?? "?"} does not match the row's ${proof.psp_id} ${proof.amount} ${proof.currency}`
+    };
+  }
+
   try {
-    // A row settled before the chain existed has no block yet; bind the proof
-    // we just verified so this settlement and later ones are chain-checked.
-    const block = await EvidenceIntegrityChain.fetchBlockForEvent(id).catch(() => null);
-    if (!block) await EvidenceIntegrityChain.addBlock(id, proof);
     await MoneyMovedGate.assertMoneyMoved(gateEvent);
   } catch (err) {
     return {

@@ -65,16 +65,19 @@ function fakeBase44(row) {
     };
 }
 
-/** The chain is a filesystem concern, tested where it lives. */
-function stubChain(t) {
+/**
+ * The chain is a filesystem concern, tested where it lives. `bound` is what a
+ * capture's ingest wrote: settlement reads that block, it never writes one.
+ */
+function stubChain(t, bound = null) {
     const saved = {
         fetch: EvidenceIntegrityChain.fetchBlockForEvent,
         add: EvidenceIntegrityChain.addBlock,
         assert: EvidenceIntegrityChain.assertEventBound,
         allowed: RedressEngine.prototype.isSettlementAllowed
     };
-    const blocks = [];
-    EvidenceIntegrityChain.fetchBlockForEvent = async () => null;
+    const blocks = bound ? [bound] : [];
+    EvidenceIntegrityChain.fetchBlockForEvent = async eventId => blocks.find(block => block.eventId === eventId) ?? null;
     EvidenceIntegrityChain.addBlock = async (eventId, proof) => {
         blocks.push({ eventId, proof });
         return { eventId, proof };
@@ -140,8 +143,20 @@ test('a row with no provider id at all is refused', async t => {
     assert.deepEqual(updates, []);
 });
 
-test('a provider-backed row that a verified webhook named is approved and chain-bound', async t => {
-    const blocks = stubChain(t);
+/** The block a capture's ingest binds for this row. */
+const BOUND_EVIDENCE = {
+    eventId: 'rev-1',
+    proof: {
+        type: 'psp_transaction_id',
+        psp_id: CAPTURE,
+        amount: 19,
+        currency: 'USD',
+        timestamp: '2026-11-20T09:59:00.000Z'
+    }
+};
+
+test('a provider-backed row whose evidence was bound at ingest is approved', async t => {
+    const blocks = stubChain(t, BOUND_EVIDENCE);
     useRegistry(t, [CAPTURE]);
     const { base44 } = fakeBase44(revenueRow({ metadata: { paypal_capture_id: CAPTURE } }));
 
@@ -151,15 +166,41 @@ test('a provider-backed row that a verified webhook named is approved and chain-
     assert.equal(result.provider, 'paypal');
     assert.equal(result.psp_id, CAPTURE);
     assert.equal(result.evidence, 'paypal_capture_id');
-    assert.equal(blocks.length, 1, 'the settlement proof is bound to the row');
-    assert.equal(blocks[0].eventId, 'rev-1');
-    assert.equal(blocks[0].proof.psp_id, CAPTURE);
-    assert.equal(blocks[0].proof.amount, 19);
-    assert.equal(blocks[0].proof.currency, 'USD');
+    assert.equal(blocks.length, 1, 'settlement reads the ingest block; it does not chain another');
+    assert.equal(blocks[0], BOUND_EVIDENCE);
+});
+
+test('a row with no bound evidence is refused instead of binding it at payout time', async t => {
+    const blocks = stubChain(t);
+    useRegistry(t, [CAPTURE]);
+    const { base44, updates } = fakeBase44(revenueRow({ metadata: { paypal_capture_id: CAPTURE } }));
+
+    const result = await authorizeRevenueSettlement(base44, CFG, { revenueEventId: 'rev-1' });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'settlement_evidence_missing');
+    assert.equal(result.psp_id, CAPTURE);
+    assert.deepEqual(blocks, [], 'the proof is not reconstructed when the money is about to move');
+    assert.deepEqual(updates, [], 'nothing may be written for an unbound row');
+});
+
+test('bound evidence that disagrees with the row is refused as a mismatch', async t => {
+    stubChain(t, { ...BOUND_EVIDENCE, proof: { ...BOUND_EVIDENCE.proof, amount: 25 } });
+    useRegistry(t, [CAPTURE]);
+    const { base44, updates } = fakeBase44(revenueRow({ metadata: { paypal_capture_id: CAPTURE } }));
+
+    const result = await authorizeRevenueSettlement(base44, CFG, { revenueEventId: 'rev-1' });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'settlement_evidence_mismatch');
+    assert.match(result.detail, /bound evidence .* 25 USD does not match .* 19 USD/);
+    assert.deepEqual(updates, []);
 });
 
 test('a provider-shaped id no verified webhook named is refused by the gate', async t => {
-    stubChain(t);
+    // Bound at ingest, as any real capture is: the refusal under test is the
+    // gate's registry check, not missing evidence.
+    stubChain(t, { ...BOUND_EVIDENCE, proof: { ...BOUND_EVIDENCE.proof, psp_id: OTHER_CAPTURE } });
     useRegistry(t, [CAPTURE]);
     const { base44, updates } = fakeBase44(revenueRow({ metadata: { paypal_capture_id: OTHER_CAPTURE } }));
 

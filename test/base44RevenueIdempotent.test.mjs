@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { createBase44RevenueEvent, createBase44RevenueEventIdempotent } from "../src/base44-revenue.mjs";
+
+// Recording a capture binds its settlement evidence; keep that file out of the
+// repository. The binding itself is covered in settlement-evidence-binding.
+process.env.EVIDENCE_CHAIN_PATH = path.join(
+  fs.mkdtempSync(path.join(os.tmpdir(), "evidence-chain-")),
+  "evidence-chain.json"
+);
 
 function makeCfg() {
   return {
@@ -138,7 +148,11 @@ test("createBase44RevenueEventIdempotent returns existing id when found", async 
   };
 
   const out = await createBase44RevenueEventIdempotent(base44, makeCfg(), makeEvent(), { dryRun: false });
-  assert.deepEqual(out, { id: "existing", deduped: true });
+  assert.equal(out.id, "existing");
+  assert.equal(out.deduped, true);
+  // A replayed capture whose row predates ingest-time binding gets its block
+  // now, so it stays settleable.
+  assert.equal(out.evidence.bound, true);
   assert.equal(created, false);
 });
 
@@ -188,7 +202,10 @@ test("createBase44RevenueEventIdempotent re-checks on create error and dedupes",
   };
 
   const out = await createBase44RevenueEventIdempotent(base44, makeCfg(), makeEvent(), { dryRun: false });
-  assert.deepEqual(out, { id: "existing_after_race", deduped: true });
+  assert.equal(out.id, "existing_after_race");
+  assert.equal(out.deduped, true);
+  // The raced row is the capture the replay names, so its evidence is bound.
+  assert.equal(out.evidence.bound, true);
   assert.equal(filterCalls, 2);
 });
 

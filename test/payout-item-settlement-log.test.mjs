@@ -94,7 +94,12 @@ function stubGateDependencies(t) {
     assert: EvidenceIntegrityChain.assertEventBound,
     allowed: RedressEngine.prototype.isSettlementAllowed
   };
-  EvidenceIntegrityChain.fetchBlockForEvent = async () => null;
+  // Settlement reads the block a capture's ingest wrote. The chain itself is
+  // tested where it lives; here the fixture stands for a bound capture.
+  EvidenceIntegrityChain.fetchBlockForEvent = async eventId => ({
+    eventId,
+    proof: { type: 'psp_transaction_id', psp_id: CAPTURE, amount: 19, currency: 'USD' }
+  });
   EvidenceIntegrityChain.addBlock = async (eventId, proof) => ({ eventId, proof });
   EvidenceIntegrityChain.assertEventBound = async () => true;
   RedressEngine.prototype.isSettlementAllowed = () => true;

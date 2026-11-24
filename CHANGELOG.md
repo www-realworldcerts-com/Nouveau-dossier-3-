@@ -1,6 +1,19 @@
 # Changelog
 
 ## 2026-11-23
+- `scripts/backfill-settlement-evidence.mjs` (`npm run evidence:backfill`) binds
+  settlement-evidence blocks for revenue rows recorded before capture ingest
+  wrote them, which the settlement gate now refuses as
+  `settlement_evidence_missing`. It is a one-off, report-only unless `--apply` is
+  passed, and it only ever writes evidence: no status change, no settlement, no
+  overwrite. A row whose psp id no verified webhook named is refused, a row whose
+  existing block disagrees is refused rather than replaced, and rows that are
+  already `paid_out` or non-positive (reversals) are skipped. The canonical
+  "evidence for this row" and "does the block agree" rules moved into
+  `settlementEvidenceProof` / `settlementEvidenceAgrees` so ingest, the gate and
+  the backfill cannot drift apart.
+
+## 2026-11-23
 - A capture whose settlement-evidence block could not be written is now an
   incident instead of stderr. `bindSettlementEvidence` appends an
   `evidence_unbound` line to the settlement block log
@@ -24,7 +37,7 @@
   `settlement_evidence_mismatch`, so a row can no longer authorise its own payout
   from whatever it says today. A capture whose block cannot be written is still
   recorded (the money did move) but reported as
-  `SETTLEMENT_EVIDENCE_UNBOUND` and left unsettleable. The chain
+  `FINDING SETTLEMENT_EVIDENCE_NOT_BOUND [high]` and left unsettleable. The chain
   path is also configurable with `EVIDENCE_CHAIN_PATH` and its directory is
   created on first write, so a deployment can put it on a durable volume and a
   test keeps it out of the repository.

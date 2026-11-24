@@ -15,6 +15,7 @@
     "swarm:tick": "node scripts/swarm-tick.mjs",
     "swarm:tick:check": "node scripts/swarm-tick.mjs --check-only",
     "swarm:doctor": "node scripts/swarm-doctor.mjs",
+    "evidence:backfill": "node scripts/backfill-settlement-evidence.mjs",
     "security:scan": "node scripts/scan-secrets.mjs",
     "security:scan:staged": "node scripts/scan-secrets.mjs --staged",
     "security:hooks": "git config core.hooksPath .githooks",

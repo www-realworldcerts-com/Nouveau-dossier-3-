@@ -222,15 +222,28 @@ export function confirmPayoutBatch(root = process.cwd(), batchId = '', { by = nu
  * store exists to prevent. Closing stops the claim reserving its rows; it does
  * not by itself return a row that was already exported to the settlement
  * queue, which still reads `export_ready` and is not selected again.
+ *
+ * A manual CSV export closes its own claim when the file is written, so the
+ * batch an operator has to resolve is normally already closed and awaiting
+ * confirmation. `fromAwaitingConfirmation` stamps the not-sent resolution on
+ * exactly that state — closed, a recorded CSV export, no outcome yet — and
+ * every other closed claim keeps its recorded fate.
  */
-export function resolvePayoutClaim(root = process.cwd(), batchId = '', { note = null, resolvedBy = null } = {}, { env = process.env } = {}) {
+export function resolvePayoutClaim(root = process.cwd(), batchId = '', { note = null, resolvedBy = null, fromAwaitingConfirmation = false } = {}, { env = process.env } = {}) {
     const store = readPayoutClaims(root, { env });
     if (store.error) return { resolved: false, reason: 'claim_store_unreadable', error: store.error };
 
     const id = String(batchId ?? '').trim();
     const existing = store.claims.find(claim => String(claim?.batch_id ?? '') === id);
     if (!existing) return { resolved: false, reason: 'claim_missing' };
-    if (!OPEN_STATUSES.has(existing.status)) return { resolved: false, reason: 'claim_already_closed', claim: existing };
+    if (!OPEN_STATUSES.has(existing.status)) {
+        const awaitingConfirmation = existing.status === PAYOUT_CLAIM_CLOSED &&
+            !existing.resolution &&
+            existing.execution?.method === 'manual_csv';
+        if (!fromAwaitingConfirmation || !awaitingConfirmation) {
+            return { resolved: false, reason: 'claim_already_closed', claim: existing };
+        }
+    }
 
     const next = {
         ...existing,

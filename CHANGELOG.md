@@ -1,6 +1,23 @@
 # Changelog
 
 ## 2026-11-25
+- An exported batch that was never uploaded can now be released from its
+  waiting claim. A CSV export closes its own claim as soon as the file is
+  written, so the state an operator resolves is normally `closed` with no
+  resolution — and `--resolve-claim` refused it as
+  `PAYOUT_BATCH_NOT_RELEASABLE`, leaving a batch everyone knew was never sent
+  with no way out: no payment to confirm and no rows back in the queue. That
+  state is now releasable under the same evidence a confirmation uses: the
+  claim must record a `manual_csv` export whose `export_filename` still exists
+  in `exports/`, otherwise the batch is refused as
+  `PAYOUT_BATCH_EXPORT_MISSING` with the path. The not-sent resolution is
+  stamped on the closed claim, so the batch leaves daemon health's
+  awaiting-confirmation queue and the audit's `PAYOUT_EXPORT_UNCONFIRMED`
+  finding, cannot later be confirmed as paid (`PAYOUT_BATCH_NEVER_SENT`), and
+  its rows go back to `VERIFIED` exactly as the open-claim release does. Tests
+  cover the CLI release from the waiting state (claim resolved, rows released,
+  queue empty, confirmation refused) and the missing export file (nothing
+  written, claim still waiting).
 - Closing a claim as never sent now returns its rows to the settlement queue.
   `--resolve-claim` recorded the resolution and left the rows at `export_ready`,
   which the settlement selector never takes, so the revenue it said was payable

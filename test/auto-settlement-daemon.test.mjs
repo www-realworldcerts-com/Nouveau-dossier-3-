@@ -820,6 +820,58 @@ test('released rows are selected again by the next settlement cycle', async () =
     assert.equal(replaced.resolution.outcome, 'not_sent', 'the closed claim stays as history');
 });
 
+test('an exported batch nobody uploaded is released from its awaiting-confirmation claim', async () => {
+    // A CSV export closes its own claim, so "closed, no resolution" is the
+    // normal state of a batch waiting for the operator's word. Refusing that
+    // state left a batch known never to have been sent stuck: no payment to
+    // confirm, and no release either.
+    resetStop();
+    const batchId = await exportBatch('evt-awaiting-release-1');
+    const [before] = claims();
+    assert.equal(before.status, 'closed');
+    assert.equal(before.resolution, undefined);
+    assert.equal(before.execution.method, 'manual_csv');
+    assert.deepEqual(
+        daemon.getDaemonHealth().payout_claims.awaiting_confirmation.map(batch => batch.batch_id),
+        [batchId]
+    );
+
+    const released = await runDaemon(['--resolve-claim', batchId, '--note', 'the file was never uploaded']);
+    assert.equal(released.status, 0, released.stderr);
+    assert.match(released.stdout, /was closed as an exported batch awaiting confirmation; recorded as never sent/);
+    assert.match(released.stdout, /1 row\(s\) back in the settlement queue as VERIFIED/);
+
+    const [claim] = claims();
+    assert.equal(claim.status, 'closed');
+    assert.equal(claim.resolution.outcome, 'not_sent');
+    assert.equal(claim.resolution.note, 'the file was never uploaded');
+    assert.equal(claim.execution.export_filename, `payoneer_${batchId}.csv`, 'the export stays on the claim');
+    assert.deepEqual(daemon.getDaemonHealth().payout_claims.awaiting_confirmation, [], 'the batch leaves the operator queue');
+
+    const [row] = readEvents();
+    assert.equal(row.status, 'VERIFIED');
+    assert.equal(row.settled, false);
+    assert.equal(row.payout_batch_id, null);
+
+    // The resolution is final: the batch can no longer be recorded as paid.
+    await assert.rejects(daemon.confirmExportedBatch(batchId), /PAYOUT_BATCH_NEVER_SENT/);
+    assert.equal(claim.resolution.outcome, 'not_sent');
+});
+
+test('a batch awaiting confirmation is not released from a missing export file', async () => {
+    resetStop();
+    const batchId = await exportBatch('evt-awaiting-missing-1');
+    const [claim] = claims();
+    fs.rmSync(path.join(exportsDir, claim.execution.export_filename), { force: true });
+
+    await assert.rejects(daemon.resolveExportedBatch(batchId), /PAYOUT_BATCH_EXPORT_MISSING/);
+
+    const [row] = readEvents();
+    assert.equal(row.status, 'export_ready', 'nothing is released from an unproven export');
+    const [after] = claims();
+    assert.equal(after.resolution, undefined, 'the claim still waits for the operator');
+});
+
 test('a claim is not closed when any of its rows cannot be released', async () => {
     resetClaims();
     const batchId = claimRecord().batch_id;

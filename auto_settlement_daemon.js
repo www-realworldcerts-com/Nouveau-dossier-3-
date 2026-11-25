@@ -1020,6 +1020,15 @@ async function confirmExportedBatch(batchId, { by = 'operator', note = null } = 
  * reconciliation can mistake the batch for paid. A release interrupted between
  * the close and the writes is finished by running the same command again: rows
  * already back are counted as payable, not refused.
+ *
+ * A CSV batch closes its own claim as soon as the file is written, so the state
+ * an operator actually resolves is usually closed and awaiting confirmation,
+ * not open. Refusing it left a batch everyone knew was never sent permanently
+ * unpaid. That state is releasable under the same evidence a confirmation uses:
+ * the recorded export must still be on disk, because without it there is no
+ * export to release. The not-sent resolution is stamped on that closed claim, so
+ * it leaves the awaiting-confirmation queue and can never later be confirmed as
+ * paid.
  */
 async function resolveExportedBatch(batchId, { by = 'operator', note = null } = {}) {
   const store = readPayoutClaims(process.cwd());
@@ -1032,8 +1041,27 @@ async function resolveExportedBatch(batchId, { by = 'operator', note = null } = 
     throw new Error(`PAYOUT_BATCH_ALREADY_PAID: batch ${id} was confirmed paid; a not-sent resolution cannot un-pay it`);
   }
   const wasOpen = openPayoutClaims([claim]).length > 0;
-  if (!wasOpen && claim.resolution?.outcome !== 'not_sent') {
+  // A CSV export closes its claim when the file is written, so "closed with no
+  // outcome yet" is the normal state of a batch whose fate nobody has recorded.
+  const awaitingConfirmation = !wasOpen &&
+    claim.status === PAYOUT_CLAIM_CLOSED &&
+    !claim.resolution &&
+    claim.execution?.method === 'manual_csv';
+  if (!wasOpen && claim.resolution?.outcome !== 'not_sent' && !awaitingConfirmation) {
     throw new Error(`PAYOUT_BATCH_NOT_RELEASABLE: batch ${id} was closed as ${claim.resolution?.outcome ?? 'unknown'}`);
+  }
+  if (awaitingConfirmation) {
+    const exportFile = path.join(
+      path.resolve(process.cwd(), 'exports'),
+      String(claim.execution?.export_filename ?? '')
+    );
+    if (!claim.execution?.export_filename || !fs.existsSync(exportFile)) {
+      throw new Error(
+        `PAYOUT_BATCH_EXPORT_MISSING: batch ${id} recorded an export as ` +
+        `${claim.execution?.export_filename ?? 'an unnamed file'}, but ${exportFile} is not there; ` +
+        'release a batch only against the export file that was written'
+      );
+    }
   }
 
   const base44 = await buildBase44Client();
@@ -1084,8 +1112,12 @@ async function resolveExportedBatch(batchId, { by = 'operator', note = null } = 
   }
 
   let closed = claim;
-  if (wasOpen) {
-    const resolved = resolvePayoutClaim(process.cwd(), id, { note, resolvedBy: by });
+  if (wasOpen || awaitingConfirmation) {
+    const resolved = resolvePayoutClaim(process.cwd(), id, {
+      note,
+      resolvedBy: by,
+      ...(awaitingConfirmation ? { fromAwaitingConfirmation: true } : {})
+    });
     if (!resolved.resolved) {
       throw new Error(`PAYOUT_CLAIM_NOT_CLOSED: ${resolved.reason}${resolved.error ? ` (${resolved.error})` : ''}`);
     }
@@ -1126,6 +1158,7 @@ async function resolveExportedBatch(batchId, { by = 'operator', note = null } = 
     released,
     already_payable: alreadyPayable,
     already_closed: !wasOpen,
+    was_awaiting_confirmation: awaitingConfirmation,
     claim: closed
   };
 }
@@ -1288,7 +1321,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     resolveExportedBatch(batchId, {
       note: noteIndex >= 0 ? process.argv[noteIndex + 1] ?? null : 'operator confirmed the payout never arrived'
     }).then(result => {
-      const state = result.already_closed ? 'was already closed as never sent' : 'closed as never sent';
+      const state = result.was_awaiting_confirmation
+        ? 'was closed as an exported batch awaiting confirmation; recorded as never sent'
+        : result.already_closed ? 'was already closed as never sent' : 'closed as never sent';
       const released = result.released.length
         ? `${result.released.length} row(s) back in the settlement queue as VERIFIED`
         : 'no row needed releasing';

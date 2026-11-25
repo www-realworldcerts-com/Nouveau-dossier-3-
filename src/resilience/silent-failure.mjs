@@ -238,10 +238,10 @@ export const FINDING_CATALOG = {
         impact: 'The settlement daemon writes a claim before a rail can move money. This one is still open: the process died, or the rail failed, before any outcome was recorded, so money may already have left while the revenue rows still read unpaid. The daemon withholds those rows, so the revenue stays unsettled and every later payout decision is made from a ledger that may be missing a payment.',
         containment: 'Do not settle or re-pay the listed rows from the ledger, and do not delete the claim. Treat the batch as possibly paid until the provider says otherwise.',
         obligation: 'Reconcile the claimed batch with the provider and record the outcome.',
-        remedy: 'Check the provider for the batch and for the listed payout items. If it was paid, record the payout items so the next daemon cycle marks the rows settled; if nothing was sent, confirm that and close the claim with `node auto_settlement_daemon.js --resolve-claim <batch_id>`.',
+        remedy: 'Check the provider for the batch and for the listed payout items. If it was paid, record the outcome: a rail batch is settled by recording its payout items so the next daemon cycle marks the rows, while a batch whose CSV file the owner uploaded is confirmed with `node auto_settlement_daemon.js --confirm-payout <batch_id> --note …`, which marks its `export_ready` rows paid_out. Only if nothing was sent, close the claim with `node auto_settlement_daemon.js --resolve-claim <batch_id>` so its rows are payable again.',
         mitigation: 'The daemon claims a batch before calling its rail, reconciles every claim before paying anything and reads payout items as evidence; an unresolved claim is reported here, exposed in daemon health and its rows withheld from every later batch.',
         verification: 'The listed claims are closed, their revenue rows are marked paid_out or export_ready, and the next audit reports no PAYOUT_CLAIM_UNRESOLVED finding.',
-        owner_action: 'Check the batch with the provider, then record its payout items or close the claim as not sent.',
+        owner_action: 'Check the batch with the provider, then record its payout items, confirm an exported file with --confirm-payout, or close the claim as not sent.',
         sla_hours: 4
     },
     PAYOUT_EXPORT_UNCONFIRMED: {

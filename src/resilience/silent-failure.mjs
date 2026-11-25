@@ -16,7 +16,11 @@ import { RedressEngine } from './redress.mjs';
 import { probeVerdictHint } from './webhook-probe.mjs';
 import { storefrontVerdictHint } from './storefront-probe.mjs';
 import { readLedgerRecords } from '../real/ledger/reversals.mjs';
-import { openPayoutClaims, readPayoutClaims } from '../financial/payout-claims.mjs';
+import {
+    exportedClaimsAwaitingConfirmation,
+    openPayoutClaims,
+    readPayoutClaims
+} from '../financial/payout-claims.mjs';
 import {
     SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH,
     SETTLEMENT_EVIDENCE_UNBOUND,
@@ -40,6 +44,7 @@ import {
 export const SEVERITY_RANK = { low: 1, warning: 2, medium: 2, high: 3, critical: 4 };
 export const DEFAULT_MAX_SILENCE_MIN = 90;
 export const DEFAULT_STALL_DAYS = 7;
+export const DEFAULT_EXPORT_CONFIRM_DAYS = 3;
 export const DEFAULT_SILENCE_BUDGET_HOURS = 24;
 export const DEFAULT_REVERSAL_WINDOW_DAYS = 30;
 
@@ -238,6 +243,19 @@ export const FINDING_CATALOG = {
         verification: 'The listed claims are closed, their revenue rows are marked paid_out or export_ready, and the next audit reports no PAYOUT_CLAIM_UNRESOLVED finding.',
         owner_action: 'Check the batch with the provider, then record its payout items or close the claim as not sent.',
         sla_hours: 4
+    },
+    PAYOUT_EXPORT_UNCONFIRMED: {
+        domain: 'revenue',
+        severity: 'high',
+        title: 'An exported payout batch was never confirmed as paid',
+        impact: 'The daemon wrote a CSV instruction and stopped, because only a human can upload it. Nobody recorded whether the transfer happened, so the batch\'s revenue rows still read export_ready: if the file was paid, the ledger counts money the owner already received as unsettled, and if it was never uploaded, nobody is paying an obligation the system thinks it has already met.',
+        containment: 'Do not export or pay the listed rows again, and do not mark them paid from the daemon\'s guess; treat each batch as unpaid until someone says what happened to its file.',
+        obligation: 'Find out whether each exported batch was uploaded and paid, then record the answer against the batch.',
+        remedy: 'Open the recorded export file (exports/…), check the owner account for the transfer, then run `node auto_settlement_daemon.js --confirm-payout <batch_id> --note …` if it was paid, or `--resolve-claim <batch_id>` if it was never sent, which releases its rows to be exported again.',
+        mitigation: 'Every audit reads the claim store and ages closed manual-CSV claims; a confirmation stamps the claim paid and a not-sent closure removes the batch from the queue, so neither can stay here unnoticed.',
+        verification: 'Each listed batch has a paid or not-sent resolution, and the next audit reports no PAYOUT_EXPORT_UNCONFIRMED finding.',
+        owner_action: 'Compare the listed export files with the owner account, then confirm or close each batch.',
+        sla_hours: 24
     },
     SILENT_EXCEPTION_SWALLOW: {
         domain: 'code',
@@ -736,7 +754,8 @@ export function detectSilentFailures({
     reversals,
     reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS,
     settlementBlocks,
-    payoutClaims
+    payoutClaims,
+    exportConfirmDays = DEFAULT_EXPORT_CONFIRM_DAYS
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
     const findings = [];
@@ -1121,6 +1140,45 @@ export function detectSilentFailures({
         );
     }
 
+    // A CSV batch stops at `export_ready` by design: only a human can upload the
+    // file. That leaves the last step of the payout unowned, so an export nobody
+    // confirms ages here until the ledger and reality are reconciled.
+    const awaitingExports = payoutClaimStore.error
+        ? []
+        : exportedClaimsAwaitingConfirmation(payoutClaimStore.claims || []).map(claim => {
+            // The claim closed when the file was written, so that is the age of
+            // the row it left at `export_ready`.
+            const exportedAt = claim.closed_at || claim.claimed_at || null;
+            const exportedMs = Date.parse(exportedAt || '');
+            return {
+                batch_id: claim.batch_id ?? null,
+                rail: claim.rail ?? null,
+                amount: claim.amount ?? null,
+                currency: claim.currency ?? null,
+                revenue_event_ids: claim.revenue_event_ids ?? [],
+                export_filename: claim.execution?.export_filename ?? null,
+                exported_at: exportedAt,
+                age_days: Number.isFinite(exportedMs) ? round((at.getTime() - exportedMs) / 86400000) : null
+            };
+        });
+    // An age that cannot be read is not treated as young: an unconfirmed export
+    // is money nobody owns either way.
+    const staleExports = awaitingExports.filter(row => row.age_days === null || row.age_days >= exportConfirmDays);
+    if (staleExports.length) {
+        add(
+            'PAYOUT_EXPORT_UNCONFIRMED',
+            `${staleExports.length} exported payout batch(es) passed the ${exportConfirmDays}-day confirmation window without being confirmed or closed: ` +
+                `${staleExports.map(row => `${row.batch_id} (${row.age_days === null ? 'age unknown' : `${row.age_days} days`})`).join(', ')}. ` +
+                'Their revenue rows stay export_ready until someone says whether the transfer happened.',
+            {
+                count: staleExports.length,
+                threshold_days: exportConfirmDays,
+                log: payoutClaimStore.path || null,
+                rows: staleExports
+            }
+        );
+    }
+
     const blockedSettlements = openSettlements.filter(
         row => row.outcome !== SETTLEMENT_EVIDENCE_UNBOUND && row.outcome !== SETTLEMENT_EVIDENCE_AMOUNT_MISMATCH
     );
@@ -1339,6 +1397,7 @@ export function detectSilentFailures({
             },
             payout_claims: {
                 open: openClaims.length,
+                awaiting_confirmation: awaitingExports.length,
                 path: payoutClaimStore.path || null,
                 store_error: payoutClaimStore.error || null
             },
@@ -1457,10 +1516,11 @@ export function runSilentFailureAudit({
     reversals,
     reversalWindowDays = DEFAULT_REVERSAL_WINDOW_DAYS,
     settlementBlocks,
-    payoutClaims
+    payoutClaims,
+    exportConfirmDays = DEFAULT_EXPORT_CONFIRM_DAYS
 } = {}) {
     const at = now instanceof Date ? now : new Date(now);
-    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate, reversals, reversalWindowDays, settlementBlocks, payoutClaims });
+    const detected = detectSilentFailures({ root, now: at, env, heartbeat, maxSilenceMin, stallDays, webhookProbes, paypalReconciliation, storefrontProbe, shopifyPriceDrift, checkoutGate, reversals, reversalWindowDays, settlementBlocks, payoutClaims, exportConfirmDays });
     const stamp = iso(at);
     const stateFile = path.join(root, 'data', 'resilience', 'silent-state.json');
     const previous = readJson(stateFile) || { findings: {} };

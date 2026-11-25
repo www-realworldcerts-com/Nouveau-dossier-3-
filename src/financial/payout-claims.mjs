@@ -63,6 +63,20 @@ export function openPayoutClaims(claims = []) {
     return (Array.isArray(claims) ? claims : []).filter(claim => OPEN_STATUSES.has(claim?.status));
 }
 
+/**
+ * Exported batches waiting for an operator to say the file was uploaded: closed
+ * by the claim lifecycle, paid by a manual CSV, and not yet resolved. The
+ * confirmation step accepts exactly these, daemon health lists them and the
+ * audit ages them, so the three cannot disagree about what is waiting.
+ */
+export function exportedClaimsAwaitingConfirmation(claims = []) {
+    return (Array.isArray(claims) ? claims : []).filter(claim =>
+        claim?.status === PAYOUT_CLAIM_CLOSED &&
+        claim?.execution?.method === 'manual_csv' &&
+        !claim?.resolution
+    );
+}
+
 /** The revenue rows every open claim reserves. */
 export function claimedRevenueEventIds(claims = []) {
     const ids = new Set();

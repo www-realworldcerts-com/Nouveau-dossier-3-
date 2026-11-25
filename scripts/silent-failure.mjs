@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 
 import {
+    DEFAULT_EXPORT_CONFIRM_DAYS,
     DEFAULT_MAX_SILENCE_MIN,
     DEFAULT_REVERSAL_WINDOW_DAYS,
     DEFAULT_SILENCE_BUDGET_HOURS,
@@ -158,6 +159,7 @@ Options:
   --json                     Machine-readable output
   --max-silence-min <n>      Heartbeat silence budget (default 90)
   --stall-days <n>           Revenue/PO/fulfillment stall window (default 7)
+  --export-confirm-days <n>  Days an exported payout batch may wait for confirmation (default 3)
   --silence-budget-hours <n> Escalate unresolved findings to critical after n hours (default 24)
   --fail-on <severity>       Exit 2 at or above this severity (default high)
   --webhook-url <url>        Probe a payment webhook (comma-separated; also PAYMENT_WEBHOOK_URL)
@@ -309,6 +311,7 @@ async function main() {
             root: flags.root || process.cwd(),
             maxSilenceMin: Number(flags['max-silence-min'] || DEFAULT_MAX_SILENCE_MIN),
             stallDays: Number(flags['stall-days'] || DEFAULT_STALL_DAYS),
+            exportConfirmDays: Number(flags['export-confirm-days'] || DEFAULT_EXPORT_CONFIRM_DAYS),
             silenceBudgetHours: Number(flags['silence-budget-hours'] || DEFAULT_SILENCE_BUDGET_HOURS),
             write: command === 'redress' || Boolean(flags.write),
             webhookProbes,

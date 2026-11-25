@@ -27,6 +27,7 @@ import {
   claimPayoutBatch,
   claimedRevenueEventIds,
   confirmPayoutBatch,
+  exportedClaimsAwaitingConfirmation,
   openPayoutClaims,
   readPayoutClaims,
   recordPayoutOutcome,
@@ -1025,14 +1026,9 @@ export function getDaemonHealth() {
         error: claim.error ?? null
       })),
       // Exported batches nobody has confirmed are the operator's queue: they
-      // are paid only once someone says the file was uploaded. A closed export
-      // has no resolution; `paid` and `not_sent` are both settled.
-      awaiting_confirmation: claims.claims
-        .filter(claim =>
-          claim.status === PAYOUT_CLAIM_CLOSED &&
-          claim.execution?.method === 'manual_csv' &&
-          !claim.resolution
-        )
+      // are paid only once someone says the file was uploaded. The audit ages
+      // the same list, so both agree on what is waiting.
+      awaiting_confirmation: exportedClaimsAwaitingConfirmation(claims.claims)
         .map(claim => ({
           batch_id: claim.batch_id,
           rail: claim.rail,

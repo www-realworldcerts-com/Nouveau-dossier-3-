@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-25
+- An exported payout batch nobody confirms now becomes an audit finding, not just
+  a field in daemon health. `PAYOUT_EXPORT_UNCONFIRMED` (high) reports every
+  closed manual-CSV claim still waiting past the confirmation window (3 days,
+  `--export-confirm-days`), with its batch, rail, amount, export file and age,
+  and `evidence.payout_claims.awaiting_confirmation` counts the queue. A batch
+  confirmed paid, closed as never sent, or inside the window is not a finding,
+  and an export whose age cannot be read is reported rather than assumed young.
+  Daemon health and the audit share one predicate
+  (`exportedClaimsAwaitingConfirmation`), so they cannot disagree about which
+  batches are waiting.
+
 ## 2026-11-24
 - An exported payout batch can now be confirmed paid. A CSV rail stops at
   `export_ready` — correct, because the file is an instruction to a human — but

@@ -10,6 +10,7 @@ import { latchEmergencyStop } from '../src/financial/settlement-emergency-stop.m
 
 import { startStub } from '../scripts/lib/http-stub.mjs';
 import { resolvePayoutClaim } from '../src/financial/payout-claims.mjs';
+import { FINDING_CATALOG } from '../src/resilience/silent-failure.mjs';
 import { OWNER_ACCOUNTS } from '../src/owner-directive.mjs';
 import { EvidenceIntegrityChain } from '../src/real/evidence-integrity.mjs';
 import { MoneyMovedGate } from '../src/real/money-moved-gate.mjs';
@@ -581,6 +582,66 @@ test('a batch whose claim is still open is not confirmed as paid', async () => {
     assert.equal(claims()[0].resolution, undefined);
 });
 
+test('an open claim whose CSV export was recorded and whose file is on disk is confirmed paid', async () => {
+    // The crash state: the export ran and was recorded, the rows are
+    // export_ready, and the claim never closed. The file is the evidence the
+    // operator uploaded, so the batch can be recorded as paid instead of being
+    // stuck open forever.
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    const filename = `payoneer_${batchId}.csv`;
+    fs.writeFileSync(path.join(exportsDir, filename), 'id,amount\nevt-open-export-1,19\n');
+    writeEvents([revenueEvent('evt-open-export-1', 19, {
+        status: 'export_ready',
+        payout_batch_id: batchId
+    })]);
+    writeClaims([claimRecord({
+        status: 'executed',
+        execution: { method: 'manual_csv', export_filename: filename },
+        revenue_event_ids: ['evt-open-export-1']
+    })]);
+
+    const result = await daemon.confirmExportedBatch(batchId, { note: 'uploaded to Payoneer' });
+    assert.deepEqual(result.confirmed, ['evt-open-export-1']);
+
+    const [paid] = readEvents();
+    assert.equal(paid.status, 'paid_out');
+    assert.equal(paid.settled, true);
+    assert.equal(paid.paid_out, true);
+    assert.equal(paid.settlement_details.paid_confirmation_note, 'uploaded to Payoneer');
+
+    const [claim] = claims();
+    assert.equal(claim.status, 'closed');
+    assert.equal(claim.resolution.outcome, 'paid');
+    assert.equal(claim.resolution.note, 'uploaded to Payoneer');
+    assert.equal(typeof claim.closed_at, 'string');
+
+    fs.rmSync(path.join(exportsDir, filename), { force: true });
+});
+
+test('an open claim is not confirmed from a recorded export whose file is gone', async () => {
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    const filename = `payoneer_${batchId}.csv`;
+    fs.rmSync(path.join(exportsDir, filename), { force: true });
+    writeEvents([revenueEvent('evt-open-missing-1', 19, {
+        status: 'export_ready',
+        payout_batch_id: batchId
+    })]);
+    writeClaims([claimRecord({
+        status: 'executed',
+        execution: { method: 'manual_csv', export_filename: filename },
+        revenue_event_ids: ['evt-open-missing-1']
+    })]);
+
+    await assert.rejects(daemon.confirmExportedBatch(batchId), /PAYOUT_BATCH_EXPORT_MISSING/);
+
+    assert.equal(readEvents()[0].status, 'export_ready', 'a missing file is not a payment');
+    const [claim] = claims();
+    assert.equal(claim.status, 'executed', 'the claim is left open, not closed on an unproven export');
+    assert.equal(claim.resolution, undefined);
+});
+
 test('a batch closed as never sent has no payment to confirm', async () => {
     resetClaims();
     const batchId = claimRecord().batch_id;
@@ -666,6 +727,124 @@ test('--confirm-payout marks an exported batch paid from the command line', asyn
     const missing = await runDaemon(['--confirm-payout']);
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /PAYOUT_BATCH_UNKNOWN/);
+});
+
+test('the unresolved-claim remedy closes the claim and returns its rows to the settlement queue', async () => {
+    // The remedy is prose, so two things are pinned about the text: the branch
+    // that has no batch to check asks for the store to be restored, and the
+    // not-sent instruction names the command that releases the rows.
+    // Everything else is asserted by running the command the remedy names.
+    const { remedy } = FINDING_CATALOG.PAYOUT_CLAIM_UNRESOLVED;
+    assert.match(remedy, /restore `data\/financial\/payout-claims\.json`/);
+    assert.match(remedy, /returns its rows to the settlement queue/);
+
+    resetStop();
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    writeEvents([revenueEvent('evt-remedy-1', 19, {
+        status: 'export_ready',
+        payout_batch_id: batchId
+    })]);
+    writeClaims([claimRecord({ revenue_event_ids: ['evt-remedy-1'] })]);
+
+    // Follow the instruction the remedy gives for a batch that was never sent.
+    assert.match(remedy, /--resolve-claim <batch_id>/);
+    const closed = await runDaemon(['--resolve-claim', batchId, '--note', 'the provider holds no payout']);
+    assert.equal(closed.status, 0, closed.stderr);
+    assert.match(closed.stdout, /1 row\(s\) back in the settlement queue as VERIFIED/);
+
+    const [claim] = claims();
+    assert.equal(claim.status, 'closed');
+    assert.equal(claim.resolution.outcome, 'not_sent');
+    assert.equal(claim.resolution.note, 'the provider holds no payout');
+    assert.equal(typeof claim.closed_at, 'string');
+    assert.equal(daemon.getDaemonHealth().payout_claims.open.length, 0);
+
+    const [row] = readEvents();
+    assert.equal(row.paid_out, false, 'closing a claim never records a payment');
+    assert.equal(row.settled, false);
+    assert.equal(row.status, 'VERIFIED', 'the selector can take the row again');
+    assert.equal(row.payout_batch_id, null, 'nothing still ties the row to the closed batch');
+    assert.equal(row.exported_at, null);
+    assert.equal(row.export_released_batch_id, batchId);
+    assert.equal(typeof row.export_released_at, 'string');
+
+    // Running it again finishes a release rather than failing on a closed claim.
+    const again = await runDaemon(['--resolve-claim', batchId]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /already closed as never sent/);
+    assert.match(again.stdout, /1 already back/);
+});
+
+test('released rows are selected again by the next settlement cycle', async () => {
+    resetClaims();
+    resetStop();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+    const batchId = claimRecord().batch_id;
+    writeEvents([revenueEvent('evt-rerelease-1', 19, {
+        status: 'export_ready',
+        payout_batch_id: batchId
+    })]);
+    writeClaims([claimRecord({
+        status: 'closed',
+        closed_at: hoursAgo(2),
+        execution: { method: 'manual_csv', export_filename: `payoneer_${batchId}.csv` },
+        resolution: { outcome: 'not_sent', note: 'the bank statement has no such transfer', resolved_by: 'operator', at: hoursAgo(2) },
+        revenue_event_ids: ['evt-rerelease-1']
+    })]);
+
+    const released = await daemon.resolveExportedBatch(batchId);
+    assert.deepEqual(released.released, ['evt-rerelease-1']);
+    assert.equal(released.already_closed, true);
+    assert.equal(readEvents()[0].status, 'VERIFIED');
+
+    await daemon.performSettlementCycle();
+
+    const [refreshed] = readEvents();
+    assert.equal(refreshed.status, 'export_ready', 'the released row was exported again');
+    assert.equal(refreshed.settled, false);
+    // A batch id is derived from the rows and the amount, so the re-export is a
+    // new batch rather than a revival of the closed one.
+    assert.match(refreshed.payout_batch_id, /^BATCH_PAYONEER_[0-9a-f]{24}$/);
+    assert.deepEqual(exportFiles(), [`payoneer_${refreshed.payout_batch_id}.csv`]);
+
+    // The new export is a new claim waiting for confirmation; it does not
+    // inherit the not-sent resolution, which stays with the claim it replaced.
+    const after = claims();
+    const current = after.find(claim => claim.batch_id === refreshed.payout_batch_id);
+    assert.ok(current, 'the re-export wrote a claim for its own batch');
+    assert.equal(current.status, 'closed', 'the CSV export closes its claim at export_ready');
+    assert.equal(current.resolution, undefined, 'it waits for confirmation, as a fresh export does');
+    const replaced = after.find(claim => claim.batch_id === batchId);
+    assert.equal(replaced.resolution.outcome, 'not_sent', 'the closed claim stays as history');
+});
+
+test('a claim is not closed when any of its rows cannot be released', async () => {
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    writeEvents([
+        revenueEvent('evt-release-paid-1', 19, {
+            status: 'paid_out', settled: true, paid_out: true, payout_batch_id: batchId
+        }),
+        revenueEvent('evt-release-other-1', 19, {
+            status: 'export_ready',
+            payout_batch_id: 'BATCH_PAYONEER_111111111111111111111111'
+        })
+    ]);
+    writeClaims([claimRecord({
+        status: 'executed',
+        execution: { method: 'manual_csv', export_filename: 'payoneer_x.csv' },
+        revenue_event_ids: ['evt-release-paid-1', 'evt-release-other-1']
+    })]);
+
+    await assert.rejects(daemon.resolveExportedBatch(batchId), /PAYOUT_ROWS_NOT_RELEASED/);
+
+    const rows = readEvents();
+    assert.equal(rows.find(row => row.id === 'evt-release-paid-1').status, 'paid_out', 'a resolution never un-pays');
+    assert.equal(rows.find(row => row.id === 'evt-release-other-1').status, 'export_ready', 'no row is released when one is refused');
+    assert.equal(claims()[0].status, 'executed', 'a refused release leaves the claim open, so the finding stays');
+    assert.equal(claims()[0].resolution, undefined);
 });
 
 test('a persisted stop survives a restart and refuses --once until it is cleared', async () => {

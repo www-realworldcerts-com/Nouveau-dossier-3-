@@ -400,7 +400,7 @@ async function reconcilePayoutClaims() {
         note: 'payout items record this batch as failed',
         resolvedBy: 'payout_item_evidence'
       });
-      console.log(`✅ Payout claim ${claim.batch_id} closed: the provider records it as failed, so its rows are payable again.`);
+      console.log(`✅ Payout claim ${claim.batch_id} closed: the provider records it as failed.`);
       continue;
     }
 
@@ -832,9 +832,16 @@ function rowPaidOut(row) {
  * as paid in the claim store.
  *
  * It refuses a batch that is not an export (another method paid it already), an
- * open claim (its money may still be on its way) and one closed as never sent
- * (there is no payment to record), and it verifies every row before writing any
- * — a row it cannot prove belongs to this batch leaves the ledger untouched.
+ * open claim with no recorded CSV execution (its money may still be on its way)
+ * and one closed as never sent (there is no payment to record), and it verifies
+ * every row before writing any — a row it cannot prove belongs to this batch
+ * leaves the ledger untouched.
+ *
+ * An open claim that did record its CSV export is the state a crash leaves
+ * between writing the file and closing the claim. Its rows are still
+ * `export_ready` and the file the operator uploaded is on disk, so the
+ * confirmation is accepted for that state — otherwise a batch that was really
+ * paid could never be recorded as paid.
  */
 async function confirmExportedBatch(batchId, { by = 'operator', note = null } = {}) {
   const store = readPayoutClaims(process.cwd());
@@ -843,8 +850,30 @@ async function confirmExportedBatch(batchId, { by = 'operator', note = null } = 
   const id = String(batchId ?? '').trim();
   const claim = store.claims.find(record => String(record?.batch_id ?? '') === id);
   if (!claim) throw new Error(`PAYOUT_BATCH_UNKNOWN: no payout claim records batch ${id || '(none given)'}`);
-  if (openPayoutClaims([claim]).length > 0) {
+  // An open claim means money may still be on its way, and it stays open until
+  // the provider is reconciled — except for the one state a crash leaves: the
+  // CSV export was executed and recorded, its file is on disk, but the claim
+  // was never closed. There the export is the evidence, and refusing it left a
+  // paid batch unpayable in any record.
+  const open = openPayoutClaims([claim]).length > 0;
+  const exportedButOpen = open &&
+    claim.status === PAYOUT_CLAIM_EXECUTED &&
+    claim.execution?.method === 'manual_csv';
+  if (open && !exportedButOpen) {
     throw new Error(`PAYOUT_BATCH_UNRESOLVED: batch ${id} is still ${claim.status}; close its payout before confirming one`);
+  }
+  if (exportedButOpen) {
+    const exportFile = path.join(
+      path.resolve(process.cwd(), 'exports'),
+      String(claim.execution?.export_filename ?? '')
+    );
+    if (!claim.execution?.export_filename || !fs.existsSync(exportFile)) {
+      throw new Error(
+        `PAYOUT_BATCH_EXPORT_MISSING: batch ${id} recorded an export as ` +
+        `${claim.execution?.export_filename ?? 'an unnamed file'}, but ${exportFile} is not there; ` +
+        'confirm a payment only against the file that was uploaded'
+      );
+    }
   }
   if (claim.resolution?.outcome === 'not_sent') {
     throw new Error(`PAYOUT_BATCH_NEVER_SENT: batch ${id} was closed as never sent, so there is no payment to confirm`);
@@ -939,6 +968,22 @@ async function confirmExportedBatch(batchId, { by = 'operator', note = null } = 
     }
   }
 
+  // An open claim still holds its rows. They are paid now, so it is closed with
+  // the execution it recorded, which is what makes the confirmation below
+  // legal for a claim a crash left open.
+  if (open) {
+    const closed = recordPayoutOutcome(process.cwd(), id, {
+      status: PAYOUT_CLAIM_CLOSED,
+      execution: claim.execution
+    });
+    if (!closed.recorded) {
+      throw new Error(
+        `PAYOUT_CONFIRMATION_NOT_RECORDED: batch ${id} marked its rows paid_out but the claim could not be closed ` +
+        `(${closed.reason ?? 'unknown reason'}); confirm it again to finish`
+      );
+    }
+  }
+
   const recorded = confirmPayoutBatch(process.cwd(), id, { by, note });
   if (!recorded.confirmed && recorded.reason !== 'already_confirmed') {
     throw new Error(`PAYOUT_CONFIRMATION_NOT_RECORDED: ${recorded.reason}${recorded.error ? ` (${recorded.error})` : ''}`);
@@ -950,6 +995,138 @@ async function confirmExportedBatch(batchId, { by = 'operator', note = null } = 
     confirmed,
     already_paid: alreadyPaid,
     claim: recorded.claim ?? claim
+  };
+}
+
+/**
+ * Give a never-sent batch's exported rows back to the settlement selector.
+ *
+ * A CSV row leaves the daemon at `export_ready`, and the selector only takes
+ * `VERIFIED` rows that are neither settled, paid nor claimed. Closing a claim
+ * alone therefore left its revenue unpayable for good. This clears exactly the
+ * marks the export wrote — status, `settled`, `paid_out`, `payout_batch_id`,
+ * `exported_at` — and records which batch released the row. The provider proof
+ * is left untouched: it is the same money, to be selected again.
+ *
+ * Every row is checked before any is written, so a batch that cannot be
+ * released whole is left whole. A row that is settled or paid_out refuses the
+ * release, because closing a claim must never un-pay money the ledger recorded,
+ * and so does a row another batch owns.
+ *
+ * Ordering: the claim is closed first, then the rows are written. Reconciliation
+ * only reads open claims, so it can never meet a released row under a claim it
+ * still thinks is in flight; and a released row is `VERIFIED` rather than
+ * `export_ready` or settled, so `revenueRowAccountedFor` is false for it and no
+ * reconciliation can mistake the batch for paid. A release interrupted between
+ * the close and the writes is finished by running the same command again: rows
+ * already back are counted as payable, not refused.
+ */
+async function resolveExportedBatch(batchId, { by = 'operator', note = null } = {}) {
+  const store = readPayoutClaims(process.cwd());
+  if (store.error) throw new Error(`PAYOUT_CLAIM_STORE_UNREADABLE: ${store.error}`);
+
+  const id = String(batchId ?? '').trim();
+  const claim = store.claims.find(record => String(record?.batch_id ?? '') === id);
+  if (!claim) throw new Error(`PAYOUT_BATCH_UNKNOWN: no payout claim records batch ${id || '(none given)'}`);
+  if (claim.resolution?.outcome === 'paid') {
+    throw new Error(`PAYOUT_BATCH_ALREADY_PAID: batch ${id} was confirmed paid; a not-sent resolution cannot un-pay it`);
+  }
+  const wasOpen = openPayoutClaims([claim]).length > 0;
+  if (!wasOpen && claim.resolution?.outcome !== 'not_sent') {
+    throw new Error(`PAYOUT_BATCH_NOT_RELEASABLE: batch ${id} was closed as ${claim.resolution?.outcome ?? 'unknown'}`);
+  }
+
+  const base44 = await buildBase44Client();
+  const revenueEntity = base44.asServiceRole.entities[getRevenueConfigFromEnv().entityName];
+
+  const rows = [];
+  const alreadyPayable = [];
+  const refused = [];
+  for (const rowId of (claim.revenue_event_ids ?? []).map(String)) {
+    let row;
+    try {
+      const found = await revenueEntity.filter({ id: rowId }, '-created_date', 1, 0);
+      row = Array.isArray(found) ? found[0] : null;
+    } catch (error) {
+      refused.push(`${rowId} (the ledger could not be read: ${error?.message ?? error})`);
+      continue;
+    }
+
+    if (!row) {
+      refused.push(`${rowId} (no longer in the ledger)`);
+      continue;
+    }
+    // A row already back in the queue is the second run of this command, not a
+    // failure: a release interrupted after a write has to be finishable.
+    if (row.status === 'VERIFIED' && !rowPaidOut(row) && !row.payout_batch_id) {
+      alreadyPayable.push(row.id);
+      continue;
+    }
+    if (rowPaidOut(row)) {
+      refused.push(`${rowId} (already paid; a not-sent resolution cannot un-pay it)`);
+      continue;
+    }
+    if (String(row.payout_batch_id ?? '') !== id) {
+      refused.push(`${rowId} (its payout batch is ${row.payout_batch_id ?? 'unrecorded'})`);
+      continue;
+    }
+    if (row.status !== 'export_ready') {
+      refused.push(`${rowId} (status ${row.status ?? 'unknown'}, not an export)`);
+      continue;
+    }
+    rows.push(row);
+  }
+
+  if (refused.length > 0) {
+    throw new Error(
+      `PAYOUT_ROWS_NOT_RELEASED: batch ${id} was not released and no row was changed: ${refused.join(', ')}`
+    );
+  }
+
+  let closed = claim;
+  if (wasOpen) {
+    const resolved = resolvePayoutClaim(process.cwd(), id, { note, resolvedBy: by });
+    if (!resolved.resolved) {
+      throw new Error(`PAYOUT_CLAIM_NOT_CLOSED: ${resolved.reason}${resolved.error ? ` (${resolved.error})` : ''}`);
+    }
+    closed = resolved.claim;
+  }
+
+  const released = [];
+  for (const row of rows) {
+    const at = new Date().toISOString();
+    try {
+      await revenueEntity.update(row.id, {
+        ...row,
+        status: 'VERIFIED',
+        settled: false,
+        paid_out: false,
+        payout_batch_id: null,
+        exported_at: null,
+        export_released_at: at,
+        export_released_batch_id: id,
+        export_release_reason: 'claim closed as never sent',
+        settlement_details: {
+          ...(row.settlement_details ?? {}),
+          export_released_at: at,
+          export_released_batch_id: id
+        }
+      });
+      released.push(row.id);
+    } catch (error) {
+      throw new Error(
+        `PAYOUT_ROWS_PARTLY_RELEASED: batch ${id} is closed as never sent and returned ${released.join(', ') || 'no row'} to the queue, ` +
+        `but ${row.id} could not be (${error?.message ?? error}); run --resolve-claim ${id} again to finish`
+      );
+    }
+  }
+
+  return {
+    batch_id: id,
+    released,
+    already_payable: alreadyPayable,
+    already_closed: !wasOpen,
+    claim: closed
   };
 }
 
@@ -1076,7 +1253,7 @@ export function emergencyStop({ reason = 'emergencyStop() called', by = 'daemon'
  * Confirms that an exported (manual CSV) batch was paid, marking its rows
  * `paid_out`. The only way an exported row stops being `export_ready`.
  */
-export { confirmExportedBatch };
+export { confirmExportedBatch, resolveExportedBatch };
 
 export async function triggerManualSettlement() {
   const latch = emergencyStopState();
@@ -1108,15 +1285,20 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     const index = process.argv.indexOf('--resolve-claim');
     const batchId = process.argv[index + 1] ?? '';
     const noteIndex = process.argv.indexOf('--note');
-    const result = resolvePayoutClaim(process.cwd(), batchId, {
+    resolveExportedBatch(batchId, {
       note: noteIndex >= 0 ? process.argv[noteIndex + 1] ?? null : 'operator confirmed the payout never arrived'
-    });
-    if (result.resolved) {
-      console.log(`✅ Payout claim ${batchId} closed as never sent; its rows are payable again.`);
+    }).then(result => {
+      const state = result.already_closed ? 'was already closed as never sent' : 'closed as never sent';
+      const released = result.released.length
+        ? `${result.released.length} row(s) back in the settlement queue as VERIFIED`
+        : 'no row needed releasing';
+      const again = result.already_payable.length ? `, ${result.already_payable.length} already back` : '';
+      console.log(`✅ Payout claim ${result.batch_id} ${state}; ${released}${again}.`);
       process.exit(0);
-    }
-    console.error(`❌ Could not close payout claim ${batchId || '(none given)'}: ${result.reason}${result.error ? ` (${result.error})` : ''}`);
-    process.exit(1);
+    }).catch(error => {
+      console.error(`❌ ${error?.message ?? error}`);
+      process.exit(1);
+    });
   }
 
   if (process.argv.includes('--confirm-payout')) {
@@ -1163,5 +1345,6 @@ export default {
   getDaemonHealth,
   emergencyStop,
   triggerManualSettlement,
-  confirmExportedBatch
+  confirmExportedBatch,
+  resolveExportedBatch
 };

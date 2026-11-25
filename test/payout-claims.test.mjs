@@ -118,7 +118,7 @@ test('only a confirmed non-send closes a claim and frees its rows', t => {
     assert.deepEqual([...claimedRevenueEventIds(claims)], []);
     assert.equal(resolvePayoutClaim('/root', claim().batch_id, {}, { env }).reason, 'claim_already_closed');
 
-    // The rows are payable again, under the same deterministic batch id.
+    // The rows can be claimed again, under the same deterministic batch id.
     assert.equal(claimPayoutBatch('/root', claim(), { env }).claimed, true);
 });
 

@@ -1,6 +1,37 @@
 # Changelog
 
 ## 2026-11-25
+- Closing a claim as never sent now returns its rows to the settlement queue.
+  `--resolve-claim` recorded the resolution and left the rows at `export_ready`,
+  which the settlement selector never takes, so the revenue it said was payable
+  again could never be paid. `resolveExportedBatch` now releases the batch's
+  rows: `VERIFIED`, with `settled`, `paid_out`, `payout_batch_id` and
+  `exported_at` cleared and the releasing batch stamped on the row. The claim is
+  closed first and the rows written second, so reconciliation — which reads only
+  open claims and counts `export_ready`/settled rows as accounted for via
+  `revenueRowAccountedFor` — can never mistake the batch for paid or re-close
+  it; a released row is `VERIFIED` and therefore unaccounted for by design.
+  Every row is validated before any is written: a paid row or a row another
+  batch owns refuses the whole release (`PAYOUT_ROWS_NOT_RELEASED`) and leaves
+  the claim open, and running the command again on an already-closed batch
+  finishes an interrupted release instead of failing. Tests cover the CLI path
+  (claim closed, rows released, second run idempotent), the next cycle exporting
+  the released row again under a new claim, and the refusal leaving the claim
+  and every row untouched.
+- An exported CSV batch a crash left open can now be recorded as paid.
+  `confirmExportedBatch` refused every open claim before reading its rail, so a
+  batch whose export ran and was recorded but whose claim never closed — the
+  rows sit at `export_ready`, the file is on disk, the operator uploaded it —
+  could never become `paid_out`, and the remedy that names `--confirm-payout`
+  for it always exited 1. That one state is now accepted: the claim must be
+  `executed` with `execution.method: manual_csv` **and** its `export_filename`
+  must exist in `exports/`, otherwise the batch is refused as before
+  (`PAYOUT_BATCH_UNRESOLVED`) or, when only the file is missing, as
+  `PAYOUT_BATCH_EXPORT_MISSING` with the path. The rows are still validated
+  whole before any write, then marked paid_out, then the claim is closed with
+  the execution it recorded and stamped paid. Two tests cover the accepted state
+  (rows, confirmation note, claim closed as paid) and the missing file (nothing
+  written, claim left open).
 - An exported payout batch nobody confirms now becomes an audit finding, not just
   a field in daemon health. `PAYOUT_EXPORT_UNCONFIRMED` (high) reports every
   closed manual-CSV claim still waiting past the confirmation window (3 days,
@@ -11,6 +42,33 @@
   Daemon health and the audit share one predicate
   (`exportedClaimsAwaitingConfirmation`), so they cannot disagree about which
   batches are waiting.
+- The payout findings now have a schedule where their evidence lives.
+  `PAYOUT_CLAIM_UNRESOLVED`, `PAYOUT_EXPORT_UNCONFIRMED` and
+  `REVENUE_SETTLEMENT_BLOCKED` read the payout claim store and the
+  blocked-settlement log, which exist only on the settlement host; the
+  `Swarm Tick` audit runs on a clean GitHub runner, where a missing store reads
+  as an empty one, so those three could never fire there.
+  `.github/workflows/payout-sentinel.yml` runs
+  `scripts/silent-failure.mjs audit --fail-on high` hourly against a
+  configurable root and fails the job on high or critical findings. Its
+  preflight refuses to run the audit at all unless the claim store is readable,
+  because a green run that read no store is a false clearance; the
+  blocked-settlement log is only reported as present or absent, since absence
+  is the normal state of a host that never refused a settlement. It is pointed
+  at the settlement host with the `PAYOUT_SENTINEL_RUNNER` repository variable,
+  and fails on purpose until that variable exists.
+- The `PAYOUT_CLAIM_UNRESOLVED` remedy now says what it can actually do. The
+  finding has two states — a claim store that could not be read, and open
+  batches — and the old text only addressed the second: it now asks for the
+  store to be restored first when no batch is listed, and no longer claims
+  `--resolve-claim` makes an exported batch's rows payable again, which it does
+  not (they stay `export_ready` and the settlement selector takes only
+  `VERIFIED`). The daemon's own success line made the same promise and no longer
+  does, and the `resolvePayoutClaim` docstring says what closing a claim does to
+  its rows. The test that only grepped the flag names is replaced by one that
+  runs the remedy's command against the offline claim store and asserts the
+  resulting claim (`closed`, `not_sent`, note, no longer open in health) and row
+  (`paid_out: false`, `settled: false`, batch retained).
 
 ## 2026-11-24
 - An exported payout batch can now be confirmed paid. A CSV rail stops at

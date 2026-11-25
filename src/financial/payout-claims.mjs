@@ -30,7 +30,8 @@ import { writeJsonPlainAtomic } from '../security/data-at-rest.mjs';
  * crash may have happened after the request left, and only PayPal can say
  * whether it arrived. Once that is confirmed, close the claim with
  * `resolvePayoutClaim` or the daemon's `--resolve-claim <batch_id>` flag — only
- * when the provider holds nothing — and those rows become payable again.
+ * when the provider holds nothing. That stops the claim reserving its rows;
+ * a row already exported still needs its own path back into the queue.
  * Anything else stays open rather than risk a second payout.
  *
  * The daemon is a single process per store; claims are claim-once and are not
@@ -216,10 +217,11 @@ export function confirmPayoutBatch(root = process.cwd(), batchId = '', { by = nu
 }
 
 /**
- * Close a claim whose provider was confirmed to hold nothing. This is the only
- * way back to payable rows that reconciliation cannot prove: a claim whose
+ * Close a claim whose provider was confirmed to hold nothing: a claim whose
  * money may have moved stays open, because re-sending it is the failure this
- * store exists to prevent.
+ * store exists to prevent. Closing stops the claim reserving its rows; it does
+ * not by itself return a row that was already exported to the settlement
+ * queue, which still reads `export_ready` and is not selected again.
  */
 export function resolvePayoutClaim(root = process.cwd(), batchId = '', { note = null, resolvedBy = null } = {}, { env = process.env } = {}) {
     const store = readPayoutClaims(root, { env });

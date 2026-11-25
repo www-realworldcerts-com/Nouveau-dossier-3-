@@ -1,0 +1,127 @@
+name: Payout Sentinel
+
+# PAYOUT_CLAIM_UNRESOLVED, PAYOUT_EXPORT_UNCONFIRMED and
+# REVENUE_SETTLEMENT_BLOCKED all read state that only exists on the machine
+# where settlement runs: the payout claim store and the blocked-settlement log.
+# The `Swarm Tick` workflow already runs the silent-failure audit every 15
+# minutes, but it runs on a GitHub-hosted runner, so those three findings could
+# never fire there. This workflow schedules the same audit against the
+# settlement host and fails the run on high or critical findings.
+#
+# It cannot see the files by itself. A runner checks out a fresh copy of this
+# repository and nothing else, and readPayoutClaims treats a missing file as an
+# empty store — so a blind audit would report a clean payout path. The preflight
+# step below therefore fails unless the store is actually readable. Point the
+# job at the settlement host with repository variables:
+#
+#   PAYOUT_SENTINEL_RUNNER = ["self-hosted","settlement"]   JSON array of labels
+#   SETTLEMENT_ROOT        = /path/to/the/daemon/checkout   when it is not the
+#                                                           runner's workspace
+#   PAYOUT_CLAIM_STORE     = /abs/path/payout-claims.json   the same variable the
+#   SETTLEMENT_BLOCK_LOG   = /abs/path/settlement-blocks.ndjson   daemon reads
+#
+# Until PAYOUT_SENTINEL_RUNNER is set the job runs on ubuntu-latest and fails
+# its preflight, on purpose: a green payout sentinel that read nothing is worse
+# than a red one that says why.
+
+on:
+  schedule:
+    # Hourly. Both payout findings age in days — the confirmation window
+    # defaults to 3, and an open claim has no limit — so a tighter schedule
+    # would only repeat the same red run while a batch waits on a human.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: payout-sentinel
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Payout claims and blocked settlements
+    runs-on: ${{ fromJSON(vars.PAYOUT_SENTINEL_RUNNER || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Prove this runner can see the payout state
+        # The audit reports what it can read. A store this runner cannot read is
+        # an empty store to readPayoutClaims, which is indistinguishable from
+        # "no payout is in flight" — so the check happens here, where the
+        # difference between absent and empty can still be named.
+        id: state
+        env:
+          SETTLEMENT_ROOT: ${{ vars.SETTLEMENT_ROOT }}
+          PAYOUT_CLAIM_STORE: ${{ vars.PAYOUT_CLAIM_STORE }}
+          SETTLEMENT_BLOCK_LOG: ${{ vars.SETTLEMENT_BLOCK_LOG }}
+        run: |
+          set -u
+          root="${SETTLEMENT_ROOT:-$GITHUB_WORKSPACE}"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+
+          ROOT="$root" node --input-type=module -e "
+            import fs from 'node:fs';
+            import { readPayoutClaims } from './src/financial/payout-claims.mjs';
+            const store = readPayoutClaims(process.env.ROOT);
+            if (store.error) {
+              console.error('::error::The payout claim store at ' + store.path + ' cannot be read: ' + store.error);
+              process.exit(1);
+            }
+            if (!fs.existsSync(store.path)) {
+              console.error('::error::No payout claim store at ' + store.path + '. This runner cannot see the settlement host. Set SETTLEMENT_ROOT or PAYOUT_CLAIM_STORE, or point PAYOUT_SENTINEL_RUNNER at the host where auto_settlement_daemon.js runs.');
+              process.exit(1);
+            }
+            const open = store.claims.filter((claim) => claim?.status === 'in_flight' || claim?.status === 'executed').length;
+            console.log('Claim store: ' + store.path + ' (' + store.claims.length + ' claim(s), ' + open + ' open)');
+          "
+
+          block_log="${SETTLEMENT_BLOCK_LOG:-$root/data/resilience/settlement-blocks.ndjson}"
+          {
+            echo '### Payout sentinel'
+            echo ''
+            echo "- claim store: \`${PAYOUT_CLAIM_STORE:-$root/data/financial/payout-claims.json}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$block_log" ]; then
+            echo "Block log: $block_log"
+            echo "- blocked-settlement log: \`$block_log\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # The log is created by the first refused settlement, so absence is
+            # the normal state of a host that never refused one. It is also the
+            # state of a host whose refusals went somewhere else, and the audit
+            # cannot tell those apart.
+            echo "::notice::No blocked-settlement log at $block_log. The file is created by the first refused settlement, so its absence means no refusal has been recorded on this host — not that none happened."
+            echo "- blocked-settlement log: \`$block_log\` — **absent**. The log is created by the first refused settlement, so absence means no refusal is recorded here, not that none happened." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Audit (fails on high and critical findings)
+        # Read-only: this job records nothing and writes no redress state. The
+        # tick workflow owns that, on its own checkout. `--fail-on high` makes
+        # the audit's exit code 2 fail the job; the job log carries the finding,
+        # its remedy and its SLA.
+        env:
+          SETTLEMENT_ROOT: ${{ steps.state.outputs.root }}
+          PAYOUT_CLAIM_STORE: ${{ vars.PAYOUT_CLAIM_STORE }}
+          SETTLEMENT_BLOCK_LOG: ${{ vars.SETTLEMENT_BLOCK_LOG }}
+          # Reversals read from Base44 as well as the local ledger when these
+          # exist; without them the audit says which source was missing.
+          BASE44_APP_ID: ${{ secrets.BASE44_APP_ID }}
+          BASE44_SERVICE_TOKEN: ${{ secrets.BASE44_SERVICE_TOKEN }}
+        run: |
+          node scripts/silent-failure.mjs audit \
+            --root "$SETTLEMENT_ROOT" \
+            --fail-on high \
+            --export-confirm-days "${{ vars.EXPORT_CONFIRM_DAYS || 3 }}"

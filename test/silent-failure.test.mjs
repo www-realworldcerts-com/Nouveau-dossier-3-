@@ -974,13 +974,3 @@ test('every catalog finding has a full remediation contract', () => {
     }
     assert.ok(listMitigations().every(item => item.status === 'implemented'));
 });
-
-test('the unresolved-claim remedy names the export confirmation, not only --resolve-claim', () => {
-    // An open claim seen here can belong to an exported CSV batch. Closing it as
-    // never sent is only one of the two correct answers, so the remedy must not
-    // send an operator who was paid down the not-sent path.
-    const { remedy, owner_action } = FINDING_CATALOG.PAYOUT_CLAIM_UNRESOLVED;
-    assert.match(remedy, /--confirm-payout/);
-    assert.match(remedy, /--resolve-claim/);
-    assert.match(owner_action, /--confirm-payout/);
-});

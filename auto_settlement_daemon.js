@@ -26,6 +26,7 @@ import {
 import {
   claimPayoutBatch,
   claimedRevenueEventIds,
+  confirmPayoutBatch,
   openPayoutClaims,
   readPayoutClaims,
   recordPayoutOutcome,
@@ -811,6 +812,147 @@ function generatePayoneerCSV(batch) {
 }
 
 // ============================================================================
+// MANUAL CSV CONFIRMATION
+// ============================================================================
+
+/** A row some other step already recorded as paid. */
+function rowPaidOut(row) {
+  return row?.settled === true || row?.paid_out === true || row?.status === 'paid_out';
+}
+
+/**
+ * The second half of a manual CSV payout.
+ *
+ * A CSV batch ends at `export_ready`: the file is an instruction to a human, so
+ * the daemon cannot know the transfer happened. Nothing used to move a row past
+ * that state, which left exported revenue permanently unconfirmed and its batch
+ * unpayable in any record. The operator who uploaded the file says so, and this
+ * step records it: the batch's rows become `paid_out`, and the batch is stamped
+ * as paid in the claim store.
+ *
+ * It refuses a batch that is not an export (another method paid it already), an
+ * open claim (its money may still be on its way) and one closed as never sent
+ * (there is no payment to record), and it verifies every row before writing any
+ * — a row it cannot prove belongs to this batch leaves the ledger untouched.
+ */
+async function confirmExportedBatch(batchId, { by = 'operator', note = null } = {}) {
+  const store = readPayoutClaims(process.cwd());
+  if (store.error) throw new Error(`PAYOUT_CLAIM_STORE_UNREADABLE: ${store.error}`);
+
+  const id = String(batchId ?? '').trim();
+  const claim = store.claims.find(record => String(record?.batch_id ?? '') === id);
+  if (!claim) throw new Error(`PAYOUT_BATCH_UNKNOWN: no payout claim records batch ${id || '(none given)'}`);
+  if (openPayoutClaims([claim]).length > 0) {
+    throw new Error(`PAYOUT_BATCH_UNRESOLVED: batch ${id} is still ${claim.status}; close its payout before confirming one`);
+  }
+  if (claim.resolution?.outcome === 'not_sent') {
+    throw new Error(`PAYOUT_BATCH_NEVER_SENT: batch ${id} was closed as never sent, so there is no payment to confirm`);
+  }
+  // Only a CSV rail leaves rows at `export_ready` for a human to pay. A claim
+  // another method paid is already settled by the rail that reported it, so an
+  // operator's word must not overwrite that provenance.
+  if (claim.execution?.method !== 'manual_csv') {
+    throw new Error(
+      `PAYOUT_BATCH_NOT_EXPORTED: batch ${id} was paid by ${claim.execution?.method ?? 'no recorded method'}, ` +
+      'not exported as a CSV; only an exported batch is confirmed by hand'
+    );
+  }
+
+  const base44 = await buildBase44Client();
+  const revenueConfig = getRevenueConfigFromEnv();
+  const revenueEntity = base44.asServiceRole.entities[revenueConfig.entityName];
+
+  // Read every row before writing any of them. A batch that cannot be
+  // confirmed whole is left whole, so a refusal never leaves a half-marked
+  // batch behind for a retry to interpret.
+  const rows = [];
+  const refused = [];
+  for (const rowId of (claim.revenue_event_ids ?? []).map(String)) {
+    let row;
+    try {
+      const found = await revenueEntity.filter({ id: rowId }, '-created_date', 1, 0);
+      row = Array.isArray(found) ? found[0] : null;
+    } catch (error) {
+      refused.push(`${rowId} (the ledger could not be read: ${error?.message ?? error})`);
+      continue;
+    }
+
+    if (!row) {
+      refused.push(`${rowId} (no longer in the ledger)`);
+      continue;
+    }
+    // Ownership comes first: another batch's row is not evidence for this one,
+    // even when it is already paid.
+    if (String(row.payout_batch_id ?? '') !== id) {
+      refused.push(`${rowId} (its payout batch is ${row.payout_batch_id ?? 'unrecorded'})`);
+      continue;
+    }
+    if (!rowPaidOut(row) && row.status !== 'export_ready') {
+      refused.push(`${rowId} (status ${row.status ?? 'unknown'}, not exported)`);
+      continue;
+    }
+    rows.push(row);
+  }
+
+  if (refused.length > 0) {
+    throw new Error(
+      `PAYOUT_BATCH_UNCONFIRMED: batch ${id} was not confirmed and no row was marked: ${refused.join(', ')}`
+    );
+  }
+
+  const confirmed = [];
+  const alreadyPaid = [];
+  for (const row of rows) {
+    if (rowPaidOut(row)) {
+      alreadyPaid.push(row.id);
+      continue;
+    }
+
+    const at = new Date().toISOString();
+    try {
+      await revenueEntity.update(row.id, {
+        ...row,
+        status: 'paid_out',
+        settled: true,
+        paid_out: true,
+        settled_at: at,
+        confirmed_at: at,
+        confirmed_by: by,
+        settlement_details: {
+          ...(row.settlement_details ?? {}),
+          method: row.settlement_details?.method ?? 'manual_csv',
+          paid_confirmed_by: by,
+          paid_confirmed_at: at,
+          ...(note ? { paid_confirmation_note: note } : {})
+        }
+      });
+      confirmed.push(row.id);
+    } catch (error) {
+      // Some rows are already paid_out and the batch is not recorded as paid;
+      // confirming it again skips them and finishes the rest.
+      throw new Error(
+        `PAYOUT_BATCH_PARTLY_CONFIRMED: batch ${id} marked ${confirmed.join(', ') || 'no row'} paid_out, but ` +
+        `${row.id} could not be (${error?.message ?? error}); the batch is not recorded as paid — ` +
+        'confirm it again to finish'
+      );
+    }
+  }
+
+  const recorded = confirmPayoutBatch(process.cwd(), id, { by, note });
+  if (!recorded.confirmed && recorded.reason !== 'already_confirmed') {
+    throw new Error(`PAYOUT_CONFIRMATION_NOT_RECORDED: ${recorded.reason}${recorded.error ? ` (${recorded.error})` : ''}`);
+  }
+
+  return {
+    batch_id: id,
+    rail: claim.rail,
+    confirmed,
+    already_paid: alreadyPaid,
+    claim: recorded.claim ?? claim
+  };
+}
+
+// ============================================================================
 // STATE UPDATES
 // ============================================================================
 
@@ -881,7 +1023,24 @@ export function getDaemonHealth() {
         currency: claim.currency,
         claimed_at: claim.claimed_at,
         error: claim.error ?? null
-      }))
+      })),
+      // Exported batches nobody has confirmed are the operator's queue: they
+      // are paid only once someone says the file was uploaded. A closed export
+      // has no resolution; `paid` and `not_sent` are both settled.
+      awaiting_confirmation: claims.claims
+        .filter(claim =>
+          claim.status === PAYOUT_CLAIM_CLOSED &&
+          claim.execution?.method === 'manual_csv' &&
+          !claim.resolution
+        )
+        .map(claim => ({
+          batch_id: claim.batch_id,
+          rail: claim.rail,
+          amount: claim.amount,
+          currency: claim.currency,
+          export_filename: claim.execution?.export_filename ?? null,
+          exported_at: claim.closed_at
+        }))
     },
     owner_accounts: Object.keys(OWNER_ACCOUNTS).map(key => ({
       type: key,
@@ -917,6 +1076,12 @@ export function emergencyStop({ reason = 'emergencyStop() called', by = 'daemon'
 /**
  * Manual trigger - forces immediate settlement check
  */
+/**
+ * Confirms that an exported (manual CSV) batch was paid, marking its rows
+ * `paid_out`. The only way an exported row stops being `export_ready`.
+ */
+export { confirmExportedBatch };
+
 export async function triggerManualSettlement() {
   const latch = emergencyStopState();
   if (state.emergencyStopped || latch.stopped) {
@@ -958,7 +1123,22 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     process.exit(1);
   }
 
-  if (process.argv.includes('--once')) {
+  if (process.argv.includes('--confirm-payout')) {
+    const index = process.argv.indexOf('--confirm-payout');
+    const batchId = process.argv[index + 1] ?? '';
+    const noteIndex = process.argv.indexOf('--note');
+    const note = noteIndex >= 0 ? process.argv[noteIndex + 1] ?? null : 'operator confirmed the exported payout was paid';
+    confirmExportedBatch(batchId, { note }).then(result => {
+      console.log(
+        `✅ Batch ${result.batch_id}: ${result.confirmed.length} row(s) marked paid_out` +
+        `${result.already_paid.length ? `, ${result.already_paid.length} already paid` : ''}.`
+      );
+      process.exit(0);
+    }).catch(error => {
+      console.error(`❌ ${error?.message ?? error}`);
+      process.exit(1);
+    });
+  } else if (process.argv.includes('--once')) {
     const latch = emergencyStopState();
     if (state.emergencyStopped || latch.stopped) {
       console.error(`⛔ ${emergencyStopMessage(latch)}`);
@@ -986,5 +1166,6 @@ export default {
   performSettlementCycle,
   getDaemonHealth,
   emergencyStop,
-  triggerManualSettlement
+  triggerManualSettlement,
+  confirmExportedBatch
 };

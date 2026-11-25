@@ -504,6 +504,170 @@ test('a batch the provider recorded as failed frees its rows to be paid', async 
     assert.equal(stub.hits.length, 0);
 });
 
+// ============================================================================
+// MANUAL CSV CONFIRMATION
+// ============================================================================
+
+/** Runs one cycle and returns the batch id its exported rows belong to. */
+async function exportBatch(eventId, amount = 19) {
+    resetClaims();
+    fs.rmSync(exportsDir, { recursive: true, force: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+    writeEvents([revenueEvent(eventId, amount)]);
+    await daemon.performSettlementCycle();
+    const [record] = readEvents();
+    assert.equal(record.status, 'export_ready');
+    return record.payout_batch_id;
+}
+
+test('an exported batch is confirmed paid by an explicit step, and only then', async () => {
+    const batchId = await exportBatch('evt-confirm-1');
+
+    // Exporting is not paying: the batch waits for the operator in health.
+    assert.deepEqual(
+        daemon.getDaemonHealth().payout_claims.awaiting_confirmation.map(batch => batch.batch_id),
+        [batchId]
+    );
+
+    const result = await daemon.confirmExportedBatch(batchId, { note: 'uploaded to Payoneer' });
+    assert.deepEqual(result.confirmed, ['evt-confirm-1']);
+    assert.deepEqual(result.already_paid, []);
+
+    const [paid] = readEvents();
+    assert.equal(paid.status, 'paid_out');
+    assert.equal(paid.settled, true);
+    assert.equal(paid.paid_out, true);
+    assert.equal(typeof paid.settled_at, 'string');
+    assert.equal(paid.confirmed_by, 'operator');
+    assert.equal(paid.settlement_details.paid_confirmation_note, 'uploaded to Payoneer');
+    assert.equal(paid.payout_batch_id, batchId, 'the payment stays tied to its batch');
+
+    const [claim] = claims();
+    assert.equal(claim.status, 'closed');
+    assert.equal(claim.resolution.outcome, 'paid');
+    assert.equal(claim.resolution.resolved_by, 'operator');
+    assert.deepEqual(daemon.getDaemonHealth().payout_claims.awaiting_confirmation, []);
+
+    // Confirmed money is never selected or exported again.
+    await daemon.performSettlementCycle();
+    assert.equal(readEvents()[0].status, 'paid_out');
+    assert.deepEqual(exportFiles(), [`payoneer_${batchId}.csv`]);
+    assert.equal(stub.hits.length, 0);
+});
+
+test('confirming the same batch twice records one payment', async () => {
+    const batchId = await exportBatch('evt-confirm-twice-1');
+
+    await daemon.confirmExportedBatch(batchId);
+    const again = await daemon.confirmExportedBatch(batchId);
+
+    assert.deepEqual(again.confirmed, []);
+    assert.deepEqual(again.already_paid, ['evt-confirm-twice-1']);
+    assert.equal(claims().filter(claim => claim.batch_id === batchId).length, 1);
+    assert.equal(readEvents()[0].status, 'paid_out');
+});
+
+test('a batch whose claim is still open is not confirmed as paid', async () => {
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    writeEvents([revenueEvent('evt-confirm-open-1', 19, {
+        status: 'export_ready',
+        payout_batch_id: batchId
+    })]);
+    writeClaims([claimRecord({ revenue_event_ids: ['evt-confirm-open-1'] })]);
+
+    await assert.rejects(daemon.confirmExportedBatch(batchId), /PAYOUT_BATCH_UNRESOLVED/);
+    assert.equal(readEvents()[0].status, 'export_ready', 'a payout in flight is not a payment');
+    assert.equal(claims()[0].resolution, undefined);
+});
+
+test('a batch closed as never sent has no payment to confirm', async () => {
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    writeEvents([revenueEvent('evt-confirm-never-1', 19, {
+        status: 'export_ready',
+        payout_batch_id: batchId
+    })]);
+    writeClaims([claimRecord({ revenue_event_ids: ['evt-confirm-never-1'] })]);
+    assert.equal(resolvePayoutClaim(tmp, batchId, { note: 'nothing arrived' }).resolved, true);
+
+    await assert.rejects(daemon.confirmExportedBatch(batchId), /PAYOUT_BATCH_NEVER_SENT/);
+    assert.equal(readEvents()[0].status, 'export_ready');
+});
+
+test('an unknown batch is refused instead of confirming untracked money', async () => {
+    resetClaims();
+    writeEvents([revenueEvent('evt-confirm-untracked-1', 19)]);
+
+    await assert.rejects(daemon.confirmExportedBatch(''), /PAYOUT_BATCH_UNKNOWN/);
+    await assert.rejects(daemon.confirmExportedBatch('BATCH_PAYONEER_ffffffffffffffffffffffff'), /PAYOUT_BATCH_UNKNOWN/);
+    assert.equal(readEvents()[0].status, 'VERIFIED');
+});
+
+test('a row the batch cannot prove refuses the whole batch without writing', async () => {
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    writeEvents([
+        revenueEvent('evt-confirm-mine-1', 19, { status: 'export_ready', payout_batch_id: batchId }),
+        // Another batch already owns this row: confirming the first batch must
+        // not mark it paid.
+        revenueEvent('evt-confirm-other-1', 19, {
+            status: 'export_ready',
+            payout_batch_id: 'BATCH_PAYONEER_111111111111111111111111'
+        })
+    ]);
+    writeClaims([claimRecord({
+        status: 'closed',
+        execution: { method: 'manual_csv', export_filename: 'payoneer_x.csv' },
+        revenue_event_ids: ['evt-confirm-mine-1', 'evt-confirm-other-1']
+    })]);
+
+    await assert.rejects(daemon.confirmExportedBatch(batchId), /PAYOUT_BATCH_UNCONFIRMED/);
+
+    const rows = readEvents();
+    assert.equal(rows.find(row => row.id === 'evt-confirm-other-1').status, 'export_ready');
+    assert.equal(rows.find(row => row.id === 'evt-confirm-mine-1').status, 'export_ready', 'a refused batch marks no row at all');
+    assert.equal(claims()[0].resolution, undefined, 'a refused batch is not recorded as paid');
+});
+
+test('a batch a payout rail already paid is not confirmed by hand', async () => {
+    resetClaims();
+    const batchId = claimRecord().batch_id;
+    writeEvents([revenueEvent('evt-confirm-rail-1', 19, {
+        status: 'paid_out',
+        settled: true,
+        paid_out: true,
+        payout_batch_id: batchId
+    })]);
+    writeClaims([claimRecord({
+        status: 'closed',
+        closed_at: hoursAgo(1),
+        execution: { method: 'payout_item_evidence', provider_batch_id: 'PAYPAL-BATCH-9' },
+        revenue_event_ids: ['evt-confirm-rail-1']
+    })]);
+
+    await assert.rejects(daemon.confirmExportedBatch(batchId), /PAYOUT_BATCH_NOT_EXPORTED/);
+    assert.equal(claims()[0].resolution, undefined, 'the rail\'s payment stands, an operator does not restamp it');
+});
+
+test('--confirm-payout marks an exported batch paid from the command line', async () => {
+    const batchId = await exportBatch('evt-confirm-cli-1');
+
+    const confirmed = await runDaemon(['--confirm-payout', batchId, '--note', 'uploaded']);
+    assert.equal(confirmed.status, 0, confirmed.stderr);
+    assert.match(confirmed.stdout, /marked paid_out/);
+    assert.equal(readEvents()[0].status, 'paid_out');
+    assert.equal(claims()[0].resolution.outcome, 'paid');
+
+    const unknown = await runDaemon(['--confirm-payout', 'BATCH_UNKNOWN']);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /PAYOUT_BATCH_UNKNOWN/);
+
+    const missing = await runDaemon(['--confirm-payout']);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /PAYOUT_BATCH_UNKNOWN/);
+});
+
 test('a persisted stop survives a restart and refuses --once until it is cleared', async () => {
     resetClaims();
     fs.rmSync(exportsDir, { recursive: true, force: true });

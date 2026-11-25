@@ -1,6 +1,21 @@
 # Changelog
 
 ## 2026-11-24
+- An exported payout batch can now be confirmed paid. A CSV rail stops at
+  `export_ready` — correct, because the file is an instruction to a human — but
+  nothing moved a row past that state, so uploaded batches never became
+  `paid_out` and the ledger held revenue paid forever as "exported". The
+  operator who uploads the file now records it: `confirmExportedBatch(batchId)`
+  in the daemon and `node auto_settlement_daemon.js --confirm-payout <batch_id>`
+  mark the batch's rows `paid_out`/`settled` with the confirmer, time and note,
+  and stamp the batch as paid in the claim store so a second confirmation is a
+  no-op. It refuses an unknown batch, a claim still open (its money may be on
+  its way), a batch closed as never sent (there is no payment to confirm), a
+  batch another rail paid (only an export waits for a human), and any row it
+  cannot prove belongs to this batch — and it checks every row before writing
+  any, so a refused batch is left whole, not half marked. `getDaemonHealth()`
+  now lists `payout_claims.awaiting_confirmation`, the exported batches still
+  waiting.
 - Two payout-rail bugs that could send an instruction nowhere are fixed. The
   Payoneer rail wrote `exports/…` without creating the directory, so on a fresh
   checkout it threw `ENOENT` after its payout claim was written, withholding the

@@ -9,6 +9,7 @@ import {
     PAYOUT_CLAIM_EXECUTED,
     claimPayoutBatch,
     claimedRevenueEventIds,
+    confirmPayoutBatch,
     openPayoutClaims,
     readPayoutClaims,
     recordPayoutOutcome,
@@ -119,4 +120,47 @@ test('only a confirmed non-send closes a claim and frees its rows', t => {
 
     // The rows are payable again, under the same deterministic batch id.
     assert.equal(claimPayoutBatch('/root', claim(), { env }).claimed, true);
+});
+
+test('only a closed export can be confirmed as paid, and only once', t => {
+    const { env } = tempStore(t);
+    claimPayoutBatch('/root', claim(), { env });
+
+    // Money may still be on its way: the claim is open.
+    const early = confirmPayoutBatch('/root', claim().batch_id, { by: 'owner' }, { env });
+    assert.equal(early.confirmed, false);
+    assert.equal(early.reason, 'claim_open');
+
+    recordPayoutOutcome('/root', claim().batch_id, {
+        status: PAYOUT_CLAIM_EXECUTED,
+        execution: { method: 'manual_csv', export_filename: 'payoneer_x.csv' }
+    }, { env });
+    recordPayoutOutcome('/root', claim().batch_id, { status: PAYOUT_CLAIM_CLOSED, error: null }, { env });
+
+    const confirmed = confirmPayoutBatch('/root', claim().batch_id, { by: 'owner', note: 'uploaded' }, { env });
+    assert.equal(confirmed.confirmed, true);
+    assert.equal(confirmed.claim.status, PAYOUT_CLAIM_CLOSED);
+    assert.equal(confirmed.claim.resolution.outcome, 'paid');
+    assert.equal(confirmed.claim.resolution.resolved_by, 'owner');
+    assert.equal(typeof confirmed.claim.resolution.at, 'string');
+    assert.equal(confirmed.claim.paid_at, undefined, 'the confirmation time lives once, in the resolution');
+    assert.equal(confirmed.claim.execution.export_filename, 'payoneer_x.csv', 'the exported file survives confirmation');
+
+    const again = confirmPayoutBatch('/root', claim().batch_id, {}, { env });
+    assert.equal(again.confirmed, false);
+    assert.equal(again.reason, 'already_confirmed');
+    assert.equal(again.claim.resolution.outcome, 'paid');
+
+    assert.equal(confirmPayoutBatch('/root', 'BATCH_UNKNOWN', {}, { env }).reason, 'claim_missing');
+});
+
+test('a claim closed as never sent cannot be confirmed as paid', t => {
+    const { env } = tempStore(t);
+    claimPayoutBatch('/root', claim(), { env });
+    resolvePayoutClaim('/root', claim().batch_id, { note: 'provider holds nothing' }, { env });
+
+    const refused = confirmPayoutBatch('/root', claim().batch_id, { by: 'owner' }, { env });
+    assert.equal(refused.confirmed, false);
+    assert.equal(refused.reason, 'never_sent');
+    assert.equal(refused.claim.resolution.outcome, 'not_sent');
 });

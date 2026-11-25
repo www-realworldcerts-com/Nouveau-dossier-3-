@@ -170,6 +170,38 @@ export function recordPayoutOutcome(root = process.cwd(), batchId = '', { status
 }
 
 /**
+ * Record that an exported batch was paid.
+ *
+ * A CSV rail stops at `export_ready`: the file is an instruction to a human, so
+ * the daemon cannot know the transfer happened and must neither call the row
+ * settled nor select it again. Only the operator can say so, and their
+ * confirmation is stamped here — on the already-closed claim — so that a second
+ * confirmation is a no-op instead of a second payment, and a batch closed as
+ * never sent has nothing to confirm.
+ */
+export function confirmPayoutBatch(root = process.cwd(), batchId = '', { by = null, note = null } = {}, { env = process.env } = {}) {
+    const store = readPayoutClaims(root, { env });
+    if (store.error) return { confirmed: false, reason: 'claim_store_unreadable', error: store.error };
+
+    const id = String(batchId ?? '').trim();
+    const existing = store.claims.find(claim => String(claim?.batch_id ?? '') === id);
+    if (!existing) return { confirmed: false, reason: 'claim_missing' };
+    // An open claim is money that may still be on its way: confirming a payment
+    // for it would record a payout the batch never reported.
+    if (OPEN_STATUSES.has(existing.status)) return { confirmed: false, reason: 'claim_open', claim: existing };
+    if (existing.resolution?.outcome === 'not_sent') return { confirmed: false, reason: 'never_sent', claim: existing };
+    if (existing.resolution?.outcome === 'paid') return { confirmed: false, reason: 'already_confirmed', claim: existing };
+
+    const next = {
+        ...existing,
+        resolution: { outcome: 'paid', note, resolved_by: by, at: new Date().toISOString() }
+    };
+    const claims = store.claims.map(claim => (claim === existing ? next : claim));
+    savePayoutClaims(store.path, claims);
+    return { confirmed: true, claim: next };
+}
+
+/**
  * Close a claim whose provider was confirmed to hold nothing. This is the only
  * way back to payable rows that reconciliation cannot prove: a claim whose
  * money may have moved stays open, because re-sending it is the failure this
